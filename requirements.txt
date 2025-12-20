@@ -1,0 +1,41 @@
+# Telegram bot framework (with webhook support)
+python-telegram-bot[webhooks]==20.3
+
+# Telegram client for channel monitoring
+telethon==1.34.0
+
+# Analytics and data processing
+pandas==2.1.4
+matplotlib==3.8.2
+openpyxl==3.1.2
+
+# Process monitoring
+psutil==5.9.6
+
+# Timezone support
+pytz==2024.1
+
+# HTTP & API dependencies
+httpx==0.24.1
+requests==2.31.0
+websocket-client==1.7.0
+
+# Environment variable management
+python-dotenv==1.0.0
+pytz==2023.3
+telethon==1.28.5
+
+
+
+# --- Optional / Safe upgrades ---
+# These packages are indirect dependencies used by httpx & requests.
+# They are pinned for build stability on Render.
+anyio==4.11.0
+h11==0.14.0
+idna==3.10
+urllib3==2.5.0
+certifi==2025.10.5
+charset-normalizer==3.4.3
+sniffio==1.3.1
+httpcore==0.17.3
+flask==3.0.0

@@ -1,0 +1,40 @@
+services:
+  - type: web
+    name: iqoptions-tradebot
+    env: python
+    plan: free
+    region: frankfurt
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python telegram_bot.py"
+    envVars:
+      # Sensitive credentials - add manually in Render dashboard
+      - key: IQ_EMAIL
+        sync: false
+      - key: IQ_PASSWORD
+        sync: false
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: ADMIN_ID
+        sync: false
+      - key: TELEGRAM_API_ID
+        sync: false
+      - key: TELEGRAM_API_HASH
+        sync: false
+      - key: SIGNAL_CHANNEL_ID
+        sync: false
+      
+      # Non-sensitive configuration - set with defaults
+      - key: HEALTH_CHECK_INTERVAL
+        value: "300"
+      - key: HEARTBEAT_TIMEOUT
+        value: "600"
+      - key: MAX_RESTART_ATTEMPTS
+        value: "5"
+      - key: RESTART_DELAY
+        value: "10"
+      - key: DATABASE_PATH
+        value: "trades.db"
+      - key: TIMEZONE
+        value: "Africa/Lagos"
+      - key: PREFERRED_TRADING_TYPE
+        value: "AUTO"

@@ -1,5 +1,20 @@
 import pandas as pd
 import numpy as np
+import logging
+from ml_utils import load_model, predict_signal, prepare_features
+
+logger = logging.getLogger(__name__)
+
+# Load AI Model
+try:
+    ai_model = load_model()
+    if ai_model:
+        logger.info("AI Model loaded successfully.")
+    else:
+        logger.warning("⚠️ No AI model found. AI filtering disabled.")
+except Exception as e:
+    logger.error(f"Failed to load AI model: {e}")
+    ai_model = None
 
 def wma(series, period):
     """Calculates Weighted Moving Average."""
@@ -8,7 +23,7 @@ def wma(series, period):
         raw=True
     )
 
-def analyze_strategy(candles_data):
+def analyze_strategy(candles_data, use_ai=True):
     """
     Analyzes candle data and returns a signal ('CALL', 'PUT', or None).
     Implements the 'Sniper' and 'MA Crossover' logic from newscript.txt.
@@ -77,7 +92,34 @@ def analyze_strategy(candles_data):
     ma_put = df['buffer1'].iloc[-1] < df['buffer2'].iloc[-1] and \
              df['buffer1'].iloc[-2] > df['buffer2'].iloc[-2]
              
-    if ma_call: return "CALL"
-    if ma_put: return "PUT"
+    signal = None
+    if ma_call: signal = "CALL"
+    if ma_put: signal = "PUT"
+    
+    # --- AI Confirmation ---
+    if signal and ai_model and use_ai:
+        # Prepare features for the *current* state
+        # We need to pass the DataFrame. prepare_features will re-calculate indicators.
+        # This is slightly inefficient but safe.
+        try:
+            df_features = prepare_features(df)
+            
+            # We need the last row (current candle) to predict
+            if not df_features.empty:
+                current_features = df_features.iloc[[-1]]
+                prediction = predict_signal(ai_model, current_features)
+                
+                if prediction == 0: # 0 = Loss predicted
+                    logger.info(f"[AI] REJECTED {signal} signal on {df.iloc[-1].get('time', 'unknown')}")
+                    return None
+                else:
+                    logger.info(f"[AI] APPROVED {signal} signal.")
+        except Exception as e:
+            logger.error(f"AI Prediction failed: {e}")
+            # Fallback: Allow signal if AI fails? or Block? 
+            # Let's allow it for now to avoid stopping trading on bugs.
+            pass
+
+    return signal
     
     return None

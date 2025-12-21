@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import logging
 from iqclient import IQOptionAPI
-from strategies import calculate_rsi, wma, calculate_adx, calculate_bollinger_bands
+from strategies import analyze_strategy
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -34,80 +34,37 @@ async def fetch_historical_data(api, asset, timeframe, count):
     return df
 
 def apply_strategy(df):
-    """Applies the strategy logic to the DataFrame (Vectorized)."""
-    
-    # --- 1. Indicators ---
-    df['trend_sma'] = df['close'].rolling(window=100).mean()
-    df['rsi'] = calculate_rsi(df['close'], 14)
-    df['adx'] = calculate_adx(df, 14)
-    df['bb_upper'], df['bb_lower'] = calculate_bollinger_bands(df['close'], 20, 2)
-    
-    df['sma_fast'] = df['close'].rolling(window=1).mean() # Close price
-    df['sma_slow'] = df['close'].rolling(window=34).mean()
-    df['buffer1'] = df['sma_fast'] - df['sma_slow']
-    df['buffer2'] = wma(df['buffer1'], 4)
-    
-    # --- 2. Market State Filters ---
-    is_uptrend = df['close'] > df['trend_sma']
-    is_downtrend = df['close'] < df['trend_sma']
-    
-    safe_call_rsi = (df['rsi'] > 40) & (df['rsi'] < 70)
-    safe_put_rsi = (df['rsi'] > 30) & (df['rsi'] < 60)
-    strong_trend = df['adx'] > 25
-    bb_width = (df['bb_upper'] - df['bb_lower']) / df['close']
-    decent_volatility = bb_width > 0.0005
-    
-    # --- 3. Strategy 1: MA Crossover ---
-    # Signal when Buffer1 crosses Buffer2
-    buf1 = df['buffer1']
-    buf2 = df['buffer2']
-    
-    ma_call = (buf1 > buf2) & (buf1.shift(1) < buf2.shift(1))
-    ma_put = (buf1 < buf2) & (buf1.shift(1) > buf2.shift(1))
-    
-    # --- 4. Strategy 2: Sniper Pattern ---
-    o = df['open']
-    c = df['close']
-    
-    # Shifted values for pattern recognition (o1 = previous candle, o2 = 2 candles ago...)
-    o1, c1 = o.shift(1), c.shift(1)
-    o2, c2 = o.shift(2), c.shift(2)
-    o3, c3 = o.shift(3), c.shift(3)
-    
-    sniper_call = (
-        (o3 < c3) & (o2 < c2) &       # Two Green candles
-        (o1 > c1) &                   # One Red candle (Pullback)
-        (c1 > o2) & (o1 > o2) &       # Weak pullback
-        (o < c)                       # Current Green (Resumption)
-    )
-    
-    sniper_put = (
-        (o3 > c3) & (o2 > c2) &       # Two Red candles
-        (o1 < c1) &                   # One Green candle (Pullback)
-        (c1 < o2) & (o1 < o2) &       # Weak pullback
-        (o > c)                       # Current Red (Resumption)
-    )
-    
-    # --- 5. Filter: Avoid Dojis (Indecision) ---
-    # Body must be at least 15% of the total candle range
-    body_size = (df['close'] - df['open']).abs()
-    total_range = df['max'] - df['min']
-    valid_candle = body_size > (total_range * 0.15)
-    
-    # --- 5. Combine Signals ---
+    """
+    Applies the strategy logic to the DataFrame by iterating and calling
+    strategies.analyze_strategy for each candle (simulating live processing).
+    """
     df['signal'] = 0
     
-    # Priority: Sniper > MA
-    # Note: We use 'loc' to apply signals where filters match
+    # analyze_strategy requires at least ~35 candles for SMA/WMA calculation
+    min_candles = 35 
     
-    # MA Signals
-    df.loc[ma_call & is_uptrend & safe_call_rsi & valid_candle & strong_trend & decent_volatility, 'signal'] = 1   # CALL
-    df.loc[ma_put & is_downtrend & safe_put_rsi & valid_candle & strong_trend & decent_volatility, 'signal'] = -1  # PUT
+    # Convert DataFrame to a list of dicts once for easier slicing if needed,
+    # or just slice DataFrame. analyze_strategy takes "candles_data" (list/df).
+    # Since analyze_strategy does `df = pd.DataFrame(candles_data)`, passing a list of dicts is safer/standard.
+    records = df.to_dict('records')
     
-    # Sniper Signals (Overwrite MA if present)
-    df.loc[sniper_call & is_uptrend & valid_candle & strong_trend & decent_volatility, 'signal'] = 1
-    df.loc[sniper_put & is_downtrend & valid_candle & strong_trend & decent_volatility, 'signal'] = -1
-    
+    print("Analyzing candles...")
+    for i in range(min_candles, len(df)):
+        # Pass the history up to index 'i' (inclusive)
+        # We need to simulate that 'i' is the *current forming* candle or the *just closed* candle?
+        # In live trading, we usually analyze closed candles or the current forming one.
+        # analyze_strategy looks at df.iloc[-1] as "curr" (current forming).
+        
+        # Taking slice [0 : i+1] means 'records[i]' is the last element (current).
+        history_slice = records[:i+1]
+        
+        signal = analyze_strategy(history_slice)
+        
+        if signal == "CALL":
+            df.at[i, 'signal'] = 1
+        elif signal == "PUT":
+            df.at[i, 'signal'] = -1
+            
     return df
 
 def simulate_trades(df, max_gales=2):
@@ -175,10 +132,10 @@ async def main():
     api = IQOptionAPI()
     await api._connect()
     
-    asset = "EURUSD-OTC"
+    asset = "GBPUSD-OTC"
     timeframe = 60 # 1 minute
     count = 1000   # Number of candles to test
-    max_gales = 1  # Reduced to 1 to improve PnL (Gale 2 was unprofitable)
+    max_gales = 0  # Testing without Martingale
     
     df = await fetch_historical_data(api, asset, timeframe, count)
     if df is None: return
@@ -203,15 +160,15 @@ async def main():
     gale_counts = trades['gale_level'].value_counts().sort_index()
     
     print(f"\n{'='*40}")
-    print(f"📊 BACKTEST REPORT: {asset}")
+    print(f"BACKTEST REPORT: {asset}")
     print(f"{'='*40}")
     print(f"Timeframe:      {timeframe}s")
     print(f"Candles:        {len(df)}")
     print(f"Total Trades:   {total_trades}")
-    print(f"✅ Wins:         {wins}")
-    print(f"❌ Losses:       {losses}")
-    print(f"🏆 Win Rate:     {win_rate:.2f}%")
-    print(f"💰 Est. PnL:     ${total_pnl:.2f}")
+    print(f"Wins:           {wins}")
+    print(f"Losses:         {losses}")
+    print(f"Win Rate:       {win_rate:.2f}%")
+    print(f"Est. PnL:       ${total_pnl:.2f}")
     print(f"{'-'*40}")
     print("Martingale Breakdown:")
     for g, count in gale_counts.items():
@@ -235,7 +192,7 @@ async def main():
             export_df = export_df[['time', 'trade_action', 'open', 'close', 'result', 'gale_level', 'pnl', 'cumulative_pnl']]
             
             export_df.to_excel(filename, index=False)
-            print(f"\n💾 Detailed report saved to: {filename}")
+            print(f"\nDetailed report saved to: {filename}")
         except Exception as e:
             logger.error(f"Failed to save Excel report: {e}")
 

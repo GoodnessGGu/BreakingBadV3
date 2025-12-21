@@ -1,0 +1,114 @@
+import asyncio
+import pandas as pd
+import logging
+from iqclient import IQOptionAPI
+from strategies import analyze_strategy
+from ml_utils import prepare_features
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+async def collect_and_label_data(api, asset, count=5000, timeframe=60):
+    """
+    Fetches data, runs the strategy to find signals, and labels them (Win/Loss).
+    """
+    logger.info(f"Fetching {count} candles for {asset}...")
+    candles = api.get_candle_history(asset, count, timeframe)
+    
+    if not candles:
+        logger.error("No candles received.")
+        return None
+
+    # Convert to DataFrame
+    df = pd.DataFrame(candles)
+    cols = ['open', 'close', 'min', 'max', 'volume']
+    for c in cols:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c])
+            
+    if 'from' in df.columns:
+        df['time'] = pd.to_datetime(df['from'], unit='s')
+        
+    # --- 1. Prepare Features (RSI, Bollinger, etc.) ---
+    # We do this on the whole DF first for efficiency
+    df_features = prepare_features(df)
+    
+    # Re-align original candles to feature DF (features might drop initial rows due to NaN)
+    # df_features contains the indicators + original columns
+    
+    # --- 2. Iterate and Find Signals ---
+    labeled_data = []
+    
+    records = df_features.to_dict('records')
+    min_candles = 35 # Minimum required by strategy
+    
+    logger.info("Labeling data...")
+    for i in range(min_candles, len(records) - 1):
+        # Current candle at 'i'. We want to see if strategy gives a signal at 'i'
+        # Strategy input: History up to 'i'
+        history_slice = records[:i+1]
+        
+        signal = analyze_strategy(history_slice, use_ai=False)
+        
+        if signal:
+            # Check Outcome
+            # Signal at 'i' means we trade on 'i+1'
+            # If confirmed at close of 'i', we enter Open of 'i+1' or immediately.
+            # Usually simplified: Compare Close of 'i' vs Close of 'i+1'? 
+            # Or Open 'i+1' vs Close 'i+1'?
+            # strategies.py usually implies entering on next candle.
+            
+            entry_candle = records[i] # Signal generated here
+            next_candle = records[i+1] # Trade result here
+            
+            # Simple Outcome: 
+            # CALL Win: Close(i+1) > Open(i+1)
+            # PUT Win: Close(i+1) < Open(i+1)
+            
+            is_win = False
+            if signal == "CALL":
+                is_win = next_candle['close'] > next_candle['open']
+            elif signal == "PUT":
+                is_win = next_candle['close'] < next_candle['open']
+                
+            # Create data point
+            # We want the MODEL to predict using features from `entry_candle` (i)
+            # Target is `is_win`
+            
+            row = entry_candle.copy()
+            row['signal'] = signal
+            row['outcome'] = 1 if is_win else 0
+            
+            labeled_data.append(row)
+            
+    if not labeled_data:
+        logger.warning(f"No signals found in {len(df)} candles.")
+        return None
+        
+    logger.info(f"Found {len(labeled_data)} training examples.")
+    return pd.DataFrame(labeled_data)
+
+async def main():
+    api = IQOptionAPI()
+    await api._connect()
+    
+    # Collect data for a few assets to generalize better
+    assets = ["EURUSD-OTC", "USDJPY-OTC", "GBPUSD-OTC"]
+    all_data = []
+    
+    for asset in assets:
+        df = await collect_and_label_data(api, asset, count=10000)
+        if df is not None:
+             df['asset'] = asset
+             all_data.append(df)
+    
+    if all_data:
+        final_df = pd.concat(all_data, ignore_index=True)
+        final_df.to_csv("training_data.csv", index=False)
+        logger.info(f"Saved {len(final_df)} total records to training_data.csv")
+    else:
+        logger.error("Failed to collect any data.")
+
+if __name__ == "__main__":
+    asyncio.run(main())

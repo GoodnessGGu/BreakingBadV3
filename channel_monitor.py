@@ -11,6 +11,7 @@ from settings import config, TIMEZONE_AUTO
 from iqclient import run_trade
 from signal_parser import parse_signals_from_text
 from channel_signal_parser import parse_channel_signal, is_signal_message
+from strategies import confirm_trade_with_ai
 
 logger = logging.getLogger(__name__)
 
@@ -239,6 +240,27 @@ class ChannelMonitor:
                     await self.notification_callback(msg)
 
             api = getattr(self, 'api_instance', None) or getattr(self, 'iq_api', None) or self.api_instance
+            
+            # --- AI Check ---
+            # Attempt to verify signal with AI
+            try:
+                # Need to use specific API methods to get candles. 
+                # Assuming api object has get_candle_history (from iqclient wrapper)
+                if config.use_ai_filter and hasattr(api, "get_candle_history"):
+                     # Fetch 60 candles to be safe for feature calc (SMA50 etc)
+                     # Using 60s timeframe as default for AI check
+                     candles = api.get_candle_history(signal['pair'], 60, 60)
+                     if candles:
+                         is_approved = confirm_trade_with_ai(candles, signal['direction'])
+                         if not is_approved:
+                             msg = f"🛑 AI Filter Blocked: {signal.get('pair')} {signal.get('direction')} (Conditions Unfavorable)"
+                             logger.info(msg)
+                             if self.notification_callback:
+                                 await self.notification_callback(msg)
+                             return # STOP EXECUTION
+            except Exception as e:
+                logger.warning(f"⚠️ AI Check failed (proceeding anyway): {e}")
+            # ----------------
 
             try:
                 result = await run_trade(api, signal['pair'], signal['direction'], signal['expiry'], config.trade_amount, notification_callback=trade_notification)

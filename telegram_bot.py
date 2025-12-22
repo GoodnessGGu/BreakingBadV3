@@ -11,6 +11,7 @@ from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     ContextTypes, filters
 )
+from telegram.request import HTTPXRequest
 from telegram import ReplyKeyboardMarkup, KeyboardButton
 from iqclient import IQOptionAPI, run_trade
 from signal_parser import parse_signals_from_text, parse_signals_from_file
@@ -212,7 +213,8 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🕒 Uptime: {uptime_str}\n\n"
             f"⚙️ *Settings:*\n"
             f"💵 Amount: ${config.trade_amount} | 🔄 Gales: {config.max_martingale_gales}\n"
-            f"⏸️ Paused: {config.paused} | 🚫 Suppress: {config.suppress_overlapping_signals}\n\n"
+            f"⏸️ Paused: {config.paused} | 🚫 Suppress: {config.suppress_overlapping_signals}\n"
+            f"🧠 AI Filter: {'ON' if config.use_ai_filter else 'OFF'}\n\n"
             f"📈 *Open Trades:*{trades_info}"
         )
         await update.message.reply_text(msg, parse_mode="Markdown")
@@ -445,6 +447,22 @@ async def toggle_suppression(update: Update, context: ContextTypes.DEFAULT_TYPE)
     else:
         await update.message.reply_text("⚠️ Invalid option. Use 'on' or 'off'.")
 
+async def toggle_ai(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        status = "ON" if config.use_ai_filter else "OFF"
+        await update.message.reply_text(f"🧠 AI Filter is currently {status}.\nUsage: /toggle_ai <on/off>")
+        return
+    
+    mode = context.args[0].lower()
+    if mode in ['on', 'true', '1', 'yes']:
+        config.use_ai_filter = True
+        await update.message.reply_text("✅ AI Filter ENABLED. Signals will be verified by model.")
+    elif mode in ['off', 'false', '0', 'no']:
+        config.use_ai_filter = False
+        await update.message.reply_text("⚠️ AI Filter DISABLED. Signals will be executed blindly.")
+    else:
+        await update.message.reply_text("⚠️ Invalid option. Use 'on' or 'off'.")
+
 async def toggle_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     modes = ['AUTO', 'BINARY', 'DIGITAL']
     current = config.preferred_trading_type
@@ -612,7 +630,9 @@ async def notify_admin_startup(app):
 
 # --- Main Entrypoint ---
 def main():
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    # Increase timeout to handle network lag
+    t_request = HTTPXRequest(connect_timeout=20.0, read_timeout=20.0, write_timeout=20.0)
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).request(t_request).build()
 
     # Commands
     app.add_handler(CommandHandler("start", start))
@@ -634,6 +654,7 @@ def main():
     app.add_handler(CommandHandler("resume", resume_bot))
     app.add_handler(CommandHandler("resume", resume_bot))
     app.add_handler(CommandHandler("suppress", toggle_suppression))
+    app.add_handler(CommandHandler("toggle_ai", toggle_ai))
     app.add_handler(CommandHandler("mode", toggle_mode))
     app.add_handler(CommandHandler("shutdown", shutdown_bot))
     

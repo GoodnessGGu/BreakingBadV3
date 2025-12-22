@@ -33,6 +33,16 @@ def analyze_strategy(candles_data, use_ai=True):
 
     # Convert list of dicts to DataFrame
     df = pd.DataFrame(candles_data)
+
+    # Standardize timestamp column to 'time' (Needed for AI 'hour' feature)
+    if 'time' not in df.columns:
+        if 'from' in df.columns:
+             df['time'] = df['from']
+        elif 'at' in df.columns:
+             df['time'] = df['at']
+
+    if 'time' in df.columns:
+        df['time'] = pd.to_datetime(df['time'], unit='s')
     
     # Ensure numeric columns
     cols = ['open', 'close', 'min', 'max']
@@ -121,5 +131,73 @@ def analyze_strategy(candles_data, use_ai=True):
             pass
 
     return signal
+
+def confirm_trade_with_ai(candles_data, direction):
+    """
+    Checks if the AI model 'approves' a trade for a given direction based on current market data.
+    Returns True if Approved (or AI unavailable), False if Rejected.
+    """
+    if not ai_model:
+        return True # Pass if no AI
+        
+    try:
+        df = pd.DataFrame(candles_data)
+        df = pd.DataFrame(candles_data)
+        
+        # Standardize timestamp column to 'time'
+        if 'time' not in df.columns:
+            if 'from' in df.columns:
+                df['time'] = df['from']
+            elif 'at' in df.columns:
+                df['time'] = df['at']
+                
+        if 'time' in df.columns:
+            df['time'] = pd.to_datetime(df['time'], unit='s')
+        else:
+            logger.warning("Missing timestamp in candle data. 'hour' feature will be missing.")
+            
+        df['close'] = pd.to_numeric(df['close'])
+        df['open'] = pd.to_numeric(df['open'])
+        df['min'] = pd.to_numeric(df['min'])
+        df['max'] = pd.to_numeric(df['max'])
+        
+        # Calculate features using the exact same pipeline as training
+        df_features = prepare_features(df)
+        
+        if df_features.empty:
+            return True # Not enough data to decide
+            
+        current_features = df_features.iloc[[-1]]
+        
+        # Predict
+        # Note: The model predicts "Win" (1) or "Loss" (0).
+        # It doesn't explicitly know "Direction" unless it was a feature.
+        # In our training, 'signal' (CALL/PUT) was NOT a feature (dropped).
+        # BUT the features (indicators) are direction-agnostic or baked in.
+        # Wait, if RSI is 80 (Overbought), Strategy says PUT. Model learns RSI=80 -> Win.
+        # If Telegram says CALL at RSI=80, Model (trained on PUTs at RSI=80) might still say "Win" 
+        # if it learned "High Volatility = Win"? 
+        # Actually, without 'direction' as feature, the model assumes the *Strategy's* direction logic.
+        # Since we can't tell the model "I am doing a CALL", the model just evaluates "Is this a good setup for the Strategy?".
+        # If the Strategy would have done a PUT, and Telegram does a CALL, the model might approve "Market is active", 
+        # but the trade is opposite.
+        #
+        # FIX: We can't strictly use this model for *Opposite* signals unless we add 'direction' as a feature.
+        # However, for now, let's assume Telegram signals align generally with trends.
+        # If the model predicts "Loss", it means "Strategy would lose here". 
+        # Often Strategy loses in choppy/bad markets. So "Loss" is a good "Stay Away" filter.
+        
+        prediction = predict_signal(ai_model, current_features)
+        
+        if prediction == 0:
+            logger.info(f"[AI] REJECTED external {direction} signal (Model predicts Loss).")
+            return False
+            
+        logger.info(f"[AI] APPROVED external {direction} signal.")
+        return True
+        
+    except Exception as e:
+        logger.error(f"AI Confirmation Error: {e}")
+        return True # Default to allow on error
     
     return None

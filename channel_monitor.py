@@ -12,6 +12,7 @@ from iqclient import run_trade
 from signal_parser import parse_signals_from_text
 from channel_signal_parser import parse_channel_signal, is_signal_message
 from strategies import confirm_trade_with_ai
+from smart_trade import smart_trade_manager
 
 logger = logging.getLogger(__name__)
 
@@ -198,17 +199,33 @@ class ChannelMonitor:
             if self.notification_callback:
                 await self.notification_callback(msg)
 
-        # Try to pass a notification callback if run_trade supports it,
-        # otherwise fall back to basic call.
+        # Try to pass a notification callback
         api = getattr(self, 'api_instance', None) or getattr(self, 'iq_api', None) or self.api_instance
 
+        # --- Smart Martingale Integration ---
+        base_amount = config.trade_amount
+        trade_amount, max_gales = smart_trade_manager.get_trade_details(pair, base_amount)
+
         try:
-            # Assuming run_trade is imported from iqclient
-            # Verify if run_trade accepts max_gales? Yes.
-            result = await run_trade(api, pair, direction, expiry, config.trade_amount, notification_callback=trade_notification)
+            # Execute
+            result = await run_trade(
+                api, 
+                pair, 
+                direction, 
+                expiry, 
+                trade_amount, 
+                max_gales=max_gales, 
+                notification_callback=trade_notification
+            )
+            
+            # Result Handler
+            trade_outcome = result.get("result", "ERROR")
+            if trade_outcome in ["WIN", "LOSS"]:
+                smart_trade_manager.update_result(pair, trade_outcome)
+            
         except TypeError:
-            # run_trade doesn't accept notification_callback in some versions?
-            result = await run_trade(api, pair, direction, expiry, config.trade_amount)
+            # Fallback for old run_trade signature
+            result = await run_trade(api, pair, direction, expiry, trade_amount)
 
         return result
 
@@ -232,6 +249,12 @@ class ChannelMonitor:
                 if self.notification_callback:
                     await self.notification_callback(f"⏳ Waiting {int(delay)}s until {entry_time.strftime('%I:%M %p')} to enter trade...")
                 await asyncio.sleep(delay)
+            elif delay < -60: # Allow 60s buffer for network lag, otherwise reject
+                msg = f"⚠️ Signal Expired: Time {entry_time.strftime('%H:%M')} has passed. (Delay: {int(abs(delay))}s)"
+                logger.warning(msg)
+                if self.notification_callback:
+                    await self.notification_callback(msg)
+                return # Skip execution
 
             logger.info(f"🚀 Executing trade: {signal.get('pair')} {signal.get('direction')}")
 

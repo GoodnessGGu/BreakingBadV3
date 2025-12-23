@@ -48,7 +48,8 @@ class TradingConfig:
         self.account_type = DEFAULT_ACCOUNT_TYPE
         # Optimization: AUTO, DIGITAL, BINARY
         self.preferred_trading_type = os.getenv("PREFERRED_TRADING_TYPE", "AUTO").upper()
-        self.use_ai_filter = True # Default to True
+        self.use_ai_filter = True # Filter trades with AI model?
+        self.smart_martingale = False # Wait for new signal before martingale?
 
     def __str__(self):
         return (f"TradingConfig(amount={self.trade_amount}, "

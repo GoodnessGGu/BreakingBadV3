@@ -90,10 +90,16 @@ def parse_time_12h(hour: int, minute: int, am_pm: str) -> datetime:
     current = now()
     entry_time = current.replace(hour=hour, minute=minute, second=0, microsecond=0)
     
-    # If time is in the past, assume tomorrow
+    # If time is in the past...
     if entry_time < current:
-        from datetime import timedelta
-        entry_time += timedelta(days=1)
+        delta = (current - entry_time).total_seconds()
+        # If signal is less than 30 mins late, assume it's for TODAY (just delayed)
+        if delta < 1800: 
+            pass 
+        else:
+            # Otherwise assume it's scheduled for tomorrow
+            from datetime import timedelta
+            entry_time += timedelta(days=1)
     
     return entry_time
 

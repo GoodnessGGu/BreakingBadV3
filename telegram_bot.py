@@ -18,7 +18,10 @@ from signal_parser import parse_signals_from_text, parse_signals_from_file
 from settings import config, TIMEZONE_MANUAL, update_env_variable
 from keep_alive import keep_alive
 from channel_monitor import ChannelMonitor
-from strategies import analyze_strategy
+from strategies import analyze_strategy, reload_ai_model
+from collect_data import run_collection_cycle
+from ml_utils import train_model
+from smart_trade import smart_trade_manager
 import pytz
 
 # --- Logging ---
@@ -26,6 +29,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
+logging.getLogger("httpx").setLevel(logging.WARNING) # Suppress polling noise
 logger = logging.getLogger(__name__)
 
 # --- Environment Variables ---
@@ -87,30 +91,41 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     keyboard = [
         [KeyboardButton("📊 Status"), KeyboardButton("💰 Balance")],
-        [KeyboardButton("📡 Auto-Monitor"), KeyboardButton("🔄 Switch Channel")],
-        [KeyboardButton("⏸ Pause"), KeyboardButton("▶ Resume"), KeyboardButton("🤖 Auto-Trade")],
-        [KeyboardButton("🔄 Toggle Mode"), KeyboardButton("⚙️ Settings"), KeyboardButton("/autotrade")],
+        [KeyboardButton("🧠 AI Toggle"), KeyboardButton("🛡️ Smart Gale"), KeyboardButton("🧠 Retrain")],
+        [KeyboardButton("⏸ Pause"), KeyboardButton("▶ Resume"), KeyboardButton("⚙️ Settings")],
+        [KeyboardButton("📡 Monitor"), KeyboardButton("🔄 Channel"), KeyboardButton("🔄 Mode")],
         [KeyboardButton("ℹ️ Help")]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     
-    await update.message.reply_text("🤖 Bot is online and ready!", reply_markup=reply_markup)
+    await update.message.reply_text("🤖 *Breaking Bad Bot v3* Online!\nReady to cook. 💎", reply_markup=reply_markup, parse_mode="Markdown")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
-        "ℹ️ *Bot Commands*\n\n"
-        "🖱 *Quick Actions:*\n"
-        "Use the keyboard buttons for common tasks.\n\n"
-        "🛠 *Configuration:*\n"
-        "`/set_amount <n>` - Set trade amount\n"
-        "`/set_account <type>` - REAL, DEMO, TOURNAMENT\n"
-        "`/set_martingale <n>` - Max martingale steps\n"
-        "`/suppress <on/off>` - Toggle signal suppression\n"
-        "`/pause` / `/resume` - Control trading\n\n"
-        "📡 *Signals:*\n"
-        "`/signals <text>` - Parse text signals\n\n"
-        "🤖 *Auto-Trade:*\n`/autotrade <asset> <timeframe>` - Start strategy\n`/stoptrade <asset>` - Stop strategy"
-        "Or upload a text file with signals."
+        "ℹ️ *IQ Bot Command Reference*\n\n"
+        "🤖 *Core & Automation*\n"
+        "• /start - Wake up the bot\n"
+        "• /autotrade <ASSET> <TF> - Start strategy\n"
+        "• /stoptrade <ASSET> - Stop strategy\n"
+        "• /retrain - 🧠 Force AI Retraining\n"
+        "• /toggle\\_ai <on/off> - 🧠 AI Filter\n"
+        "• /smart\\_gale <on/off> - 🛡️ Signal-Based Martingale\n\n"
+        "⚙️ *Configuration*\n"
+        "• /set\\_amount <n> - Trade Amount\n"
+        "• /set\\_martingale <n> - Max Gales\n"
+        "• /settings - View current config\n"
+        "• /mode <BINARY/DIGITAL> - Switch mode\n\n"
+        "📡 *Signals*\n"
+        "• /switch\\_channel - Toggle Monitor Channel\n"
+        "• /signals <text> - Parse signal text\n"
+        "• /suppress <on/off> - Prevent overlap\n\n"
+        "🕹️ *Controls*\n"
+        "• /pause - Stop taking trades\n"
+        "• /resume - Resume trading\n"
+        "• /status - System Check\n"
+        "• /balance - Check Funds\n"
+        "• /refill - Refill Practice\n"
+        "• /shutdown - Kill Bot"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
 
@@ -134,24 +149,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status(update, context)
     elif text == "💰 Balance":
         await balance(update, context)
+    elif text == "📡 Monitor":
+        # Just show status of monitor
+        mon_status = "ACTIVE" if monitor.is_running else "INACTIVE"
+        curr_chan = CHANNELS.get(active_channel_key, "Unknown")
+        await update.message.reply_text(f"📡 *Auto-Monitor Status*: {mon_status}\n🎧 Listening to: `{curr_chan}`", parse_mode="Markdown")
+        
+    elif text == "🔄 Channel":
+        await switch_channel(update, context)
+    elif text == "🔄 Mode":
+        await toggle_mode(update, context)
+        
+    elif text == "🧠 AI Toggle":
+        await toggle_ai(update, context)
+    elif text == "🛡️ Smart Gale":
+        await toggle_smart_gale(update, context)
+    elif text == "🧠 Retrain":
+        await retrain_command(update, context)
+        
     elif text == "⏸ Pause":
         await pause_bot(update, context)
     elif text == "▶ Resume":
         await resume_bot(update, context)
-    elif text == "🤖 Auto-Trade":
-        await list_auto_trades(update, context)
-    elif text == "📡 Auto-Monitor":
-        if not monitor:
-            await update.message.reply_text("❌ Auto-Monitor credentials (API_ID/HASH) not found in `.env`")
-        else:
-            mon_status = "ACTIVE" if monitor.is_running else "INACTIVE"
-            curr_chan = CHANNELS.get(active_channel_key, "Unknown")
-            await update.message.reply_text(f"📡 *Auto-Monitor Status*: {mon_status}\n🎧 Listening to: `{curr_chan}`", parse_mode="Markdown")
-            
-    elif text == "🔄 Switch Channel":
-        await switch_channel(update, context)
-    elif text == "🔄 Toggle Mode":
-        await toggle_mode(update, context)
         
     elif text == "⚙️ Settings":
         await settings_info(update, context)
@@ -449,8 +468,10 @@ async def toggle_suppression(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def toggle_ai(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        status = "ON" if config.use_ai_filter else "OFF"
-        await update.message.reply_text(f"🧠 AI Filter is currently {status}.\nUsage: /toggle_ai <on/off>")
+        # Toggle if no args
+        config.use_ai_filter = not config.use_ai_filter
+        status = "ENABLED ✅" if config.use_ai_filter else "DISABLED ❌"
+        await update.message.reply_text(f"🧠 AI Filter toggled: {status}")
         return
     
     mode = context.args[0].lower()
@@ -581,6 +602,25 @@ async def start_auto_trade(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(f"✅ Started Auto-Trade strategy for *{asset}* ({timeframe}s)", parse_mode="Markdown")
 
+async def toggle_smart_gale(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Toggle Smart Martingale mode."""
+    if not context.args:
+        # Toggle if no args
+        config.smart_martingale = not config.smart_martingale
+        status = "ENABLED ✅" if config.smart_martingale else "DISABLED ❌"
+        await update.message.reply_text(f"🧠 Smart Martingale toggled: {status}")
+        return
+
+    mode = context.args[0].lower()
+    if mode in ['on', 'true', '1', 'yes']:
+        config.smart_martingale = True
+        await update.message.reply_text("✅ Smart Martingale ENABLED (Signal-Based Recovery).")
+    elif mode in ['off', 'false', '0', 'no']:
+        config.smart_martingale = False
+        await update.message.reply_text("🚫 Smart Martingale DISABLED (Immediate Recovery).")
+    else:
+        await update.message.reply_text("⚠️ Invalid option. Use 'on' or 'off'.")
+
 async def stop_auto_trade(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("⚠️ Usage: /stoptrade <ASSET>")
@@ -599,6 +639,60 @@ async def list_auto_trades(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active = list(active_auto_trades.keys())
     msg = f"🤖 *Active Strategies:*\n{', '.join(active) if active else 'None'}"
     await update.message.reply_text(msg, parse_mode="Markdown")
+
+# --- Auto-Retraining ---
+async def retrain_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Trigger manual retraining."""
+    await update.message.reply_text("🧠 Starting Auto-Retraining Sequence...\n1. Collecting Data... (This takes a minute)")
+    
+    # Run collection
+    success = await run_collection_cycle(api)
+    if not success:
+        await update.message.reply_text("❌ Data collection failed.")
+        return
+
+    await update.message.reply_text("2. Training Model (Gradient Boosting)...")
+    
+    # Train in thread to avoid blocking bot
+    loop = asyncio.get_running_loop()
+    try:
+        await loop.run_in_executor(None, train_model)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Training failed: {e}")
+        return
+    
+    await update.message.reply_text("3. Reloading Brain...")
+    reload_success = reload_ai_model()
+    
+    if reload_success:
+        await update.message.reply_text("✅ Retraining Complete! Model updated.")
+    else:
+        await update.message.reply_text("⚠️ Retraining finished but reload failed.")
+
+async def start_auto_retrain_loop(context: ContextTypes.DEFAULT_TYPE):
+    """Background task to retrain every 6 hours."""
+    while True:
+        logger.info("⏳ Auto-Retrain Timer: Waiting 6 hours...")
+        await asyncio.sleep(6 * 60 * 60) # 6 hours
+        
+        logger.info("🧠 Auto-Retrain Triggered!")
+        try:
+            success = await run_collection_cycle(api)
+            if success:
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, train_model)
+                reload_ai_model()
+                logger.info("✅ Auto-Retrain Cycle Complete.")
+        except Exception as e:
+            logger.error(f"Auto-Retrain Failed: {e}")
+
+async def connection_watchdog(context: ContextTypes.DEFAULT_TYPE):
+    """Checks and restores connection periodically."""
+    while True:
+        await asyncio.sleep(30) # Check every 30s
+        if not api.check_connect():
+            logger.warning("🔍 Watchdog: Connection lost. Restoring...")
+            await api.ensure_connect()
 
 # --- Startup Notification ---
 async def notify_admin_startup(app):
@@ -628,10 +722,27 @@ async def notify_admin_startup(app):
     except Exception as e:
         logger.error(f"❌ Failed to send startup notification: {e}")
 
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Log the error and be gentle with Timeouts."""
+    from telegram.error import TimedOut, NetworkError
+    
+    try:
+        raise context.error
+    except (TimedOut, NetworkError):
+        # Just log a warning, don't spam stack trace
+        logger.warning(f"📉 Network Error/Timeout: {context.error}")
+    except Exception:
+        logger.error(f"❌ Exception while handling an update:", exc_info=context.error)
+
 # --- Main Entrypoint ---
 def main():
-    # Increase timeout to handle network lag
-    t_request = HTTPXRequest(connect_timeout=20.0, read_timeout=20.0, write_timeout=20.0)
+    # Resilient Request Config - Increased to handle network jitter
+    t_request = HTTPXRequest(
+        connection_pool_size=16, 
+        read_timeout=60.0, 
+        write_timeout=30.0, 
+        connect_timeout=30.0
+    )
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).request(t_request).build()
 
     # Commands
@@ -660,6 +771,10 @@ def main():
     
     app.add_handler(CommandHandler("autotrade", start_auto_trade))
     app.add_handler(CommandHandler("stoptrade", stop_auto_trade))
+    app.add_handler(CommandHandler("retrain", retrain_command)) # Manual trigger
+    app.add_handler(CommandHandler("smart_gale", toggle_smart_gale))
+
+    app.add_error_handler(error_handler)
 
     logger.info("🌐 Initializing bot...")
 
@@ -690,6 +805,14 @@ def main():
             default_chan = CHANNELS.get(active_channel_key)
             if monitor and default_chan:
                 asyncio.create_task(monitor.start(default_chan))
+            
+            # Start Auto-Retraining Loop
+            asyncio.create_task(start_auto_retrain_loop(None))
+            logger.info("🧠 Auto-Retraining System: ONLINE") 
+
+            # Start Connection Watchdog
+            asyncio.create_task(connection_watchdog(None))
+            logger.info("🛡️ Connection Watchdog: ONLINE") 
 
         except Exception as e:
             logger.error(f"❌ An error occurred during startup: {e}")

@@ -64,10 +64,21 @@ class IQOptionAPI:
 
     def check_connect(self):
         """Check if the API session is still active."""
-        try:
-            return self.api is not None and self.api.check_connect()
-        except Exception:
-            return False
+        return self._connected
+
+    async def ensure_connect(self):
+        """Checks connection and reconnects if necessary."""
+        if not self.check_connect():
+            logger.warning("⚠️ Connection check failed. Reconnecting...")
+            self._connected = False # Force reset
+            try:
+                await self._connect()
+                logger.info("✅ Reconnected successfully.")
+                return True
+            except Exception as e:
+                logger.error(f"❌ Reconnection failed: {e}")
+                return False
+        return True
 
 
     def _login(self):

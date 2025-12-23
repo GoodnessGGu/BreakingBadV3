@@ -8,3 +8,12 @@ venv/
 *.log
 supervisor.log
 .DS_Store
+
+# Bot State
+*.session
+*.session-journal
+*.json
+*.csv
+*.xlsx
+*.pkl
+models/

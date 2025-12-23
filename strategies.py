@@ -16,6 +16,22 @@ except Exception as e:
     logger.error(f"Failed to load AI model: {e}")
     ai_model = None
 
+def reload_ai_model():
+    """Reloads the AI model from disk."""
+    global ai_model
+    try:
+        new_model = load_model()
+        if new_model:
+            ai_model = new_model
+            logger.info("🧠 AI Model Reloaded Successfully!")
+            return True
+        else:
+            logger.warning("⚠️ Failed to load new AI model (None returned).")
+            return False
+    except Exception as e:
+        logger.error(f"❌ Error reloading AI model: {e}")
+        return False
+
 def wma(series, period):
     """Calculates Weighted Moving Average."""
     return series.rolling(period).apply(

@@ -89,26 +89,60 @@ async def collect_and_label_data(api, asset, count=5000, timeframe=60):
     logger.info(f"Found {len(labeled_data)} training examples.")
     return pd.DataFrame(labeled_data)
 
+async def run_collection_cycle(api_instance=None):
+    """
+    Runs the full data collection pipeline.
+    """
+    logger.info("🚀 Starting Data Collection Cycle...")
+    
+    # Use provided API or create new one
+    api = api_instance
+    should_disconnect = False
+    
+    if api is None:
+        logger.info("No API provided, creating new connection...")
+        api = IQOptionAPI()
+        await api._connect()
+        should_disconnect = True
+        
+    try:
+        if not api.check_connect():
+            logger.warning("API not connected. Attempting reconnect...")
+            await api._connect()
+
+        # Collect data for a few assets to generalize better
+        assets = ["EURUSD-OTC", "USDJPY-OTC", "GBPUSD-OTC"]
+        all_data = []
+        
+        for asset in assets:
+            df = await collect_and_label_data(api, asset, count=10000)
+            if df is not None:
+                 df['asset'] = asset
+                 all_data.append(df)
+            else:
+                 logger.warning(f"Skipping {asset} (No data).")
+                 
+            # Small delay to be nice to API
+            await asyncio.sleep(2)
+        
+        if all_data:
+            final_df = pd.concat(all_data, ignore_index=True)
+            final_df.to_csv("training_data.csv", index=False)
+            logger.info(f"✅ Collection Complete. Saved {len(final_df)} records to training_data.csv")
+            return True
+        else:
+            logger.error("❌ Failed to collect any data.")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Collection Cycle Error: {e}")
+        return False
+    finally:
+        if should_disconnect:
+            pass # We could disconnect, but IQOptionAPI doesn't strictly need explicit close usually
+
 async def main():
-    api = IQOptionAPI()
-    await api._connect()
-    
-    # Collect data for a few assets to generalize better
-    assets = ["EURUSD-OTC", "USDJPY-OTC", "GBPUSD-OTC"]
-    all_data = []
-    
-    for asset in assets:
-        df = await collect_and_label_data(api, asset, count=10000)
-        if df is not None:
-             df['asset'] = asset
-             all_data.append(df)
-    
-    if all_data:
-        final_df = pd.concat(all_data, ignore_index=True)
-        final_df.to_csv("training_data.csv", index=False)
-        logger.info(f"Saved {len(final_df)} total records to training_data.csv")
-    else:
-        logger.error("Failed to collect any data.")
+    await run_collection_cycle()
 
 if __name__ == "__main__":
     asyncio.run(main())

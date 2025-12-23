@@ -130,9 +130,32 @@ async def run_collection_cycle(api_instance=None):
             await asyncio.sleep(2)
         
         if all_data:
-            final_df = pd.concat(all_data, ignore_index=True)
+            new_df = pd.concat(all_data, ignore_index=True)
+            
+            # Load existing data if available to Append
+            try:
+                import os
+                if os.path.exists("training_data.csv"):
+                    existing_df = pd.read_csv("training_data.csv")
+                    # Ensure time is datetime for accurate deduplication
+                    if 'time' in existing_df.columns:
+                        existing_df['time'] = pd.to_datetime(existing_df['time'])
+                    if 'time' in new_df.columns:
+                        new_df['time'] = pd.to_datetime(new_df['time'])
+                        
+                    combined_df = pd.concat([existing_df, new_df])
+                    
+                    # Remove duplicates (Same Asset + Same Time)
+                    # Keep 'last' (newest version of candle) or 'first' doesn't matter much if data is same
+                    final_df = combined_df.drop_duplicates(subset=['time', 'asset'], keep='last')
+                else:
+                    final_df = new_df
+            except Exception as e:
+                logger.error(f"Error merging data: {e}")
+                final_df = new_df # Fallback to new data only
+                
             final_df.to_csv("training_data.csv", index=False)
-            logger.info(f"✅ Collection Complete. Saved {len(final_df)} records to training_data.csv")
+            logger.info(f"✅ Collection Complete. Total Database Size: {len(final_df)} records.")
             
             # Trigger Training Immediately
             from ml_utils import train_model

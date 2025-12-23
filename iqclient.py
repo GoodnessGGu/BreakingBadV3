@@ -63,8 +63,16 @@ class IQOptionAPI:
         logger.info('ALGO BOT initialized successfully')
 
     def check_connect(self):
-        """Check if the API session is still active."""
-        return self._connected
+        """Check if the API session is still active and socket is alive."""
+        if self._connected:
+            # Verify actual socket state
+            if self.websocket and self.websocket.websocket and self.websocket.websocket.sock:
+                return self.websocket.websocket.sock.connected
+            else:
+                 # Flag is true but socket is missing/dead
+                 self._connected = False
+                 return False
+        return False
 
     async def ensure_connect(self):
         """Checks connection and reconnects if necessary."""

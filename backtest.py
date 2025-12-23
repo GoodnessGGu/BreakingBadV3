@@ -135,7 +135,7 @@ async def main():
     asset = "GBPUSD-OTC"
     timeframe = 60 # 1 minute
     count = 1000   # Number of candles to test
-    max_gales = 0  # Testing without Martingale
+    max_gales = 2  # Testing without Martingale
     
     df = await fetch_historical_data(api, asset, timeframe, count)
     if df is None: return

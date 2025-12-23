@@ -29,15 +29,12 @@ class WebSocketManager:
         self.ws_url = WS_URL
         self.websocket = None
         self.ws_is_active = False
+        self.ws_is_open = False # Track socket connection state
         self.message_handler = message_handler
         
     def start_websocket(self):
         """
         Initialize and start the WebSocket connection in a separate daemon thread.
-        
-        Creates a WebSocketApp instance with event handlers and starts it in a
-        daemon thread to prevent blocking. Waits for connection to be established
-        before returning.
         """
 
         # Create WebSocket application with event handlers
@@ -54,8 +51,13 @@ class WebSocketManager:
         wst.daemon = True
         wst.start()
         
-        # Wait for connection to be established before proceeding
-        while not self.ws_is_active:
+        # Wait for connection to be OPENED (Physical connection)
+        timeout = 10
+        start = time.time()
+        while not self.ws_is_open:
+            if time.time() - start > timeout:
+                logger.error("Timeout waiting for WebSocket handshake")
+                break
             time.sleep(0.1)
     
     def send_message(self, name, msg, request_id=""):
@@ -121,13 +123,9 @@ class WebSocketManager:
     def _on_open(self, ws):
         """
         Handle WebSocket connection opened event.
-        
-        Called when the WebSocket connection is successfully established.
-        
-        Args:
-            ws: WebSocket instance (unused but required by websocket-client)
         """
         # print("### WebSocket opened ###")
+        self.ws_is_open = True
         pass
     
     def _on_close(self, ws, close_status_code, close_msg):

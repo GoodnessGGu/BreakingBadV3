@@ -133,6 +133,12 @@ async def run_collection_cycle(api_instance=None):
             final_df = pd.concat(all_data, ignore_index=True)
             final_df.to_csv("training_data.csv", index=False)
             logger.info(f"✅ Collection Complete. Saved {len(final_df)} records to training_data.csv")
+            
+            # Trigger Training Immediately
+            from ml_utils import train_model
+            logger.info("🧠 Starting Model Training...")
+            train_model("training_data.csv")
+            
             return True
         else:
             logger.error("❌ Failed to collect any data.")

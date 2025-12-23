@@ -61,6 +61,10 @@ cd bot
 # 4. Install Dependencies
 pip3 install -r requirements.txt
 
+# 5. Initialize AI Brain (Important!)
+# This will fetch fresh data and train the model immediately.
+python3 collect_data.py
+
 # 5. Run the Bot (Use 'screen' to keep it running after you disconnect)
 screen -S trading_bot
 python3 telegram_bot.py

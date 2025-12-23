@@ -111,7 +111,11 @@ async def run_collection_cycle(api_instance=None):
             await api._connect()
 
         # Collect data for a few assets to generalize better
-        assets = ["EURUSD-OTC", "USDJPY-OTC", "GBPUSD-OTC"]
+        assets = [
+            "EURUSD-OTC", "USDJPY-OTC", "GBPUSD-OTC", 
+            "AUDCAD-OTC", "NZDUSD-OTC", "USDCHF-OTC", 
+            "EURGBP-OTC", "USDCAD-OTC"
+        ]
         all_data = []
         
         for asset in assets:

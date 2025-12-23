@@ -66,7 +66,42 @@ def calculate_atr(df, period=14):
     
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=period).mean()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=period).mean()
     return atr
+
+def calculate_macd(series, fast=12, slow=26, signal=9):
+    """Calculates MACD (Moving Average Convergence Divergence)."""
+    exp1 = series.ewm(span=fast, adjust=False).mean()
+    exp2 = series.ewm(span=slow, adjust=False).mean()
+    macd = exp1 - exp2
+    signal_line = macd.ewm(span=signal, adjust=False).mean()
+    histogram = macd - signal_line
+    return macd, signal_line, histogram
+
+def calculate_stochastic(df, period=14, k_period=3, d_period=3):
+    """Calculates Stochastic Oscillator."""
+    low_min = df['min'].rolling(window=period).min()
+    high_max = df['max'].rolling(window=period).max()
+    
+    k = 100 * ((df['close'] - low_min) / (high_max - low_min))
+    # Fast Stochastic %K
+    percent_k = k
+    # Smooth %D
+    percent_d = percent_k.rolling(window=d_period).mean()
+    return percent_k, percent_d
+
+def calculate_cci(df, period=20):
+    """Calculates Commodity Channel Index (CCI)."""
+    tp = (df['max'] + df['min'] + df['close']) / 3
+    sma = tp.rolling(window=period).mean()
+    mad = (tp - sma).abs().rolling(window=period).mean()
+    
+    # Avoid division by zero
+    mad = mad.replace(0, 0.001)
+    
+    cci = (tp - sma) / (0.015 * mad)
+    return cci
 
 def prepare_features(df):
     """
@@ -102,6 +137,11 @@ def prepare_features(df):
     df['body_size'] = abs(df['close'] - df['open'])
     df['upper_shadow'] = df['max'] - df[['open', 'close']].max(axis=1)
     df['lower_shadow'] = df[['open', 'close']].min(axis=1) - df['min']
+
+    # 5. Advanced Indicators [NEW]
+    df['macd'], df['macd_signal'], df['macd_hist'] = calculate_macd(df['close'])
+    df['stoch_k'], df['stoch_d'] = calculate_stochastic(df)
+    df['cci'] = calculate_cci(df)
     
     # Pattern: Engulfing (1 = Bullish, -1 = Bearish, 0 = None)
     # Bullish Engulfing: Prev Red, Curr Green, Curr Open < Prev Close, Curr Close > Prev Open
@@ -156,14 +196,14 @@ def train_model(data_path="training_data.csv"):
     # Split
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
     
-    # Train - Gradient Boosting
-    logger.info("Training Gradient Boosting Classifier...")
-    # Parameters tuned for stability
-    clf = GradientBoostingClassifier(
+    logger.info("Training Random Forest Classifier...")
+    clf = RandomForestClassifier(
         n_estimators=200, 
-        learning_rate=0.05, 
-        max_depth=4, 
-        random_state=42
+        max_depth=10,            # Deeper trees to capture patterns
+        min_samples_split=10, 
+        min_samples_leaf=5,
+        random_state=42,
+        n_jobs=-1
     )
     clf.fit(X_train, y_train)
     
@@ -216,8 +256,25 @@ def predict_signal(model, features_df):
             # Reorder columns to match model
             features_df = features_df[model.feature_names_in_]
             
-        prediction = model.predict(features_df)
-        return prediction[0]
+            features_df = features_df[model.feature_names_in_]
+            
+        # prediction = model.predict(features_df)
+        # return prediction[0]
+        
+        # Use Probability instead of hard prediction
+        proba = model.predict_proba(features_df)
+        # proba returns [[prob_0, prob_1]]
+        
+        loss_prob = proba[0][0]
+        win_prob = proba[0][1]
+        
+        # Confidence Threshold: Only trade if model is > 65% sure it's a WIN
+        threshold = 0.65 
+        
+        if win_prob >= threshold:
+            return 1
+        else:
+            return 0 # Treat as Loss (Reject)
     except Exception as e:
         logger.error(f"Prediction error: {e}")
         return 1 # Fallback

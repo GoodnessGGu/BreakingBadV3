@@ -122,7 +122,24 @@ def analyze_strategy(candles_data, use_ai=True):
     if ma_call: signal = "CALL"
     if ma_put: signal = "PUT"
     
+    # --- Strategy 4: Strict Trend Filter ---
+    # Only allow CALLs if Close > EMA50
+    # Only allow PUTs if Close < EMA50
+    df['ema_50'] = df['close'].ewm(span=50, adjust=False).mean()
+
     # --- AI Confirmation ---
+    if signal:
+        # Check Trend
+        current_close = df['close'].iloc[-1]
+        current_ema = df['ema_50'].iloc[-1]
+        
+        if signal == "CALL" and current_close < current_ema:
+             logger.info(f"🚫 Trend Filter Blocked: CALL signal below EMA50 ({current_close} < {current_ema})")
+             signal = None
+        elif signal == "PUT" and current_close > current_ema:
+             logger.info(f"🚫 Trend Filter Blocked: PUT signal above EMA50 ({current_close} > {current_ema})")
+             signal = None
+
     if signal and ai_model and use_ai:
         # Prepare features for the *current* state
         # We need to pass the DataFrame. prepare_features will re-calculate indicators.
@@ -135,15 +152,13 @@ def analyze_strategy(candles_data, use_ai=True):
                 current_features = df_features.iloc[[-1]]
                 prediction = predict_signal(ai_model, current_features)
                 
-                if prediction == 0: # 0 = Loss predicted
+                if prediction == 0: # 0 = Loss/Reject (based on new Threshold logic)
                     logger.info(f"[AI] REJECTED {signal} signal on {df.iloc[-1].get('time', 'unknown')}")
                     return None
                 else:
                     logger.info(f"[AI] APPROVED {signal} signal.")
         except Exception as e:
             logger.error(f"AI Prediction failed: {e}")
-            # Fallback: Allow signal if AI fails? or Block? 
-            # Let's allow it for now to avoid stopping trading on bugs.
             pass
 
     return signal

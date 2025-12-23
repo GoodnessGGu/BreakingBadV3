@@ -132,7 +132,7 @@ async def main():
     api = IQOptionAPI()
     await api._connect()
     
-    asset = "EURUSD-OTC"
+    asset = "GBPUSD-OTC"
     timeframe = 60 # 1 minute
     count = 1000   # Number of candles to test
     max_gales = 0  # Testing without Martingale

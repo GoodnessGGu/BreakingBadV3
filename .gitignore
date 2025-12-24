@@ -10,10 +10,10 @@ supervisor.log
 .DS_Store
 
 # Bot State
-*.session
-*.session-journal
-*.json
+# *.session (Commented out for Deployment)
+# *.session-journal
+*.json (Keep private config ignored if any)
 *.csv
 *.xlsx
-*.pkl
-models/
+# *.pkl (Commented out to push AI model)
+# models/ (Commented out to push AI model)

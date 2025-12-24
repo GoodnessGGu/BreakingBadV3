@@ -8,3 +8,5 @@ joblib
 pytz
 python-dotenv
 websockets
+telethon
+websocket-client

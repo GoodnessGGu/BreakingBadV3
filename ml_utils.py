@@ -119,24 +119,37 @@ def prepare_features(df):
         df['hour'] = df['time'].dt.hour
         # Encoding cyclical time features can be better, but raw hour is a good start
     
-    # 1. Momentum & Trend
+    # 1. Momentum & Trend (Already Relative - Good)
     df['rsi'] = calculate_rsi(df['close'], 14)
     df['adx'] = calculate_adx(df, 14)
     df['atr'] = calculate_atr(df, 14)
     
-    # 2. Moving Averages
+    # 2. Moving Averages -> RELATIVE DISTANCE (%)
+    # Don't feed raw 1.0500 vs 1.2000. Feed "Price is 0.5% above SMA"
     df['sma_20'] = df['close'].rolling(window=20).mean()
     df['sma_50'] = df['close'].rolling(window=50).mean()
     
-    # 3. Bollinger Bands
+    df['dist_sma_20'] = (df['close'] - df['sma_20']) / df['close'] * 100
+    df['dist_sma_50'] = (df['close'] - df['sma_50']) / df['close'] * 100
+    
+    # 3. Bollinger Bands -> POSITION (%)
+    # Already computed relative bb_pos and bb_width, which is good.
+    # bb_pos: 0 = Lower Band, 0.5 = Middle, 1 = Upper Band
     df['bb_upper'], df['bb_lower'] = calculate_bollinger_bands(df['close'], 20, 2)
     df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['close']
     df['bb_pos'] = (df['close'] - df['bb_lower']) / (df['bb_upper'] - df['bb_lower'])
     
-    # 4. Price Action
-    df['body_size'] = abs(df['close'] - df['open'])
-    df['upper_shadow'] = df['max'] - df[['open', 'close']].max(axis=1)
-    df['lower_shadow'] = df[['open', 'close']].min(axis=1) - df['min']
+    # 4. Price Action -> RELATIVE SIZE (%)
+    # Body Size as % of Price (handles different asset scales)
+    df['body_size_pct'] = abs(df['close'] - df['open']) / df['close'] * 100
+    
+    # Shadows as % of Price
+    df['upper_shadow_pct'] = (df['max'] - df[['open', 'close']].max(axis=1)) / df['close'] * 100
+    df['lower_shadow_pct'] = (df[['open', 'close']].min(axis=1) - df['min']) / df['close'] * 100
+    
+    # 5. Volatility Ratio
+    # ATR as % of Price
+    df['atr_pct'] = df['atr'] / df['close'] * 100
 
     # 5. Advanced Indicators [NEW]
     df['macd'], df['macd_signal'], df['macd_hist'] = calculate_macd(df['close'])
@@ -163,13 +176,18 @@ def prepare_features(df):
     df.loc[is_bullish_engulfing, 'pattern_engulfing'] = 1
     df.loc[is_bearish_engulfing, 'pattern_engulfing'] = -1
 
-    # 5. Lagged Features (Previous candles)
+    # 5. Lagged Features (Percent Change)
     for lag in [1, 2, 3]:
-        df[f'close_lag_{lag}'] = df['close'].shift(lag)
+        # Log Returns or Simple Returns
+        df[f'return_lag_{lag}'] = df['close'].pct_change(lag) * 100
         df[f'rsi_lag_{lag}'] = df['rsi'].shift(lag)
     
     # Drop rows with NaN (due to rolling windows)
     df = df.dropna()
+    
+    # We kept raw columns here because consumers (like collect_data) need them for labeling/logic.
+    # The dropping of raw columns happens in train_model!
+    
     return df
 
 def train_model(data_path="training_data.csv"):
@@ -188,11 +206,17 @@ def train_model(data_path="training_data.csv"):
         logger.error("Data missing 'outcome' column.")
         return
 
-    # Drop non-feature columns
-    drop_cols = ['time', 'outcome', 'signal', 'asset', 'from', 'to']
-    X = df.drop(columns=[c for c in drop_cols if c in df.columns])
-    y = df['outcome']
+    # DROP RAW COLUMNS explicitly here to force model to learn from normalized features only
+    drop_raw = ['open', 'close', 'min', 'max', 'volume', 'sma_20', 'sma_50', 'bb_upper', 'bb_lower']
     
+    # Also drop metadata
+    drop_meta = ['time', 'outcome', 'signal', 'asset', 'from', 'to']
+    
+    # Combine drops
+    annotated_cols = drop_raw + drop_meta
+    
+    X = df.drop(columns=[c for c in annotated_cols if c in df.columns])
+    y = df['outcome']
     # Split
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
     
@@ -268,8 +292,8 @@ def predict_signal(model, features_df):
         loss_prob = proba[0][0]
         win_prob = proba[0][1]
         
-        # Confidence Threshold: Only trade if model is > 65% sure it's a WIN
-        threshold = 0.65 
+        # Confidence Threshold: Only trade if model is > 55% sure it's a WIN
+        threshold = 0.55 
         
         if win_prob >= threshold:
             return 1

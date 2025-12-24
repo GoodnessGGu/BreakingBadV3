@@ -69,7 +69,23 @@ class ChannelMonitor:
                 self.client = TelegramClient('bot_session', self.api_id, self.api_hash)
 
             await self.client.start()
-            logger.info(f"✅ Telethon client started (listening: {channel_identifier})")
+            logger.info(f"✅ Telethon client started. Resolving entity for: {channel_identifier}")
+
+            # Force resolve entity to ensure it's in cache/known
+            try:
+                entity = await self.client.get_entity(channel_identifier)
+                channel_name = getattr(entity, 'title', str(channel_identifier))
+                logger.info(f"✅ Resolved Channel: {channel_name} (ID: {entity.id})")
+            except ValueError:
+                logger.warning(f"⚠️ Could not resolve entity for {channel_identifier} directly. Fetching dialogs...")
+                # Fallback: Sync dialogs
+                async for dialog in self.client.iter_dialogs():
+                    if dialog.id == channel_identifier:
+                        logger.info(f"✅ Found channel in dialogs: {dialog.title}")
+                        break
+            except Exception as e:
+                logger.error(f"❌ Failed to resolve channel entity: {e}")
+                # We proceed anyway, but it might fail to listen
 
             @self.client.on(events.NewMessage(chats=channel_identifier))
             async def _on_message(event):
@@ -285,10 +301,30 @@ class ChannelMonitor:
                 logger.warning(f"⚠️ AI Check failed (proceeding anyway): {e}")
             # ----------------
 
+            # Smart Martingale Integration
+            base_amount = config.trade_amount
+            trade_amount, max_gales = smart_trade_manager.get_trade_details(signal['pair'], base_amount)
+
             try:
-                result = await run_trade(api, signal['pair'], signal['direction'], signal['expiry'], config.trade_amount, notification_callback=trade_notification)
+                result = await run_trade(
+                    api, 
+                    signal['pair'], 
+                    signal['direction'], 
+                    signal['expiry'], 
+                    trade_amount, 
+                    max_gales=max_gales,
+                    notification_callback=trade_notification
+                )
+                
+                # Update Smart Martingale State
+                if result:
+                    trade_outcome = result.get("result", "ERROR")
+                    if trade_outcome in ["WIN", "LOSS"]:
+                        smart_trade_manager.update_result(signal['pair'], trade_outcome)
+
             except TypeError:
-                result = await run_trade(api, signal['pair'], signal['direction'], signal['expiry'], config.trade_amount)
+                logger.warning("Falling back to legacy run_trade signature (no max_gales support??)")
+                result = await run_trade(api, signal['pair'], signal['direction'], signal['expiry'], config.trade_amount, notification_callback=trade_notification)
 
             # Notifying about entry is done inside run_trade via callback usually, 
             # but if we want an explicit entry log:

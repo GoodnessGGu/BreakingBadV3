@@ -532,6 +532,9 @@ async def shutdown_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- Auto-Trading Logic ---
 async def auto_trade_loop(asset, timeframe, context, chat_id):
     """Background task that runs the strategy loop for a specific asset."""
+    # Sanitize Asset Name (Common User Typo: 0TC -> OTC)
+    asset = asset.replace('0TC', 'OTC')
+    
     logger.info(f"🚀 Starting Auto-Trade loop for {asset} ({timeframe}s)")
     
     # Map timeframe string to seconds if needed, assuming input is seconds (e.g., 60)
@@ -569,8 +572,19 @@ async def auto_trade_loop(asset, timeframe, context, chat_id):
                         logger.error(f"Failed to send trade result: {e}")
 
                 # Execute trade (1 min expiry default for strategy)
-                await run_trade(api, asset, signal, 1, config.trade_amount, notification_callback=notify_result)
+                # Smart Martingale Check
+                base_amount = config.trade_amount
+                trade_amount, max_gales = smart_trade_manager.get_trade_details(asset, base_amount)
+
+                # Execute
+                result = await run_trade(api, asset, signal, 1, trade_amount, max_gales=max_gales, notification_callback=notify_result)
                 
+                # Update Smart Martingale State
+                if result:
+                    trade_outcome = result.get("result", "ERROR")
+                    if trade_outcome in ["WIN", "LOSS"]:
+                        smart_trade_manager.update_result(asset, trade_outcome)
+                        
                 # Wait for next candle to avoid duplicate signals on same candle
                 await asyncio.sleep(tf_seconds)
             
@@ -589,7 +603,7 @@ async def start_auto_trade(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Usage: /autotrade <ASSET> <TIMEFRAME_SEC>\nExample: /autotrade EURUSD-OTC 60")
         return
         
-    asset = context.args[0].upper()
+    asset = context.args[0].upper().replace('0TC', 'OTC')
     timeframe = context.args[1]
     
     if asset in active_auto_trades:
@@ -634,6 +648,128 @@ async def stop_auto_trade(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"🛑 Stopped Auto-Trade for {asset}")
     else:
         await update.message.reply_text(f"⚠️ No active strategy found for {asset}")
+
+async def confirm_signals(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Checks past signals against historical data to verify accuracy.
+    Usage: /confirm_signals <signals_text>
+    Supports format: HH:MM;ASSET;DIR;EXPIRY
+    """
+    if not context.args and not update.message.text:
+       await update.message.reply_text("⚠️ No signals found.")
+       return
+
+    full_text = update.message.text.replace("/confirm_signals", "").strip()
+    if not full_text:
+        await update.message.reply_text("⚠️ No signals found.")
+        return
+        
+    await update.message.reply_text("🔍 Analyzing signals... This may take a moment.")
+    
+    # Use Robust Parser
+    from signal_parser import parse_signals_from_text
+    signals = parse_signals_from_text(full_text)
+    
+    if not signals:
+        await update.message.reply_text("⚠️ Could not parse any signals. Format: 00:00;PAIR;PUT;5")
+        return
+
+    results = []
+    wins = 0
+    losses = 0
+    total = 0
+    TARGET_DATE = datetime.now().date()
+    # Or check if signal has full date parsing? Parser returns HH:MM usually.
+    
+    MAX_GALES = 2
+    tz_local = pytz.timezone(TIMEZONE_MANUAL)
+    
+    for sig in signals:
+        try:
+            # Parse Time
+            sig_dt_str = f"{TARGET_DATE} {sig['time']}"
+            try:
+                # 1. Parse Naive (Today + HH:MM)
+                sig_naive = datetime.strptime(sig_dt_str, "%Y-%m-%d %H:%M")
+                
+                # 2. Localize to Configured Timezone (e.g. Sao Paulo)
+                sig_dt = tz_local.localize(sig_naive)
+                
+            except ValueError:
+                continue 
+                
+            ts = int(sig_dt.timestamp())
+            
+            # Map Expiry to Timeframe
+            # If User says 5 -> 5 minutes -> 300s candles?
+            # Or 1m candles but checked 5m later?
+            # Standard: Use Expiry as Candle Size
+            timeframe = sig['expiry'] * 60
+            
+            end_query = ts + (MAX_GALES + 2) * timeframe
+            
+            # Fetch Candles 
+            # Logic: Try Regular, fallback to OTC if empty
+            candles = api.get_candle_history(sig['pair'], 10, timeframe, end_time=end_query)
+            
+            if not candles:
+                if "OTC" not in sig['pair']:
+                    sig['pair'] += "-OTC"
+                    candles = api.get_candle_history(sig['pair'], 10, timeframe, end_time=end_query)
+            
+            outcome = "NO DATA"
+            gale_win = -1
+            target_ts = ts
+            
+            if candles:
+                for g in range(MAX_GALES + 1):
+                    # Find candle opening at target_ts
+                    candle = next((c for c in candles if c['from'] == target_ts), None)
+                    
+                    if not candle:
+                        break
+                    
+                    open_p = candle['open']
+                    close_p = candle['close']
+                    
+                    is_win = False
+                    if sig['direction'] == 'CALL' and close_p > open_p: is_win = True
+                    if sig['direction'] == 'PUT' and close_p < open_p: is_win = True
+                    
+                    if is_win:
+                        gale_win = g
+                        break
+                    else:
+                        target_ts += timeframe
+            
+            if gale_win == 0: 
+                outcome = "WIN"
+                wins += 1
+            elif gale_win > 0: 
+                outcome = f"WIN-G{gale_win}"
+                wins += 1
+            elif gale_win == -1 and candles: 
+                outcome = "LOSS"
+                losses += 1
+            
+            results.append(f"`{sig['time']:<5} {sig['pair']:<10} {sig['direction']:<4} -> {outcome}`")
+            total += 1
+            
+            await asyncio.sleep(0.1)
+            
+        except Exception as e:
+            logger.error(f"Error checking signal {sig}: {e}")
+            results.append(f"{sig.get('time', '?')} Error")
+
+    # Generate Report
+    accuracy = (wins / total * 100) if total > 0 else 0
+    report_header = f"📊 **Signal Check Report ({TARGET_DATE})**\nAccuracy: {accuracy:.1f}% ({wins}/{total})\n\n"
+    report_body = "\n".join(results)
+    
+    if len(report_body) > 3800:
+        report_body = report_body[:3800] + "\n...(truncated)"
+        
+    await update.message.reply_text(report_header + report_body, parse_mode="Markdown")
 
 async def list_auto_trades(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active = list(active_auto_trades.keys())
@@ -771,6 +907,7 @@ def main():
     
     app.add_handler(CommandHandler("autotrade", start_auto_trade))
     app.add_handler(CommandHandler("stoptrade", stop_auto_trade))
+    app.add_handler(CommandHandler("confirm_signals", confirm_signals))
     app.add_handler(CommandHandler("retrain", retrain_command)) # Manual trigger
     app.add_handler(CommandHandler("smart_gale", toggle_smart_gale))
 

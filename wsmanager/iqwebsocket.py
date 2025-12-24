@@ -36,6 +36,9 @@ class WebSocketManager:
         """
         Initialize and start the WebSocket connection in a separate daemon thread.
         """
+        # Reset connection flags
+        self.ws_is_open = False
+        self.ws_is_active = False
 
         # Create WebSocket application with event handlers
         self.websocket = websocket.WebSocketApp(
@@ -115,6 +118,7 @@ class WebSocketManager:
             error: Error information from the WebSocket connection
         """
         print(f"### WebSocket Error: {error} ###")
+        self.ws_is_open = False
         # Note: Could add more sophisticated error handling here such as:
         # - Logging with proper log levels
         # - Reconnection logic
@@ -127,7 +131,7 @@ class WebSocketManager:
         # print("### WebSocket opened ###")
         self.ws_is_open = True
         pass
-    
+
     def _on_close(self, ws, close_status_code, close_msg):
         """
         Handle WebSocket connection closed event.
@@ -140,6 +144,8 @@ class WebSocketManager:
             close_status_code: WebSocket close status code
             close_msg: Close message/reason
         """
+        self.ws_is_open = False
+        self.ws_is_active = False
         print("### WebSocket closed ###")
     
     def close(self):
@@ -149,5 +155,7 @@ class WebSocketManager:
         Closes the WebSocket connection if it exists and resets the connection status.
         Should be called when shutting down the application or switching connections.
         """
+        self.ws_is_open = False
+        self.ws_is_active = False
         if self.websocket:
             self.websocket.close()

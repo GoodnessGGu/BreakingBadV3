@@ -1,0 +1,103 @@
+instrument { name = "Rei das Options", icon="indicators:ADX", overlay = true }
+method_id = input (1, "Type", input.string_selection, { "_jpsniper" })
+  
+input_group {
+    "Maxima",
+    level_1_color = input { default = "red", type = input.color },
+    level_1_width = input { default = 2, type = input.line_width }
+}
+input_group {
+    "Minima",
+    level_2_color = input { default = "green", type = input.color },
+    level_2_width = input { default = 2, type = input.line_width }
+}
+local function m15(candle)
+    c1 = candle.high
+    c2 = candle.low
+end
+
+local methods = { m15 }
+local resolution = "15m"
+sec = security (current_ticker_id, resolution) 
+if sec then
+   local method = methods [method_id]
+   method (sec)
+   plot (c1, "C1",   level_1_color, level_1_width, 0, style.levels, na_mode.continue)
+   plot (c2, "C2",   level_2_color, level_2_width, 0, style.levels, na_mode.continue)
+
+end
+
+input_group {"BANDA SUPERIOR", bbsup_color= input{ default= "silver", type= input.color}}
+input_group {"BANDA INFERIOR", bbinf_color= input{ default= "silver", type= input.color}}
+
+smaa= sma(close, '20')
+upper_band= smaa + (stdev(close,20) * 2.5)
+lower_band= smaa - (stdev(close,20) * 2.5)
+emaa= ema(close, '100')
+
+plot(emaa, "SMA", ema_color)
+plot(upper_band, "UPPER_BAND", bbsup_color)
+plot(lower_band, "LOWER_BAND", bbinf_color)
+
+MaFast_period = input(1,"Ma Fast period",input.integer,1,1000,1)
+MaValue = input(5,"Ma Value", input.string_selection,inputs.titles)
+
+MaSlow_period = input(34,"Ma Slow period",input.integer,1,1000,1)
+
+Signal_period = input(5,"Signal period",input.integer,1,1000,1)
+
+input_group {
+    "Compra",
+    colorBuy = input { default = "green", type = input.color }, 
+    visibleBuy = input { default = true, type = input.plot_visibility }
+}
+
+input_group {
+    "Venda",
+    colorSell = input { default = "red", type = input.color },
+    visibleSell = input { default = true, type = input.plot_visibility }
+}
+
+local titleValue = inputs[MaValue]
+
+-- mdia mvel linear rpida
+smaFast = sma(titleValue, MaFast_period)
+
+-- mdia mvel linear devagar
+smaSlow = sma(titleValue, MaSlow_period)
+
+-- calculo diferencial - serie
+buffer1 = smaFast - smaSlow 
+
+-- clculo da mdia mvel ponderada - serie
+buffer2 = wma(buffer1, Signal_period)
+
+buyCondition = conditional(buffer1 > buffer2 and buffer1[1] < buffer2[1] and not (buffer1 < buffer2 and buffer1[1] > buffer2[1]))
+buyCondition = conditional(buffer1 > buffer2 and buffer1[1] < buffer2[1])
+
+sellCondition = conditional(buffer1 < buffer2 and buffer1[1] > buffer2[1] and not (buffer1 > buffer2 and buffer1[1] < buffer2[1]))
+sellCondition = conditional(buffer1 < buffer2 and buffer1[1] > buffer2[1] )
+
+            plot_shape(
+                (buyCondition),
+                "ENTRA",
+                shape_style.triangleup,
+                shape_size.huge,
+                colorBuy,
+                shape_location.belowbar,
+                -1,
+                "ENTRA",
+                "yellow"
+               ) 
+
+          plot_shape(
+              (sellCondition),
+                "ENTRA",
+                shape_style.triangledown,
+                shape_size.huge,
+                colorSell,
+                shape_location.abovebar,
+                -1,
+                "ENTRA",
+                "yellow"
+          )

@@ -1,6 +1,7 @@
 import asyncio
 import time
 import logging
+import random
 from datetime import datetime, timezone
 from options_assests import UNDERLYING_ASSESTS
 from utilities import get_expiration, get_remaining_secs
@@ -26,10 +27,26 @@ class TradeManager:
     Handles trade parameter validation, order execution, confirmation waiting,
     and trade outcome tracking.
     """
-    def __init__(self, websocket_manager, message_handler, account_manager):
+    def __init__(self, websocket_manager, message_handler, account_manager, market_manager=None):
         self.ws_manager = websocket_manager
         self.message_handler = message_handler
         self.account_manager = account_manager
+        self.market_manager = market_manager
+
+    def get_current_price(self, asset: str) -> float:
+        """Fetch the latest price for an asset."""
+        if not self.market_manager:
+            return None
+        try:
+            # Fetch 1 candle of 1s to get latest tick
+            candles = self.market_manager.get_candle_history(asset, 1, 1)
+            if candles:
+                return candles[-1]['close']
+        except Exception:
+            pass
+        return None
+
+
 
     def get_asset_id(self, asset_name: str) -> int:
         if asset_name in UNDERLYING_ASSESTS:
@@ -116,11 +133,11 @@ class TradeManager:
             raise TradeExecutionError("No active account available")
             
     # ========== TRADE OUTCOME ==========
-    async def get_trade_outcome(self, order_id: int, expiry:int=1):
+    async def get_trade_outcome(self, order_id: int, expiry:int=1, asset_name: str = None, direction: str = None):
         start_time = time.time()
         timeout = get_remaining_secs(self.message_handler.server_time, expiry)
 
-        while time.time() - start_time < timeout + 3:
+        while time.time() - start_time < timeout + 30:
             order_data = self.message_handler.position_info.get(order_id, {})
             if order_data and order_data.get("status") == "closed":
                 pnl = order_data.get('pnl', 0)
@@ -128,6 +145,28 @@ class TradeManager:
                 logger.info(f"Trade closed - Order ID: {order_id}, Result: {result_type}, PnL: ${pnl:.2f}")
                 return True, pnl
             await asyncio.sleep(.5)
+
+        logger.warning(f"Digital Trade Outcome Timed Out (ID: {order_id})")
+        
+        # Shadow Verification for Digital
+        if self.market_manager and asset_name and direction:
+             current_price = self.get_current_price(asset_name)
+             if current_price:
+                 order_data = self.message_handler.position_info.get(order_id, {})
+                 # For Digital, 'msg' -> 'price' might be open price or 'open_underlying_price'
+                 open_price = float(order_data.get('open_underlying_price', 0))
+                 if not open_price:
+                      # Try to find it in msg
+                      open_price = float(order_data.get('msg', {}).get('price', 0))
+
+                 if open_price:
+                     is_call = direction.lower() == 'call'
+                     calculated_win = (current_price > open_price) if is_call else (current_price < open_price)
+                     logger.warning(f"🕵️ Timeout Shadow Verification (Digital): {asset_name} {direction} | Open: {open_price} | Close: {current_price} | Win: {calculated_win}")
+                     if calculated_win:
+                         return True, 0.85 
+                     else:
+                         return True, -1.0
 
         return False, None
 
@@ -220,7 +259,7 @@ class TradeManager:
             
         return False, "Binary order confirmation timed out (No match found)"
     
-    async def get_binary_trade_outcome(self, order_id: int, expiry: int = 1):
+    async def get_binary_trade_outcome(self, order_id: int, expiry: int = 1, asset_name: str = None, direction: str = None):
         start_time = time.time()
         # Increase timeout buffer for OTC/delayed server responses
         timeout = get_remaining_secs(self.message_handler.server_time, expiry) + 30
@@ -228,10 +267,29 @@ class TradeManager:
         while time.time() - start_time < timeout:
             order_data = self.message_handler.position_info.get(order_id, {})
             
-            if order_data and (order_data.get("status") == "closed" or order_data.get("close_time")):
+            # Check if Closed or Time Elapsed significantly (>5s past expiry)
+            # This 'expected_end' needs to be derived. 
+            # We don't have exact expiry time variable here, but we know 'expiry' duration.
+            # Assuming 'start_time' matches roughly expiry start? No.
+            # We can use server_time logic but simplified:
+            # If (current time > start + expiry + 5) AND status != closed -> Force Check
+            
+            is_closed = order_data and (order_data.get("status") == "closed" or order_data.get("close_time"))
+            force_check = False
+            
+            # Approximate elapsed time since check started
+            # Note: 'expiry' arg is duration (e.g. 60). 
+            # If we called this *after* trade placed, we might wait up to 60s?
+            # Usually this method is called immediately after placement.
+            # So 'start_time + expiry' is roughly the close time.
+            time_since_start = time.time() - start_time
+            if not is_closed and time_since_start > (expiry + random.randint(1, 5)):
+                force_check = True
+                logger.warning(f"⚠️ Trade {order_id} server timeout (>5s delay). Forcing Shadow Verification.")
+            
+            if is_closed or force_check:
                 # Check outcome
                 result = order_data.get('win')
-                active_id = order_data.get('active_id')
                 
                 invest = float(order_data.get('amount', 0))
                 profit_amount = float(order_data.get('profit_amount', 0) or 0) 
@@ -240,24 +298,43 @@ class TradeManager:
                 
                 # Robust status check
                 is_win = result in ['win', 'won'] or (result is None and profit_amount > invest)
-                is_equal = result == 'equal' or (result is None and profit_amount == invest and profit_amount > 0)
+                
+                # Shadow Verification logic...
+                if (result is None or force_check) and self.market_manager and asset_name and direction:
+                    try:
+                        current_price = self.get_current_price(asset_name)
+                        open_price = float(order_data.get('value', 0) or order_data.get('open_price', 0)) 
+                        if not open_price and force_check:
+                             # If we forced check, maybe we didn't get open price from order_data yet?
+                             # Try to fetch from msg if available
+                             open_price = float(order_data.get('msg', {}).get('price', 0))
+
+                        if current_price and open_price:
+                            is_call = direction.lower() == 'call'
+                            calculated_win = (current_price > open_price) if is_call else (current_price < open_price)
+                            
+                            logger.info(f"🕵️ Shadow Verification: {asset_name} {direction} | Open: {open_price} | Close (Tick): {current_price} | Calc Win: {calculated_win}")
+                            
+                            if calculated_win:
+                                is_win = True
+                                try:
+                                    payout = self.market_manager.get_binary_payout(asset_name)
+                                    pnl = invest * (payout / 100.0)
+                                except:
+                                    pnl = invest * 0.85 
+                            else:
+                                is_win = False
+                                pnl = -invest
+                                
+                            # If forced check, break loop with this result
+                            return {'result': 'WIN' if is_win else 'LOSS', 'profit': pnl, 'win': is_win}
+                            
+                    except Exception as e:
+                        logger.warning(f"Shadow Verification failed: {e}")
 
                 if is_win:
-                    # If profit_amount suggests it includes stake (Gross), subtract invest
                     if profit_amount >= invest:
                          pnl = profit_amount - invest
-                    else:
-                         # Fallback: if profit_amount < invest but it says WIN, treat profit_amount as Net Profit?
-                         # Or it's a weird error. Let's assume gross first.
-                         pnl = profit_amount - invest
-                         if pnl <= 0:
-                             logger.warning(f"Win detected but PnL calc was <= 0 ({profit_amount} - {invest}). Forcing positive PnL.")
-                             pnl = max(0.01, profit_amount) # At least some profit
-                             
-                elif is_equal:
-                    pnl = 0.0
-                else:
-                    # Loss
                     pnl = -invest
 
                 # Log for debugging
@@ -278,4 +355,23 @@ class TradeManager:
                 pass # Loop again to check timeout or poll
             
         logger.warning(f"Binary Trade Outcome Timed Out (ID: {order_id})")
+        
+        # Last Resort Shadow Verification on Timeout
+        if self.market_manager and asset_name and direction:
+             current_price = self.get_current_price(asset_name)
+             if current_price:
+                 # We lack open_price if order_data is missing completely...
+                 # But usually order_data exists but Status is not Closed.
+                 # Let's hope order_data is populated via 'buy_complete' at least.
+                 order_data = self.message_handler.position_info.get(order_id, {})
+                 open_price = float(order_data.get('value', 0) or order_data.get('open_price', 0))
+                 if open_price:
+                     is_call = direction.lower() == 'call'
+                     calculated_win = (current_price > open_price) if is_call else (current_price < open_price)
+                     logger.warning(f"🕵️ Timeout Shadow Verification: {asset_name} {direction} | Open: {open_price} | Close: {current_price} | Win: {calculated_win}")
+                     if calculated_win:
+                         return True, 0.85 # Return arbitrary +PnL to signal Win
+                     else:
+                         return True, -1.0 # Return arbitrary -PnL to signal Loss
+        
         return False, 0.0

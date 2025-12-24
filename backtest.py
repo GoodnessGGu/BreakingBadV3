@@ -132,7 +132,7 @@ async def main():
     api = IQOptionAPI()
     await api._connect()
     
-    asset = "EURUSD-OTC"
+    asset = "NZDJPY-OTC"
     timeframe = 60 # 1 minute
     count = 1000   # Number of candles to test
     max_gales = 0  # Testing without Martingale
@@ -179,8 +179,8 @@ async def main():
     print(f"{'='*40}\n")
     
     if total_trades > 0:
-        print("Last 5 Trades:")
-        print(trades[['time', 'trade_action', 'win', 'gale_level', 'pnl', 'cumulative_pnl']].tail(5))
+        print("Last 10 Trades:")
+        print(trades[['time', 'trade_action', 'win', 'gale_level', 'pnl', 'cumulative_pnl']].tail(10))
         
         # Export to Excel
         try:

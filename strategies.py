@@ -66,79 +66,113 @@ def analyze_strategy(candles_data, use_ai=True):
         if c in df.columns:
             df[c] = pd.to_numeric(df[c])
             
-    # --- Strategy 1: MA Crossover (Section 1 of Lua) ---
-    # Lua: smaFast(1), smaSlow(34), buffer1 = Fast - Slow, buffer2 = WMA(buffer1, 4)
-    df['sma_fast'] = df['close'].rolling(window=1).mean() # Effectively just close price
+    # --- Strategy 1: WMA-Smoothed Furious Crossover (Rei das Options Logic) ---
+    # Fast: SMA(1), Slow: SMA(34) -> Buffer1 = Fast - Slow
+    # Signal: WMA(Buffer1, 5) -> Buffer2
+    # Trigger: Cross of Buffer1 & Buffer2
+    
+    df['sma_fast'] = df['close'].rolling(window=1).mean() # Close
     df['sma_slow'] = df['close'].rolling(window=34).mean()
     
     df['buffer1'] = df['sma_fast'] - df['sma_slow']
-    df['buffer2'] = wma(df['buffer1'], 4)
+    
+    # Calculate WMA(5) of Buffer1
+    # Note: wma function expects positive input typically? No, WMA works on negatives.
+    # WMA Formula: Sum(Price * Weight) / Sum(Weights)
+    # Weights for period 5: [1, 2, 3, 4, 5] -> Sum 15
+    df['buffer2'] = df['buffer1'].rolling(window=5).apply(
+        lambda x: ((x * np.arange(1, 6)).sum()) / 15, 
+        raw=True
+    )
     
     # --- Strategy 2: Sniper Pattern (Section 3 of Lua) ---
-    # We need the last 4 candles: 
-    # [3] (Oldest), [2], [1] (Previous), [0] (Current/Forming)
+    # ... (Sniper Logic Unchanged) ...
+    # But we update signal generation below to use Buffer crossover
     
-    curr = df.iloc[-1] # Current forming candle
-    c1 = df.iloc[-2]   # Previous completed
+    # ... [Existing Sniper Code Lines 78-106] ... 
+    # (Checking if I need to re-include them. The tool replaces blocks.
+    # I should replace just the Signal Logic part.
+    # Let's keep Sniper logic variables definition but REWRITE the Signal Combination part)
+
+    curr = df.iloc[-1]
+    c1 = df.iloc[-2]
     c2 = df.iloc[-3]
     c3 = df.iloc[-4]
     
     # Sniper CALL Logic
     sniper_call = (
-        c3['open'] < c3['close'] and       # Candle 3: Green
-        c2['open'] < c2['close'] and       # Candle 2: Green
-        c1['open'] > c1['close'] and       # Candle 1: Red (Pullback)
-        c1['close'] > c2['open'] and       # Pullback didn't break trend start
+        c3['open'] < c3['close'] and
+        c2['open'] < c2['close'] and
+        c1['open'] > c1['close'] and
+        c1['close'] > c2['open'] and
         c1['open'] > c2['open'] and
-        curr['open'] < curr['close']       # Current: Green (Resumption)
+        curr['open'] < curr['close']
     )
     
     # Sniper PUT Logic
     sniper_put = (
-        c3['open'] > c3['close'] and       # Candle 3: Red
-        c2['open'] > c2['close'] and       # Candle 2: Red
-        c1['open'] < c1['close'] and       # Candle 1: Green (Pullback)
-        c1['close'] < c2['open'] and       # Pullback didn't break trend start
+        c3['open'] > c3['close'] and
+        c2['open'] > c2['close'] and
+        c1['open'] < c1['close'] and
+        c1['close'] < c2['open'] and
         c1['open'] < c2['open'] and
-        curr['open'] > curr['close']       # Current: Red (Resumption)
+        curr['open'] > curr['close']
     )
-    
-    if sniper_call:
-        return "CALL"
-    elif sniper_put:
-        return "PUT"
-        
-    # --- Strategy 3: MA Crossover (Fallback) ---
-    # Check if Buffer1 (Fast-Slow) crosses Buffer2 (Signal)
-    # Current candle ([-1]) vs Previous candle ([-2])
-    
-    ma_call = df['buffer1'].iloc[-1] > df['buffer2'].iloc[-1] and \
-              df['buffer1'].iloc[-2] < df['buffer2'].iloc[-2]
-              
-    ma_put = df['buffer1'].iloc[-1] < df['buffer2'].iloc[-1] and \
-             df['buffer1'].iloc[-2] > df['buffer2'].iloc[-2]
-             
-    signal = None
-    if ma_call: signal = "CALL"
-    if ma_put: signal = "PUT"
-    
-    # --- Strategy 4: Strict Trend Filter ---
-    # Only allow CALLs if Close > EMA50
-    # Only allow PUTs if Close < EMA50
-    df['ema_50'] = df['close'].ewm(span=50, adjust=False).mean()
 
-    # --- AI Confirmation ---
-    if signal:
-        # Check Trend
-        current_close = df['close'].iloc[-1]
-        current_ema = df['ema_50'].iloc[-1]
-        
-        if signal == "CALL" and current_close < current_ema:
-             logger.info(f"🚫 Trend Filter Blocked: CALL signal below EMA50 ({current_close} < {current_ema})")
-             signal = None
-        elif signal == "PUT" and current_close > current_ema:
-             logger.info(f"🚫 Trend Filter Blocked: PUT signal above EMA50 ({current_close} > {current_ema})")
-             signal = None
+    # --- Signal Generation ---
+    signal = None
+    
+    # Check Crossover at Close of Previous Candle (c1)
+    # We look for crossover happening between c2 (2 candles ago) and c1 (completed candle)
+    # OR current forming if we want Aggressive.
+    # Usually we trade on CLOSE.
+    
+    buf1_c1 = c1['buffer1'] # Value at close of prev
+    buf2_c1 = c1['buffer2']
+    
+    buf1_c2 = c2['buffer1'] # Value 2 candles ago
+    buf2_c2 = c2['buffer2']
+    
+    # CALL CROSS: Buffer1 crosses ABOVE Buffer2
+    # (Was Below/Equal before, Now Above)
+    ma_call = (buf1_c2 <= buf2_c2) and (buf1_c1 > buf2_c1)
+    
+    # PUT CROSS: Buffer1 crosses BELOW Buffer2
+    # (Was Above/Equal before, Now Below)
+    ma_put = (buf1_c2 >= buf2_c2) and (buf1_c1 < buf2_c1)
+    
+    if sniper_call or ma_call:
+        signal = "CALL"
+    elif sniper_put or ma_put:
+        signal = "PUT"
+
+    # --- Trend Filter (EMA 50) ---
+    # Only take CALL if Close > EMA50
+    # Only take PUT if Close < EMA50
+    
+    # We need EMA50
+    df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
+    
+    # Use c1 (Previous Completed Candle) for filtering
+    # Re-access via index to ensure we see the new 'ema50' column
+    filter_close = df.iloc[-2]['close']
+    filter_ema = df.iloc[-2]['ema50']
+
+    if signal == "CALL":
+        if filter_close < filter_ema:
+            logger.info(f"🚫 Trend Filter Blocked: CALL signal below EMA50 ({filter_close} < {filter_ema})")
+            return None
+            
+    if signal == "PUT":
+        if filter_close > filter_ema:
+            logger.info(f"🚫 Trend Filter Blocked: PUT signal above EMA50 ({filter_close} > {filter_ema})")
+            return None
+        # The original code had an 'elif' here, but the instruction implies replacing the whole block.
+        # The provided replacement code has an 'elif' inside the 'if signal == "PUT":' block,
+        # which is syntactically incorrect. I will assume the user meant to replace the entire
+        # trend filtering logic with the new one, and the `elif signal == "PUT" and current_close > current_ema:`
+        # was a remnant or typo in the provided snippet.
+        # The new logic correctly handles both CALL and PUT filters.
 
     if signal and ai_model and use_ai:
         # Prepare features for the *current* state

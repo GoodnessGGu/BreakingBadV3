@@ -59,7 +59,7 @@ class IQOptionAPI:
         self.websocket = WebSocketManager(self.message_handler)
         self.account_manager = AccountManager(self.websocket, self.message_handler)
         self.market_manager = MarketManager(self.websocket, self.message_handler)
-        self.trade_manager = TradeManager(self.websocket, self.message_handler, self.account_manager)
+        self.trade_manager = TradeManager(self.websocket, self.message_handler, self.account_manager, self.market_manager)
         logger.info('ALGO BOT initialized successfully')
 
     def check_connect(self):
@@ -151,7 +151,14 @@ class IQOptionAPI:
             self.websocket.start_websocket()
 
             # Authenticate websocket using session ID
-            self.websocket.send_message('ssid', self.get_session_id())
+            # Retry sending SSID a few times if socket is flaky
+            for _ in range(3):
+                try:
+                     self.websocket.send_message('ssid', self.get_session_id())
+                     break
+                except Exception as e:
+                     logger.warning(f"Failed to send SSID ({e}), retrying...")
+                     await asyncio.sleep(0.5)
 
             ## Wait for profile confirmation (indicates successful auth)
             while self.message_handler.profile_msg is None:
@@ -214,7 +221,7 @@ class IQOptionAPI:
         return self.account_manager.switch_account(account_type)
 
     # Market Data Methods
-    def get_candle_history(self, asset_name='EURUSD-op', count=50, timeframe=60):
+    def get_candle_history(self, asset_name='EURUSD-op', count=50, timeframe=60, end_time=None):
         """
         Retrieve historical candlestick data for an asset.
 
@@ -222,12 +229,13 @@ class IQOptionAPI:
             asset_name (str): Asset symbol. Defaults to 'EURUSD-op'
             count (int): Number of candles to retrieve. Defaults to 50
             timeframe (int): Timeframe in seconds. Defaults to 60
+            end_time (int): Optional timestamp to fetch up to.
 
         Returns:
             list: Historical candle data
         """
         self._ensure_connected()
-        return self.market_manager.get_candle_history(asset_name, count, timeframe)
+        return self.market_manager.get_candle_history(asset_name, count, timeframe, end_time=end_time)
 
     def save_candles_to_csv(self, candles_data=None, filename='candles'):
         """
@@ -304,19 +312,21 @@ class IQOptionAPI:
         self._ensure_connected()
         return await self.trade_manager._execute_digital_option_trade(asset, amount, direction, expiry=expiry)
 
-    async def get_trade_outcome(self, order_id: int ,expiry:int):
+    async def get_trade_outcome(self, order_id: int ,expiry:int, asset_name: str = None, direction: str = None):
         """
         Get the outcome of a completed trade.
 
         Args:
             order_id (int): ID of the trade order
             expiry (int): Expiry time in minutes
+            asset_name (str): Asset name for shadow verification
+            direction (str): Trade direction for shadow verification
 
         Returns:
             dict: Trade outcome (win/loss/refund) and payout details
         """
         self._ensure_connected()
-        return await self.trade_manager.get_trade_outcome(order_id, expiry=expiry)
+        return await self.trade_manager.get_trade_outcome(order_id, expiry=expiry, asset_name=asset_name, direction=direction)
 
     # ---- New binary option wrappers ----
     async def execute_binary_option_trade(self, asset: str, amount: int, direction: str,
@@ -336,19 +346,21 @@ class IQOptionAPI:
         self._ensure_connected()
         return await self.trade_manager._execute_binary_option_trade(asset, amount, direction, expiry=expiry)
 
-    async def get_binary_trade_outcome(self, order_id: int, expiry: int = 1):
+    async def get_binary_trade_outcome(self, order_id: int, expiry: int = 1, asset_name: str = None, direction: str = None):
         """
         Get the outcome of a binary options trade.
 
         Args:
             order_id (int): Order ID of the binary trade
             expiry (int): Expiry time in minutes
+            asset_name (str): Asset name for shadow verification
+            direction (str): Trade direction for shadow verification
 
         Returns:
             tuple: (success: bool, pnl: float or None)
         """
         self._ensure_connected()
-        return await self.trade_manager.get_binary_trade_outcome(order_id, expiry=expiry)
+        return await self.trade_manager.get_binary_trade_outcome(order_id, expiry=expiry, asset_name=asset_name, direction=direction)
 
     async def get_open_positions(self):
         """
@@ -457,9 +469,9 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
 
             pnl_ok, pnl = False, None
             if trade_type == "digital":
-                 pnl_ok, pnl = await api.get_trade_outcome(order_id, expiry=expiry)
+                 pnl_ok, pnl = await api.get_trade_outcome(order_id, expiry=expiry, asset_name=asset, direction=direction)
             else:
-                 pnl_ok, pnl = await api.get_binary_trade_outcome(order_id, expiry=expiry)
+                 pnl_ok, pnl = await api.get_binary_trade_outcome(order_id, expiry=expiry, asset_name=asset, direction=direction)
 
             balance = api.get_current_account_balance()
 

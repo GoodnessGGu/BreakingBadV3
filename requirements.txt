@@ -10,3 +10,4 @@ python-dotenv
 websockets
 telethon
 websocket-client
+requests

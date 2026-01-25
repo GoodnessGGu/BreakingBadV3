@@ -195,7 +195,7 @@ class IQOptionAPI:
         return self.account_manager.switch_account(account_type)
 
     # Market Data Methods
-    def get_candle_history(self, asset_name='EURUSD-op', count=50, timeframe=60):
+    def get_candle_history(self, asset_name='EURUSD-op', count=50, timeframe=60, end_time=None):
         """
         Retrieve historical candlestick data for an asset.
 
@@ -203,12 +203,13 @@ class IQOptionAPI:
             asset_name (str): Asset symbol. Defaults to 'EURUSD-op'
             count (int): Number of candles to retrieve. Defaults to 50
             timeframe (int): Timeframe in seconds. Defaults to 60
+            end_time (int): UNIX timestamp to fetch candles before. Defaults to None.
 
         Returns:
             list: Historical candle data
         """
         self._ensure_connected()
-        return self.market_manager.get_candle_history(asset_name, count, timeframe)
+        return self.market_manager.get_candle_history(asset_name, count, timeframe, end_time)
 
     def save_candles_to_csv(self, candles_data=None, filename='candles'):
         """

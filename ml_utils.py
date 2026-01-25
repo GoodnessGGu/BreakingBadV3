@@ -89,14 +89,38 @@ def prepare_features(df):
     df['adx'] = calculate_adx(df, 14)
     df['atr'] = calculate_atr(df, 14)
     
+    # NEW: Rate of Change (Momentum)
+    df['roc_5'] = df['close'].pct_change(5)
+    df['roc_10'] = df['close'].pct_change(10)
+    
     # 2. Moving Averages
     df['sma_20'] = df['close'].rolling(window=20).mean()
     df['sma_50'] = df['close'].rolling(window=50).mean()
+    df['ema_100'] = df['close'].ewm(span=100, adjust=False).mean()
+    
+    # NEW: Price Distance from MAs
+    df['dist_sma20'] = (df['close'] - df['sma_20']) / df['close']
+    df['dist_sma50'] = (df['close'] - df['sma_50']) / df['close'] 
     
     # 3. Bollinger Bands
     df['bb_upper'], df['bb_lower'] = calculate_bollinger_bands(df['close'], 20, 2)
     df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['close']
     df['bb_pos'] = (df['close'] - df['bb_lower']) / (df['bb_upper'] - df['bb_lower'])
+    
+    # NEW: Volume Indicators
+    if 'volume' in df.columns:
+        df['vol_sma20'] = df['volume'].rolling(20).mean()
+        df['vol_ratio'] = df['volume'] / (df['vol_sma20'] + 1e-9)
+        
+    # NEW: Pivot Points (Classic)
+    # Using rolling window to estimate daily high/low roughly or just local swing
+    # For 1m candles, we can use local pivots (e.g. 60 min)
+    # Better to use recent 50-candle High/Low/Close for support/resistance context
+    df['recent_high'] = df['max'].rolling(50).max()
+    df['recent_low'] = df['min'].rolling(50).min()
+    df['pivot'] = (df['recent_high'] + df['recent_low'] + df['close']) / 3
+    df['res1'] = (2 * df['pivot']) - df['recent_low']
+    df['sup1'] = (2 * df['pivot']) - df['recent_high']
     
     # 4. Price Action
     df['body_size'] = abs(df['close'] - df['open'])
@@ -123,11 +147,45 @@ def prepare_features(df):
     df.loc[is_bullish_engulfing, 'pattern_engulfing'] = 1
     df.loc[is_bearish_engulfing, 'pattern_engulfing'] = -1
 
+    # NEW: Signal Indicators as Features
+    # AM_IQ logic
+    df['sma_fast'] = df['close'].rolling(window=1).mean()
+    df['sma_slow'] = df['close'].rolling(window=34).mean()
+    df['buffer1'] = df['sma_fast'] - df['sma_slow']
+    df['buffer2'] = df['buffer1'].rolling(4).apply(
+        lambda x: ((x * np.arange(1, 5)).sum()) / np.arange(1, 5).sum(), 
+        raw=True
+    )
+    df['amiq_call'] = ((df['buffer1'] > df['buffer2']) & (df['buffer1'].shift(1) < df['buffer2'].shift(1))).astype(int)
+    df['amiq_put'] = ((df['buffer1'] < df['buffer2']) & (df['buffer1'].shift(1) > df['buffer2'].shift(1))).astype(int)
+    
+    # Sniper logic
+    prev1_o = df['open'].shift(1)
+    prev1_c = df['close'].shift(1)
+    prev2_o = df['open'].shift(2)
+    prev2_c = df['close'].shift(2)
+    prev3_o = df['open'].shift(3)
+    prev3_c = df['close'].shift(3)
+    curr_o = df['open']
+    curr_c = df['close']
+    
+    df['sniper_call'] = (
+        (prev3_c > prev3_o) & (prev2_c > prev2_o) &
+        (prev1_c < prev1_o) & (prev1_c > prev2_o) &
+        (prev1_o > prev2_o) & (curr_c > curr_o)
+    ).astype(int)
+    
+    df['sniper_put'] = (
+        (prev3_c < prev3_o) & (prev2_c < prev2_o) &
+        (prev1_c > prev1_o) & (prev1_c < prev2_o) &
+        (prev1_o < prev2_o) & (curr_c < curr_o)
+    ).astype(int)
+
     # 5. Lagged Features (Previous candles)
     for lag in [1, 2, 3]:
         df[f'close_lag_{lag}'] = df['close'].shift(lag)
         df[f'rsi_lag_{lag}'] = df['rsi'].shift(lag)
-    
+        
     # Drop rows with NaN (due to rolling windows)
     df = df.dropna()
     return df
@@ -142,6 +200,7 @@ def train_model(data_path="training_data.csv"):
     
     logger.info("Loading data...")
     df = pd.read_csv(data_path)
+    df.dropna(inplace=True)
     
     # Separate features (X) and target (y)
     if 'outcome' not in df.columns:
@@ -221,3 +280,6 @@ def predict_signal(model, features_df):
     except Exception as e:
         logger.error(f"Prediction error: {e}")
         return 1 # Fallback
+
+if __name__ == "__main__":
+    train_model()

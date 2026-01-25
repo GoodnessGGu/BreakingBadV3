@@ -132,16 +132,28 @@ async def main():
     api = IQOptionAPI()
     await api._connect()
     
-    asset = "GBPUSD-OTC"
+    # Test multiple pairs (REAL + OTC)
+    pairs = [
+        "EURUSD", "GBPUSD", "USDJPY",  # REAL pairs
+        "EURUSD-OTC", "GBPUSD-OTC", "USDJPY-OTC"  # OTC pairs
+    ]
+    
     timeframe = 60 # 1 minute
     count = 1000   # Number of candles to test
     max_gales = 0  # Testing without Martingale
     
-    df = await fetch_historical_data(api, asset, timeframe, count)
-    if df is None: return
+    for asset in pairs:
+        print(f"\n{'='*60}")
+        print(f"TESTING: {asset}")
+        print(f"{'='*60}")
         
-    df = apply_strategy(df)
-    df = simulate_trades(df, max_gales=max_gales)
+        df = await fetch_historical_data(api, asset, timeframe, count)
+        if df is None: 
+            logger.warning(f"Skipping {asset} - no data available")
+            continue
+            
+        df = apply_strategy(df)
+        df = simulate_trades(df, max_gales=max_gales)
     
     # --- Statistics ---
     # Filter only rows where a trade occurred

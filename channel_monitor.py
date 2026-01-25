@@ -11,6 +11,7 @@ from settings import config, TIMEZONE_AUTO
 from iqclient import run_trade
 from signal_parser import parse_signals_from_text
 from channel_signal_parser import parse_channel_signal, is_signal_message
+from strategies import analyze_strategy
 
 logger = logging.getLogger(__name__)
 
@@ -197,9 +198,27 @@ class ChannelMonitor:
             if self.notification_callback:
                 await self.notification_callback(msg)
 
-        # Try to pass a notification callback if run_trade supports it,
-        # otherwise fall back to basic call.
         api = getattr(self, 'api_instance', None) or getattr(self, 'iq_api', None) or self.api_instance
+
+        # --- NEW: Strategy Validation Filter ---
+        try:
+            # Fetch history for validation
+            # Use 280 candles (same as realtime_bot.py)
+            candles = api.get_candle_history(pair, 280, 60) 
+            strategy_signal = analyze_strategy(candles)
+            
+            if strategy_signal != direction.upper():
+                block_msg = f"❌ BLOCKED Channel Signal: {pair} {direction} (Strategy/AI Disagrees: {strategy_signal})"
+                logger.info(block_msg)
+                if self.notification_callback:
+                    await self.notification_callback(block_msg)
+                return None
+            else:
+                logger.info(f"✅ APPROVED Channel Signal: {pair} {direction} (Strategy/AI Confirmed)")
+        except Exception as e:
+            logger.error(f"Error validating signal with strategy: {e}")
+            # If validation fails, we proceed with caution OR block.
+            # return None 
 
         try:
             # Assuming run_trade is imported from iqclient
@@ -239,6 +258,24 @@ class ChannelMonitor:
                     await self.notification_callback(msg)
 
             api = getattr(self, 'api_instance', None) or getattr(self, 'iq_api', None) or self.api_instance
+
+            # --- NEW: Strategy Validation Filter ---
+            try:
+                # Use 280 candles for validation
+                candles = api.get_candle_history(signal['pair'], 280, 60)
+                strategy_signal = analyze_strategy(candles)
+                
+                if strategy_signal != signal['direction'].upper():
+                    block_msg = f"❌ BLOCKED Channel Signal: {signal['pair']} {signal['direction']} (Strategy/AI Disagrees: {strategy_signal})"
+                    logger.info(block_msg)
+                    if self.notification_callback:
+                        await self.notification_callback(block_msg)
+                    return None
+                else:
+                    logger.info(f"✅ APPROVED Channel Signal: {signal['pair']} {signal['direction']} (Strategy/AI Confirmed)")
+            except Exception as e:
+                logger.error(f"Error validating signal with strategy: {e}")
+                # return None 
 
             try:
                 result = await run_trade(api, signal['pair'], signal['direction'], signal['expiry'], config.trade_amount, notification_callback=trade_notification)

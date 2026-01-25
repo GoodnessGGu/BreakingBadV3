@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 import logging
-from ml_utils import load_model, predict_signal, prepare_features
+from ml_utils import load_model, predict_signal, prepare_features, calculate_rsi, calculate_atr
 
 logger = logging.getLogger(__name__)
 
@@ -26,9 +26,8 @@ def wma(series, period):
 def analyze_strategy(candles_data, use_ai=True):
     """
     Analyzes candle data and returns a signal ('CALL', 'PUT', or None).
-    Implements the 'Sniper' and 'MA Crossover' logic from newscript.txt.
     """
-    if not candles_data or len(candles_data) < 35:
+    if not candles_data or len(candles_data) < 205: # Need 200 for EMA200
         return None
 
     # Convert list of dicts to DataFrame
@@ -40,86 +39,131 @@ def analyze_strategy(candles_data, use_ai=True):
         if c in df.columns:
             df[c] = pd.to_numeric(df[c])
             
-    # --- Strategy 1: MA Crossover (Section 1 of Lua) ---
-    # Lua: smaFast(1), smaSlow(34), buffer1 = Fast - Slow, buffer2 = WMA(buffer1, 4)
-    df['sma_fast'] = df['close'].rolling(window=1).mean() # Effectively just close price
+    # --- Indicators for Filters ---
+    if 'rsi' not in df.columns:
+        df['rsi'] = calculate_rsi(df['close'], 14)
+    if 'ema_200' not in df.columns:
+        df['ema_200'] = df['close'].ewm(span=200, adjust=False).mean()
+        
+    rsi_curr = df['rsi'].iloc[-1]
+    ema200_curr = df['ema_200'].iloc[-1]
+    close_curr = df['close'].iloc[-1]
+
+    # --- Strategy 1: MA Crossover (AM_IQ) ---
+    df['sma_fast'] = df['close'].rolling(window=1).mean() 
     df['sma_slow'] = df['close'].rolling(window=34).mean()
-    
     df['buffer1'] = df['sma_fast'] - df['sma_slow']
     df['buffer2'] = wma(df['buffer1'], 4)
     
-    # --- Strategy 2: Sniper Pattern (Section 3 of Lua) ---
-    # We need the last 4 candles: 
-    # [3] (Oldest), [2], [1] (Previous), [0] (Current/Forming)
-    
-    curr = df.iloc[-1] # Current forming candle
-    c1 = df.iloc[-2]   # Previous completed
+    amiq_call = df['buffer1'].iloc[-1] > df['buffer2'].iloc[-1] and \
+                df['buffer1'].iloc[-2] < df['buffer2'].iloc[-2]
+              
+    amiq_put = df['buffer1'].iloc[-1] < df['buffer2'].iloc[-1] and \
+               df['buffer1'].iloc[-2] > df['buffer2'].iloc[-2]
+
+    # --- Strategy 2: Sniper Pattern ---
+    curr = df.iloc[-1]
+    c1 = df.iloc[-2]
     c2 = df.iloc[-3]
     c3 = df.iloc[-4]
     
-    # Sniper CALL Logic
     sniper_call = (
-        c3['open'] < c3['close'] and       # Candle 3: Green
-        c2['open'] < c2['close'] and       # Candle 2: Green
-        c1['open'] > c1['close'] and       # Candle 1: Red (Pullback)
-        c1['close'] > c2['open'] and       # Pullback didn't break trend start
-        c1['open'] > c2['open'] and
-        curr['open'] < curr['close']       # Current: Green (Resumption)
+        c3['open'] < c3['close'] and c2['open'] < c2['close'] and
+        c1['open'] > c1['close'] and c1['close'] > c2['open'] and
+        c1['open'] > c2['open'] and curr['open'] < curr['close']
     )
     
-    # Sniper PUT Logic
     sniper_put = (
-        c3['open'] > c3['close'] and       # Candle 3: Red
-        c2['open'] > c2['close'] and       # Candle 2: Red
-        c1['open'] < c1['close'] and       # Candle 1: Green (Pullback)
-        c1['close'] < c2['open'] and       # Pullback didn't break trend start
-        c1['open'] < c2['open'] and
-        curr['open'] > curr['close']       # Current: Red (Resumption)
+        c3['open'] > c3['close'] and c2['open'] > c2['close'] and
+        c1['open'] < c1['close'] and c1['close'] < c2['open'] and
+        c1['open'] < c2['open'] and curr['open'] > curr['close']
     )
     
-    if sniper_call:
-        return "CALL"
-    elif sniper_put:
-        return "PUT"
-        
-    # --- Strategy 3: MA Crossover (Fallback) ---
-    # Check if Buffer1 (Fast-Slow) crosses Buffer2 (Signal)
-    # Current candle ([-1]) vs Previous candle ([-2])
-    
-    ma_call = df['buffer1'].iloc[-1] > df['buffer2'].iloc[-1] and \
-              df['buffer1'].iloc[-2] < df['buffer2'].iloc[-2]
-              
-    ma_put = df['buffer1'].iloc[-1] < df['buffer2'].iloc[-1] and \
-             df['buffer1'].iloc[-2] > df['buffer2'].iloc[-2]
-             
+    # --- Signal Aggregation ---
     signal = None
-    if ma_call: signal = "CALL"
-    if ma_put: signal = "PUT"
+    source = ""
     
+    # 3. Multi-Strategy / Confluence Logic
+    # We track how many signals we have
+    signals_found = []
+    if amiq_call: signals_found.append(("CALL", "AM_IQ"))
+    if sniper_call: signals_found.append(("CALL", "Sniper"))
+    if amiq_put: signals_found.append(("PUT", "AM_IQ"))
+    if sniper_put: signals_found.append(("PUT", "Sniper"))
+    
+    if not signals_found:
+        return None
+        
+    # Check for contradictions
+    directions = set([s[0] for s in signals_found])
+    if len(directions) > 1:
+        logger.info(f"❌ CONTRADICTION: Both CALL and PUT found. Skipping.")
+        return None
+        
+    # Standard choice: Use the first one found, but track count
+    signal, source = signals_found[0]
+    is_confluence = len(signals_found) > 1
+    
+    if is_confluence:
+        source = f"{source}+Confluence"
+        
+    # --- PHASE 1 & 3: ADVANCED SAFETY FILTERS ---
+    
+    # 4. Time-Based Session Filter (Phase 3)
+    from datetime import datetime
+    current_hour = datetime.utcnow().hour
+    # Avoid: Extremes only. Hour 0 (OTC spread) and 23 (market close)
+    if current_hour in [0, 23]:
+         logger.info(f"❌ BLOCKED {source} {signal}: Risky Session (Hour {current_hour})")
+         return None
+
+    # 5. ATR Volatility Filter (Phase 3)
+    if 'atr' not in df.columns:
+        df['atr'] = calculate_atr(df, 14)
+    
+    atr_curr = df['atr'].iloc[-1]
+    atr_avg = df['atr'].rolling(100).mean().iloc[-1]
+    
+    if not pd.isna(atr_avg):
+        # Allow more volatility: spike threshold 3.5x, dead market 0.2x
+        if atr_curr > (atr_avg * 3.5):
+            logger.info(f"❌ BLOCKED {source} {signal}: Volatility Spike (ATR {atr_curr:.5f} > Avg*3.5)")
+            return None
+        if atr_curr < (atr_avg * 0.2):
+            logger.info(f"❌ BLOCKED {source} {signal}: Dead Market (ATR {atr_curr:.5f} < Avg*0.2)")
+            return None
+
+    # 1. RSI Filter (Phase 1)
+    if signal == "CALL" and rsi_curr > 70:
+        logger.info(f"❌ BLOCKED {source} CALL: RSI {rsi_curr:.1f} > 70 (Overbought)")
+        return None
+    elif signal == "PUT" and rsi_curr < 30:
+        logger.info(f"❌ BLOCKED {source} PUT: RSI {rsi_curr:.1f} < 30 (Oversold)")
+        return None
+        
+    # 2. EMA200 Trend Filter (Phase 1)
+    if signal == "CALL" and close_curr < ema200_curr:
+        logger.info(f"❌ BLOCKED {source} CALL: Price below EMA200 (Downtrend)")
+        return None
+    elif signal == "PUT" and close_curr > ema200_curr:
+        logger.info(f"❌ BLOCKED {source} PUT: Price above EMA200 (Uptrend)")
+        return None
+            
     # --- AI Confirmation ---
-    if signal and ai_model and use_ai:
-        # Prepare features for the *current* state
-        # We need to pass the DataFrame. prepare_features will re-calculate indicators.
-        # This is slightly inefficient but safe.
+    if signals_found and ai_model and use_ai:
         try:
             df_features = prepare_features(df)
-            
-            # We need the last row (current candle) to predict
             if not df_features.empty:
                 current_features = df_features.iloc[[-1]]
                 prediction = predict_signal(ai_model, current_features)
                 
-                if prediction == 0: # 0 = Loss predicted
-                    logger.info(f"[AI] REJECTED {signal} signal on {df.iloc[-1].get('time', 'unknown')}")
+                if prediction == 0:
+                    logger.info(f"[AI] REJECTED {signal} ({source})")
                     return None
                 else:
-                    logger.info(f"[AI] APPROVED {signal} signal.")
+                    logger.info(f"[AI] APPROVED {signal} ({source})")
         except Exception as e:
             logger.error(f"AI Prediction failed: {e}")
-            # Fallback: Allow signal if AI fails? or Block? 
-            # Let's allow it for now to avoid stopping trading on bugs.
             pass
 
     return signal
-    
-    return None

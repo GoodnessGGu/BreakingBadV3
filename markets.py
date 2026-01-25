@@ -48,7 +48,7 @@ class MarketManager:
             return UNDERLYING_ASSESTS[asset_name]
         raise KeyError(f'{asset_name} not found!')
     
-    def get_candle_history(self, asset_name: str, count: int = 50, timeframe: int = 60):
+    def get_candle_history(self, asset_name: str, count: int = 50, timeframe: int = 60, end_time: int = None):
         """
         Get historical candle data for an asset
         
@@ -56,6 +56,7 @@ class MarketManager:
             asset_name: Name of the trading asset
             count: Number of candles to retrieve
             timeframe: Timeframe of each candle in seconds
+            end_time: Unix timestamp to fetch candles before
         """
 
         # Reset state and prepare request
@@ -69,7 +70,7 @@ class MarketManager:
                 "active_id": self.get_asset_id(asset_name),
                 "size": timeframe,
                 "count": count,
-                "to": self.message_handler.server_time,
+                "to": end_time if end_time else self.message_handler.server_time,
                 "only_closed": True,
                 "split_normalization": True
             }

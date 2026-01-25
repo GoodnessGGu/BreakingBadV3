@@ -509,9 +509,9 @@ async def auto_trade_loop(asset, timeframe, context, chat_id):
 
             await ensure_connection()
             
-            # Fetch candles (Need enough for MA34 + buffer)
-            # Assuming api.get_candles returns list of dicts
-            candles = api.get_candle_history(asset, 50, tf_seconds)
+            # Fetch candles (Need enough for EMA200 + Indicators)
+            # 280 is safe for all strategies.py filters.
+            candles = api.get_candle_history(asset, 280, tf_seconds)
             
             signal = analyze_strategy(candles)
             

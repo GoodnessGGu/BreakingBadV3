@@ -170,11 +170,17 @@ async def main():
     api = IQOptionAPI()
     await api._connect()
     
-    # Collect data for a few assets to generalize better
-    assets = ["EURUSD-OTC", "USDJPY-OTC", "GBPUSD-OTC"]
+    # Choose Market Type to collect
+    # OTC_ASSETS = ["EURUSD-OTC", "USDJPY-OTC", "GBPUSD-OTC"]
+    # REAL_ASSETS = ["EURUSD", "GBPUSD", "USDJPY", "EURJPY"]
+    
+    market_type = "real" # Change to "real" for Real market data
+    assets = ["EURUSD-OTC", "USDJPY-OTC", "GBPUSD-OTC"] if market_type == "otc" else ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "EURJPY"]
+    
     all_data = []
     
     for asset in assets:
+        # Increase count for better generalization
         df = await collect_and_label_data(api, asset, count=20000)
         if df is not None:
              df['asset'] = asset
@@ -182,8 +188,13 @@ async def main():
     
     if all_data:
         final_df = pd.concat(all_data, ignore_index=True)
-        final_df.to_csv("training_data.csv", index=False)
-        logger.info(f"Saved {len(final_df)} total records to training_data.csv")
+        filename = f"training_data_{market_type}.csv"
+        final_df.to_csv(filename, index=False)
+        logger.info(f"Saved {len(final_df)} total records to {filename}")
+        
+        # Optionally trigger training automatically
+        from ml_utils import train_model
+        train_model(filename, market_type)
     else:
         logger.error("Failed to collect any data.")
 

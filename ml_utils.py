@@ -12,7 +12,9 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 MODELS_DIR = "models"
-MODEL_PATH = os.path.join(MODELS_DIR, "trade_model.pkl")
+MODEL_PATH_TEMPLATE = os.path.join(MODELS_DIR, "trade_model_{}.pkl")
+# Legacy path for migration/fallback
+LEGACY_MODEL_PATH = os.path.join(MODELS_DIR, "trade_model.pkl")
 
 # --- Indicators ---
 def calculate_rsi(series, period=14):
@@ -190,9 +192,10 @@ def prepare_features(df):
     df = df.dropna()
     return df
 
-def train_model(data_path="training_data.csv"):
+def train_model(data_path="training_data.csv", market_type="otc"):
     """
     Trains a Gradient Boosting model using labeled data.
+    market_type: "otc" or "real"
     """
     if not os.path.exists(data_path):
         logger.error(f"Data file not found: {data_path}")
@@ -236,17 +239,28 @@ def train_model(data_path="training_data.csv"):
     if not os.path.exists(MODELS_DIR):
         os.makedirs(MODELS_DIR)
         
-    joblib.dump(clf, MODEL_PATH)
-    logger.info(f"Model saved to {MODEL_PATH}")
+    save_path = MODEL_PATH_TEMPLATE.format(market_type)
+    joblib.dump(clf, save_path)
+    logger.info(f"Model saved to {save_path}")
     return clf
 
-def load_model():
-    """Loads the trained model."""
-    if os.path.exists(MODEL_PATH):
+def load_model(market_type="otc"):
+    """Loads the trained model for a specific market type."""
+    path = MODEL_PATH_TEMPLATE.format(market_type)
+    
+    if os.path.exists(path):
         try:
-            return joblib.load(MODEL_PATH)
+            return joblib.load(path)
         except Exception as e:
-            logger.error(f"Failed to load model: {e}")
+            logger.error(f"Failed to load {market_type} model: {e}")
+    elif market_type == "otc" and os.path.exists(LEGACY_MODEL_PATH):
+        # Migration logic: if otc model doesn't exist but legacy one does, load legacy
+        try:
+            logger.info(f"Loading legacy model for OTC...")
+            return joblib.load(LEGACY_MODEL_PATH)
+        except Exception as e:
+            logger.error(f"Failed to load legacy model: {e}")
+    
     return None
 
 def predict_signal(model, features_df):

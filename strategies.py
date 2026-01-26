@@ -5,16 +5,23 @@ from ml_utils import load_model, predict_signal, prepare_features, calculate_rsi
 
 logger = logging.getLogger(__name__)
 
-# Load AI Model
-try:
-    ai_model = load_model()
-    if ai_model:
-        logger.info("AI Model loaded successfully.")
-    else:
-        logger.warning("⚠️ No AI model found. AI filtering disabled.")
-except Exception as e:
-    logger.error(f"Failed to load AI model: {e}")
-    ai_model = None
+# Load AI Models
+ai_models = {"otc": None, "real": None}
+
+def load_all_models():
+    global ai_models
+    for mtype in ai_models.keys():
+        try:
+            model = load_model(mtype)
+            if model:
+                logger.info(f"AI Model ({mtype.upper()}) loaded successfully.")
+                ai_models[mtype] = model
+            else:
+                logger.warning(f"⚠️ No {mtype.upper()} AI model found.")
+        except Exception as e:
+            logger.error(f"Failed to load {mtype.upper()} model: {e}")
+
+load_all_models()
 
 def wma(series, period):
     """Calculates Weighted Moving Average."""
@@ -150,20 +157,28 @@ def analyze_strategy(candles_data, use_ai=True):
         return None
             
     # --- AI Confirmation ---
-    if signals_found and ai_model and use_ai:
+    # Determine model type
+    asset = candles_data[-1].get('asset', 'unknown').upper() if isinstance(candles_data[-1], dict) else "unknown"
+    # Fallback if asset not in dict: sometimes it's passed separately or inferred
+    # For now, let's assume we can check if it ends with -OTC
+    is_otc = "-OTC" in asset or "OTC" in asset
+    mtype = "otc" if is_otc else "real"
+    selected_model = ai_models.get(mtype)
+
+    if signals_found and selected_model and use_ai:
         try:
             df_features = prepare_features(df)
             if not df_features.empty:
                 current_features = df_features.iloc[[-1]]
-                prediction = predict_signal(ai_model, current_features)
+                prediction = predict_signal(selected_model, current_features)
                 
                 if prediction == 0:
-                    logger.info(f"[AI] REJECTED {signal} ({source})")
+                    logger.info(f"[AI-{mtype.upper()}] REJECTED {signal} ({source})")
                     return None
                 else:
-                    logger.info(f"[AI] APPROVED {signal} ({source})")
+                    logger.info(f"[AI-{mtype.upper()}] APPROVED {signal} ({source})")
         except Exception as e:
-            logger.error(f"AI Prediction failed: {e}")
+            logger.error(f"AI Prediction failed for {mtype}: {e}")
             pass
 
     return signal

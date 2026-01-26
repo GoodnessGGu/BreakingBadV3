@@ -139,7 +139,7 @@ async def collect_and_label_data(api, asset, count=5000, timeframe=60):
     max_idx = df_features.index.max()
     
     for idx in valid_indices:
-        if idx + 1 > max_idx:
+        if idx + 5 > max_idx:
             continue
             
         entry_candle = df_features.loc[idx]
@@ -147,16 +147,29 @@ async def collect_and_label_data(api, asset, count=5000, timeframe=60):
         
         sig = entry_candle['signal']
         
-        is_win = False
+        # 1-Minute Outcome
+        is_win_1m = False
         if sig == "CALL":
-            is_win = next_candle['close'] > next_candle['open']
+            is_win_1m = next_candle['close'] > next_candle['open']
         elif sig == "PUT":
-            is_win = next_candle['close'] < next_candle['open']
+            is_win_1m = next_candle['close'] < next_candle['open']
             
+        # 5-Minute Outcome
+        # Entry at next_candle['open'], Exit at df_features.loc[idx+5]['close']
+        exit_candle_5m = df_features.loc[idx+5]
+        is_win_5m = False
+        if sig == "CALL":
+            is_win_5m = exit_candle_5m['close'] > next_candle['open']
+        elif sig == "PUT":
+            is_win_5m = exit_candle_5m['close'] < next_candle['open']
+
         row = entry_candle.copy()
-        row['outcome'] = 1 if is_win else 0
+        row['outcome_1m'] = 1 if is_win_1m else 0
+        row['outcome_5m'] = 1 if is_win_5m else 0
         
-        # Clean up utility columns if desired, or keep them
+        # Keep legacy 'outcome' for backward compatibility
+        row['outcome'] = row['outcome_1m']
+        
         labeled_data.append(row)
 
     if not labeled_data:
@@ -170,33 +183,33 @@ async def main():
     api = IQOptionAPI()
     await api._connect()
     
-    # Choose Market Type to collect
-    # OTC_ASSETS = ["EURUSD-OTC", "USDJPY-OTC", "GBPUSD-OTC"]
-    # REAL_ASSETS = ["EURUSD", "GBPUSD", "USDJPY", "EURJPY"]
+    market_configs = [
+        {"type": "otc", "assets": ["EURUSD-OTC", "USDJPY-OTC", "GBPUSD-OTC"]},
+        {"type": "real", "assets": ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "EURJPY"]}
+    ]
     
-    market_type = "real" # Change to "real" for Real market data
-    assets = ["EURUSD-OTC", "USDJPY-OTC", "GBPUSD-OTC"] if market_type == "otc" else ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "EURJPY"]
+    all_combined_data = []
     
-    all_data = []
-    
-    for asset in assets:
-        # Increase count for better generalization
-        df = await collect_and_label_data(api, asset, count=20000)
-        if df is not None:
-             df['asset'] = asset
-             all_data.append(df)
-    
-    if all_data:
-        final_df = pd.concat(all_data, ignore_index=True)
-        filename = f"training_data_{market_type}.csv"
-        final_df.to_csv(filename, index=False)
-        logger.info(f"Saved {len(final_df)} total records to {filename}")
+    for config in market_configs:
+        market_type = config["type"]
+        assets = config["assets"]
+        logger.info(f"--- Collecting {market_type.upper()} Market Data ---")
         
-        # Optionally trigger training automatically
-        from ml_utils import train_model
-        train_model(filename, market_type)
+        for asset in assets:
+            # Fetch 15000 candles per asset to get a large, balanced dataset
+            df = await collect_and_label_data(api, asset, count=15000)
+            if df is not None:
+                df['asset'] = asset
+                df['market_type'] = market_type
+                all_combined_data.append(df)
+    
+    if all_combined_data:
+        final_df = pd.concat(all_combined_data, ignore_index=True)
+        # Unified training data for the Neural Network
+        final_df.to_csv("training_data.csv", index=False)
+        logger.info(f"✅ Saved {len(final_df)} total records to training_data.csv (REAL & OTC)")
     else:
-        logger.error("Failed to collect any data.")
+        logger.error("❌ Failed to collect any data.")
 
 if __name__ == "__main__":
     asyncio.run(main())

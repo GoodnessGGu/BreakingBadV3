@@ -40,6 +40,7 @@ class ChannelMonitor:
         self.notification_callback = notification_callback
         self.client: Optional[TelegramClient] = None
         self.is_running = False
+        self.gale_levels = {} # { "EURUSD": 0 }
 
     async def start(self, channel_identifier: Optional[str] = None):
         """Start monitoring a channel. If `channel_identifier` is provided it overrides
@@ -205,7 +206,7 @@ class ChannelMonitor:
             # Fetch history for validation
             # Use 280 candles (same as realtime_bot.py)
             candles = api.get_candle_history(pair, 280, 60) 
-            strategy_signal = analyze_strategy(candles)
+            strategy_signal = analyze_strategy(candles, expiry=expiry)
             
             if strategy_signal != direction.upper():
                 block_msg = f"❌ BLOCKED Channel Signal: {pair} {direction} (Strategy/AI Disagrees: {strategy_signal})"
@@ -222,11 +223,35 @@ class ChannelMonitor:
 
         try:
             # Assuming run_trade is imported from iqclient
-            # Verify if run_trade accepts max_gales? Yes.
-            result = await run_trade(api, pair, direction, expiry, config.trade_amount, notification_callback=trade_notification)
-        except TypeError:
-            # run_trade doesn't accept notification_callback in some versions?
-            result = await run_trade(api, pair, direction, expiry, config.trade_amount)
+            current_gale = self.gale_levels.get(pair, 0)
+            amount = config.trade_amount * (config.martingale_multiplier ** current_gale)
+            
+            if current_gale > 0:
+                 sym = api.get_currency_symbol()
+                 logger.info(f"🔄 Smart Martingale Recovery (Channel): {pair} at Gale {current_gale} ({sym}{amount:.2f})")
+
+            # run_trade call
+            result = await run_trade(
+                api, pair, direction, expiry, amount, 
+                notification_callback=trade_notification,
+                auto_martingale=not config.smart_martingale_channel
+            )
+            
+            # Update state
+            if config.smart_martingale_channel:
+                if result['result'] == "WIN":
+                    self.gale_levels[pair] = 0
+                elif result['result'] == "LOSS":
+                    new_gale = current_gale + 1
+                    if new_gale > config.max_martingale_gales:
+                        logger.warning(f"💀 Max gales reached on {pair} (Channel). Resetting.")
+                        self.gale_levels[pair] = 0
+                    else:
+                        self.gale_levels[pair] = new_gale
+
+        except Exception as e:
+            logger.error(f"Error executing channel trade: {e}")
+            result = None
 
         return result
 
@@ -263,7 +288,7 @@ class ChannelMonitor:
             try:
                 # Use 280 candles for validation
                 candles = api.get_candle_history(signal['pair'], 280, 60)
-                strategy_signal = analyze_strategy(candles)
+                strategy_signal = analyze_strategy(candles, expiry=signal['expiry'])
                 
                 if strategy_signal != signal['direction'].upper():
                     block_msg = f"❌ BLOCKED Channel Signal: {signal['pair']} {signal['direction']} (Strategy/AI Disagrees: {strategy_signal})"
@@ -278,22 +303,34 @@ class ChannelMonitor:
                 # return None 
 
             try:
-                result = await run_trade(api, signal['pair'], signal['direction'], signal['expiry'], config.trade_amount, notification_callback=trade_notification)
-            except TypeError:
-                result = await run_trade(api, signal['pair'], signal['direction'], signal['expiry'], config.trade_amount)
+                pair = signal.get('pair')
+                current_gale = self.gale_levels.get(pair, 0)
+                amount = config.trade_amount * (config.martingale_multiplier ** current_gale)
+                
+                if current_gale > 0:
+                     sym = api.get_currency_symbol()
+                     logger.info(f"🔄 Smart Martingale Recovery (Channel): {pair} at Gale {current_gale} ({sym}{amount:.2f})")
 
-            # Notifying about entry is done inside run_trade via callback usually, 
-            # but if we want an explicit entry log:
-            if self.notification_callback:
-                entry_msg = (
-                    f"✅ *Trade Entered!*\n\n"
-                    f"📊 Asset: `{signal.get('pair')}`\n"
-                    f"📈 Direction: *{signal.get('direction')}*\n"
-                    f"💰 Amount: ${config.trade_amount}\n"
-                    f"⏳ Expiry: {signal.get('expiry')}m\n"
-                    f"🕒 Entry Time: {datetime.now().strftime('%I:%M:%S %p')}"
+                result = await run_trade(
+                    api, pair, signal['direction'], signal['expiry'], amount, 
+                    notification_callback=trade_notification,
+                    auto_martingale=not config.smart_martingale_channel
                 )
-                # await self.notification_callback(entry_msg) # run_trade sends log, this might be duplicate
+
+                # Update state
+                if config.smart_martingale_channel:
+                    if result['result'] == "WIN":
+                        self.gale_levels[pair] = 0
+                    elif result['result'] == "LOSS":
+                        new_gale = current_gale + 1
+                        if new_gale > config.max_martingale_gales:
+                            logger.warning(f"💀 Max gales reached on {pair} (Channel). Resetting.")
+                            self.gale_levels[pair] = 0
+                        else:
+                            self.gale_levels[pair] = new_gale
+            except Exception as e:
+                logger.error(f"Error executing signal: {e}")
+                result = None
 
             return result
 

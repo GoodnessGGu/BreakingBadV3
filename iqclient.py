@@ -155,6 +155,14 @@ class IQOptionAPI:
         self._ensure_connected()
         return self.account_manager.get_active_account_balance()
 
+    def get_currency_symbol(self):
+        """
+        Get the currency symbol for the current account (e.g. $, €, ₹).
+        """
+        mtype = getattr(self.account_manager, "current_account_type", "demo")
+        symbols = getattr(self.account_manager, "currency_symbols", {})
+        return symbols.get(mtype, "$")
+
     def refill_demo_account(self, amount=10000):
         """
         Refill demo account with specified amount.
@@ -357,9 +365,11 @@ from settings import config
 # Global set to track active trades to prevent overlapping signals
 ACTIVE_TRADES = set()
 
-async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notification_callback=None):
+async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notification_callback=None, auto_martingale=True):
     """
-    Executes a trade (digital only) and handles up to a configurable number of martingale attempts.
+    Executes a trade and handles martingale.
+    If auto_martingale is True (default), it handles immediate recovery internally.
+    If auto_martingale is False, it executes one attempt and returns, allowing for Next-Signal Martingale.
     """
     # Use config if max_gales is not explicitly provided
     if max_gales is None:
@@ -400,7 +410,10 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
         # Optimization: Start with configured preference (BINARY/DIGITAL/AUTO)
         preferred_type = "binary" if config.preferred_trading_type == "BINARY" else "digital" 
 
-        for gale in range(max_gales + 1):
+        # Determine how many gales to perform internally
+        internal_max_gales = max_gales if auto_martingale else 0
+
+        for gale in range(internal_max_gales + 1):
             trade_type = preferred_type
             success = False
             result_data = None

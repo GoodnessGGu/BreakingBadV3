@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import logging
 from ml_utils import load_model, predict_signal, prepare_features, calculate_rsi, calculate_atr
+from nn_utils import predict_nn_trade
 
 logger = logging.getLogger(__name__)
 
@@ -30,9 +31,10 @@ def wma(series, period):
         raw=True
     )
 
-def analyze_strategy(candles_data, use_ai=True):
+def analyze_strategy(candles_data, use_ai=True, expiry=1):
     """
     Analyzes candle data and returns a signal ('CALL', 'PUT', or None).
+    expiry: Signal duration in minutes (used for NN confirmation)
     """
     if not candles_data or len(candles_data) < 205: # Need 200 for EMA200
         return None
@@ -180,5 +182,20 @@ def analyze_strategy(candles_data, use_ai=True):
         except Exception as e:
             logger.error(f"AI Prediction failed for {mtype}: {e}")
             pass
+
+    # --- NEW: Neural Network Confirmation ---
+    if signals_found and use_ai:
+        try:
+            # Pass the dynamic expiry to the NN prediction
+            nn_prob = predict_nn_trade(df, expiry=expiry)
+            threshold = 0.65 # User requested 0.65 threshold logic in their script
+            
+            if nn_prob < threshold:
+                logger.info(f"[NN] REJECTED {signal} ({source}): Prob {nn_prob:.2f} < {threshold}")
+                return None
+            else:
+                logger.info(f"[NN] APPROVED {signal} ({source}): Prob {nn_prob:.2f} >= {threshold}")
+        except Exception as e:
+            logger.error(f"NN Confirmation failed: {e}")
 
     return signal

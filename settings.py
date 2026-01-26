@@ -46,6 +46,10 @@ class TradingConfig:
         self.suppress_overlapping_signals = SUPPRESS_OVERLAPPING_SIGNALS
         self.paused = PAUSED
         self.account_type = DEFAULT_ACCOUNT_TYPE
+        # Smart Martingale Toggles
+        self.smart_martingale_autotrade = True
+        self.smart_martingale_signals = True
+        self.smart_martingale_channel = True
         # Optimization: AUTO, DIGITAL, BINARY
         self.preferred_trading_type = os.getenv("PREFERRED_TRADING_TYPE", "AUTO").upper()
 

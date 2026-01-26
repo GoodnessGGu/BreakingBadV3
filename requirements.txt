@@ -23,6 +23,9 @@ httpx
 requests
 websocket-client
 
+# Deep Learning
+torch
+
 # Environment variable management
 python-dotenv
 

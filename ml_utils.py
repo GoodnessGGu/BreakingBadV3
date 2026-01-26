@@ -84,7 +84,13 @@ def prepare_features(df):
             
     if 'time' in df.columns:
         df['hour'] = df['time'].dt.hour
-        # Encoding cyclical time features can be better, but raw hour is a good start
+        df['minute'] = df['time'].dt.minute
+        
+        # --- Cyclical Time Features ---
+        df['hour_sin'] = np.sin(2 * np.pi * df['hour'] / 24.0)
+        df['hour_cos'] = np.cos(2 * np.pi * df['hour'] / 24.0)
+        df['min_sin'] = np.sin(2 * np.pi * df['minute'] / 60.0)
+        df['min_cos'] = np.cos(2 * np.pi * df['minute'] / 60.0)
     
     # 1. Momentum & Trend
     df['rsi'] = calculate_rsi(df['close'], 14)

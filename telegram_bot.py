@@ -52,6 +52,13 @@ monitor = None
 
 # --- Auto-Trading Tasks ---
 active_auto_trades = {}  # Stores asyncio tasks: { "EURUSD": task_object }
+# --- Martingale State Tracking ---
+# Tracks current gale level per asset for Smart Martingale (Next-Signal Recovery)
+gale_states = {
+    "autotrade": {}, # { "EURUSD": 0 }
+    "signals": 0,    # Generic level for scheduled signal lists
+    "channel": {}    # { "EURUSD": 0 }
+}
 
 
 # --- Ensure IQ Option connection ---
@@ -87,8 +94,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [KeyboardButton("📊 Status"), KeyboardButton("💰 Balance")],
         [KeyboardButton("📡 Auto-Monitor"), KeyboardButton("🔄 Switch Channel")],
-        [KeyboardButton("⏸ Pause"), KeyboardButton("▶ Resume"), KeyboardButton("🤖 Auto-Trade")],
-        [KeyboardButton("🔄 Toggle Mode"), KeyboardButton("⚙️ Settings"), KeyboardButton("/autotrade")],
+        [KeyboardButton("🧠 Auto-Trade AI"), KeyboardButton("🛠 Smart Martingale")],
+        [KeyboardButton("⚡ Toggle Mode"), KeyboardButton("⚙️ Settings")],
+        [KeyboardButton("⏸ Pause"), KeyboardButton("▶ Resume")],
         [KeyboardButton("ℹ️ Help")]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -137,7 +145,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await pause_bot(update, context)
     elif text == "▶ Resume":
         await resume_bot(update, context)
-    elif text == "🤖 Auto-Trade":
+    elif text == "� Auto-Trade AI":
         await list_auto_trades(update, context)
     elif text == "📡 Auto-Monitor":
         if not monitor:
@@ -149,9 +157,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
     elif text == "🔄 Switch Channel":
         await switch_channel(update, context)
-    elif text == "🔄 Toggle Mode":
+    elif text == "⚡ Toggle Mode":
         await toggle_mode(update, context)
         
+    elif text == "🛠 Smart Martingale":
+        await smart_martingale_menu(update, context)
+    elif text.startswith("Toggle RM:"):
+        # Handle toggles from sub-menu
+        await handle_martingale_toggle(update, context)
+    elif text == "🔙 Back":
+        await start(update, context)
     elif text == "⚙️ Settings":
         await settings_info(update, context)
     elif text == "ℹ️ Help":
@@ -165,8 +180,9 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await ensure_connection()
         bal = api.get_current_account_balance()
         acc_type = getattr(api, "account_mode", "unknown").capitalize()
+        sym = api.get_currency_symbol()
         await update.message.reply_text(
-            f"💼 *{acc_type}* Account\n💰 Balance: *${bal:.2f}*",
+            f"💼 *{acc_type}* Account\n💰 Balance: *{sym}{bal:.2f}*",
             parse_mode="Markdown"
         )
     except Exception as e:
@@ -175,10 +191,49 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def refill(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await ensure_connection()
-        api.refill_practice_balance()
-        await update.message.reply_text("✅ Practice balance refilled!")
+        # Ensure correct method name in IQOptionAPI wrapper or direct access
+        api.refill_demo_account()
+        await update.message.reply_text("✅ Demo balance refilled!")
     except Exception as e:
         await update.message.reply_text(f"⚠️ Failed to refill balance: {e}")
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Displays all available bot commands."""
+    help_text = (
+        "🤖 *BreakingBad V3 Bot Commands*\n\n"
+        "*Core Commands:*\n"
+        "• /start - Reset/Reload main keyboard\n"
+        "• /autotrade <asset> <tf> - Start auto-trading strategy (e.g., /autotrade EURUSD 60)\n"
+        "• /signals - Bulk trade via signal list parsing\n"
+        "• /status - General bot/account status\n"
+        "• /balance - Quick balance check\n\n"
+        "*Settings & Control:*\n"
+        "• /set_amount <amount> - Set base trade amount\n"
+        "• /set_account <real/demo> - Toggle account mode\n"
+        "• /set_martingale <count> - Max recovery steps\n"
+        "• /refill - Reset demo balance to $10,000\n"
+        "• /pause / /resume - Bot master switches\n\n"
+        "*AI & Advanced:*\n"
+        "• /toggle_mode - Cycle through AUTO/BINARY/DIGITAL executions\n\n"
+        "💡 *Tip:* Use the buttons below for faster access!"
+    )
+    await update.message.reply_text(help_text, parse_mode="Markdown")
+
+async def settings_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Displays current trading configuration."""
+    sym = api.get_currency_symbol()
+    msg = (
+        "⚙️ *Current Trading Configuration*\n\n"
+        f"💵 *Amount:* {sym}{config.trade_amount}\n"
+        f"💼 *Account:* {config.account_type.upper()}\n"
+        f"🔄 *Max Gales:* {config.max_martingale_gales}\n"
+        f"📈 *Multiplier:* {config.martingale_multiplier}x\n"
+        f"🛠 *Smart Martingale:* {config.smart_martingale_autotrade} (AutoTrade)\n"
+        f"🧠 *Preferred Type:* {config.preferred_trading_type}\n"
+        f"🚫 *Suppression:* {'✅ ON' if config.suppress_overlapping_signals else '❌ OFF'}\n"
+        f"🌍 *Timezone:* {TIMEZONE_MANUAL}"
+    )
+    await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -198,7 +253,8 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     direction = p.get('direction', 'N/A').upper()
                     asset = p.get('asset', 'N/A')
                     amount = p.get('amount', 0)
-                    open_trades.append(f"{asset} ({direction}) @ ${amount}")
+                    sym = api.get_currency_symbol()
+                    open_trades.append(f"{asset} ({direction}) @ {sym}{amount}")
         except Exception as e:
             logger.warning(f"⚠️ Failed to get open positions: {e}")
 
@@ -208,12 +264,12 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🔌 Connection: {'✅ Connected' if connected else '❌ Disconnected'}\n"
             f"📡 Auto-Monitor: {'✅ Running' if monitor and monitor.is_running else '❌ Off'}\n"
             f"💼 Account Type: *{acc_type}*\n"
-            f"💰 Balance: *${bal:.2f}*\n\n"
+            f"💰 Balance: *{api.get_currency_symbol()}{bal:.2f}*\n\n"
             f"🕒 Uptime: {uptime_str}\n\n"
             f"⚙️ *Settings:*\n"
-            f"💵 Amount: ${config.trade_amount} | 🔄 Gales: {config.max_martingale_gales}\n"
+            f"💵 Amount: {api.get_currency_symbol()}{config.trade_amount} | 🔄 Gales: {config.max_martingale_gales}\n"
             f"⏸️ Paused: {config.paused} | 🚫 Suppress: {config.suppress_overlapping_signals}\n\n"
-            f"📈 *Open Trades:*{trades_info}"
+            f"📈 *Open Trades:*\n{trades_info}"
         )
         await update.message.reply_text(msg, parse_mode="Markdown")
     except Exception as e:
@@ -275,13 +331,50 @@ async def process_and_schedule_signals(update: Update, parsed_signals: list):
                 logger.error(f"Failed to send notification: {e}")
 
         for s in grouped[sched_time]:
+            # Calculate Stake
+            current_gale = gale_states["signals"]
+            amount = config.trade_amount * (config.martingale_multiplier ** current_gale)
+            sym = api.get_currency_symbol()
+            
+            if current_gale > 0:
+                 await notify(f"🔄 Signal Recovery: Gale {current_gale} for {s['pair']} ({sym}{amount:.2f})")
+
             # execute trade
-            task = asyncio.create_task(run_trade(api, s["pair"], s["direction"], s["expiry"], config.trade_amount, notification_callback=notify))
+            task = asyncio.create_task(run_trade(
+                api, s["pair"], s["direction"], s["expiry"], amount, 
+                notification_callback=notify,
+                auto_martingale=not config.smart_martingale_signals
+            ))
             all_trade_tasks.append(task)
 
-    # Wait for all trades to complete and generate report
+        # To support Next-Signal Martingale for /signals, we MUST wait for the result of this time group
+        # before scheduling the NEXT time group, so we know if we need to increase stake.
+        if config.smart_martingale_signals:
+            batch_results = await asyncio.gather(*all_trade_tasks[-len(grouped[sched_time]):])
+            
+            # Logic: If ANY trade in the batch was a loss, increment gale for the NEXT batch
+            any_loss = any(r['result'] == "LOSS" for r in batch_results if r)
+            any_win = any(r['result'] == "WIN" for r in batch_results if r)
+            
+            if any_loss:
+                new_gale = gale_states["signals"] + 1
+                if new_gale > config.max_martingale_gales:
+                    gale_states["signals"] = 0
+                    await notify("💀 Max gales reached in signal batch. Resetting stake.")
+                else:
+                    gale_states["signals"] = new_gale
+            elif any_win:
+                # If we won at least one, reset? Or must all win? Usually any win at higher stale recovers.
+                gale_states["signals"] = 0
+
+    # generate report
     if all_trade_tasks:
-        results = await asyncio.gather(*all_trade_tasks)
+        if not config.smart_martingale_signals:
+            # If not smart, we gather all here (legacy behavior)
+            results = await asyncio.gather(*all_trade_tasks)
+        else:
+            # Results already gathered in loop logic for smart martingale
+            results = [await t for t in all_trade_tasks]
         
         report_lines = ["📊 *Trade Session Report*"]
         total_profit = 0.0
@@ -308,7 +401,8 @@ async def process_and_schedule_signals(update: Update, parsed_signals: list):
                 total_profit += res['profit'] # profit is negative or 0 on loss
 
         report_lines.append(f"\n🏆 Wins: {wins} | 💀 Losses: {losses}")
-        report_lines.append(f"💰 Total Profit: ${total_profit:.2f}")
+        sym = api.get_currency_symbol()
+        report_lines.append(f"💰 Total Profit: {sym}{total_profit:.2f}")
         
         await update.message.reply_text("\n".join(report_lines), parse_mode="Markdown")
 
@@ -351,7 +445,8 @@ async def set_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ Amount must be at least 1.")
             return
         config.trade_amount = amount
-        await update.message.reply_text(f"✅ Trade amount set to ${config.trade_amount}")
+        sym = api.get_currency_symbol()
+        await update.message.reply_text(f"✅ Trade amount set to {sym}{config.trade_amount}")
     except ValueError:
         await update.message.reply_text("⚠️ Invalid amount.")
 
@@ -513,7 +608,7 @@ async def auto_trade_loop(asset, timeframe, context, chat_id):
             # 280 is safe for all strategies.py filters.
             candles = api.get_candle_history(asset, 280, tf_seconds)
             
-            signal = analyze_strategy(candles)
+            signal = analyze_strategy(candles, expiry=1)
             
             if signal:
                 msg = f"🎯 Strategy Signal found for *{asset}*: *{signal}*\n🚀 Executing trade..."
@@ -529,8 +624,33 @@ async def auto_trade_loop(asset, timeframe, context, chat_id):
                     except Exception as e:
                         logger.error(f"Failed to send trade result: {e}")
 
+                # Calculate Stake for Smart Martingale
+                current_gale = gale_states["autotrade"].get(asset, 0)
+                amount = config.trade_amount * (config.martingale_multiplier ** current_gale)
+                sym = api.get_currency_symbol()
+                
+                if current_gale > 0:
+                    logger.info(f"🔄 Smart Martingale Recovery: {asset} is at Gale {current_gale} (Stake: {sym}{amount:.2f})")
+
                 # Execute trade (1 min expiry default for strategy)
-                await run_trade(api, asset, signal, 1, config.trade_amount, notification_callback=notify_result)
+                res = await run_trade(
+                    api, asset, signal, 1, amount, 
+                    notification_callback=notify_result,
+                    auto_martingale=not config.smart_martingale_autotrade
+                )
+                
+                # Update Smart Martingale state for next signal
+                if config.smart_martingale_autotrade:
+                    if res['result'] == "WIN":
+                        gale_states["autotrade"][asset] = 0
+                    elif res['result'] == "LOSS":
+                        # If we reached max gales, reset or keep? Normally reset after final loss.
+                        new_gale = current_gale + 1
+                        if new_gale > config.max_martingale_gales:
+                            logger.warning(f"💀 Max gales reached on {asset} for Smart Martingale. Resetting stake.")
+                            gale_states["autotrade"][asset] = 0
+                        else:
+                            gale_states["autotrade"][asset] = new_gale
                 
                 # Wait for next candle to avoid duplicate signals on same candle
                 await asyncio.sleep(tf_seconds)
@@ -581,6 +701,37 @@ async def list_auto_trades(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active = list(active_auto_trades.keys())
     msg = f"🤖 *Active Strategies:*\n{', '.join(active) if active else 'None'}"
     await update.message.reply_text(msg, parse_mode="Markdown")
+
+async def smart_martingale_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shows the Smart Martingale toggle menu."""
+    def get_label(val): return "✅ ON" if val else "❌ OFF"
+    
+    keyboard = [
+        [KeyboardButton(f"Toggle RM: AutoTrade ({get_label(config.smart_martingale_autotrade)})")],
+        [KeyboardButton(f"Toggle RM: Signals ({get_label(config.smart_martingale_signals)})")],
+        [KeyboardButton(f"Toggle RM: Channel ({get_label(config.smart_martingale_channel)})")],
+        [KeyboardButton("🔙 Back")]
+    ]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    
+    msg = (
+        "🛠 *Smart Martingale Settings*\n\n"
+        "If *ON*, the bot will **wait for the next valid signal** before placing a martingale recovery trade.\n"
+        "If *OFF*, the bot will perform immediate martingale on the next candle."
+    )
+    await update.message.reply_text(msg, reply_markup=reply_markup, parse_mode="Markdown")
+
+async def handle_martingale_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    if "AutoTrade" in text:
+        config.smart_martingale_autotrade = not config.smart_martingale_autotrade
+    elif "Signals" in text:
+        config.smart_martingale_signals = not config.smart_martingale_signals
+    elif "Channel" in text:
+        config.smart_martingale_channel = not config.smart_martingale_channel
+    
+    # Return to menu to show updated state
+    await smart_martingale_menu(update, context)
 
 # --- Startup Notification ---
 async def notify_admin_startup(app):

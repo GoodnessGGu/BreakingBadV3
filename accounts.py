@@ -48,6 +48,7 @@ class AccountManager:
         self.ws_manager = websocket_manager
         self.message_handler = message_handler
         self.current_account_type = self._validate_account_type(DEFAULT_ACCOUNT_TYPE.lower(), exit=True)
+        self.currency_symbols = {"demo": "$", "real": "$"} # Per-account currency
 
     def set_default_account(self) -> None:
         """
@@ -69,8 +70,18 @@ class AccountManager:
             # Set current account ID based on the configured account type
             self.current_account_id = self.available_accounts[self.current_account_type]['id']
 
+            # Extract currency info for the currently active balance
+            # Usually, profile message contains a global currency_char
+            global_char = self.message_handler.profile_msg['msg'].get('currency_char', '$')
+            
+            # Map currencies to available accounts
+            for mtype in self.available_accounts.keys():
+                # We assume the profile char applies to the main account, 
+                # but let's try to be resilient.
+                self.currency_symbols[mtype] = global_char
+
             logger.info(f'Currently Active Account - {self.current_account_type.capitalize()}, '
-                        f"Balance: {self.available_accounts[self.current_account_type]['amount']:.2f}"
+                        f"Balance: {self.currency_symbols[self.current_account_type]}{self.available_accounts[self.current_account_type]['amount']:.2f}"
                         )
 
             # Subscribe to portfolio position changes for tracking trades
@@ -203,8 +214,14 @@ class AccountManager:
         # Verify switch was successful and update current account type
         if self.current_account_id == target_account_id:
             self.current_account_type = account_type.lower()
+            
+            # Update specific currency for this account if found in balance data
+            for acc in accounts:
+                if acc['id'] == target_account_id and 'currency_char' in acc:
+                    self.currency_symbols[self.current_account_type] = acc['currency_char']
+
             logger.info(
-                f'Successfully switched to {account_type.capitalize()} Account (ID: {target_account_id}, Balance: {self.get_active_account_balance()})')
+                f'Successfully switched to {account_type.capitalize()} Account (ID: {target_account_id}, Balance: {self.currency_symbols[self.current_account_type]}{self.get_active_account_balance()})')
             return True
 
     def _set_portfolio_subscription(self, account_id: int) -> None:

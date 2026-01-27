@@ -82,7 +82,12 @@ def prepare_features(df):
         if c in df.columns:
             df[c] = pd.to_numeric(df[c])
             
+    if 'time' not in df.columns and 'from' in df.columns:
+        df['time'] = pd.to_datetime(df['from'], unit='s')
+        
     if 'time' in df.columns:
+        if not pd.api.types.is_datetime64_any_dtype(df['time']):
+             df['time'] = pd.to_datetime(df['time'])
         df['hour'] = df['time'].dt.hour
         df['minute'] = df['time'].dt.minute
         

@@ -160,44 +160,46 @@ def analyze_strategy(candles_data, use_ai=True, expiry=1, return_features=False)
         return (None, None) if return_features else None
             
     # --- AI Confirmation ---
-    # Determine model type
-    asset = candles_data[-1].get('asset', 'unknown').upper() if isinstance(candles_data[-1], dict) else "unknown"
-    # Fallback if asset not in dict: sometimes it's passed separately or inferred
-    # For now, let's assume we can check if it ends with -OTC
-    is_otc = "-OTC" in asset or "OTC" in asset
-    mtype = "otc" if is_otc else "real"
-    selected_model = ai_models.get(mtype)
-
-    if signals_found and selected_model and use_ai:
+    if signals_found and use_ai:
         try:
+            # Prepare features ONCE for both models
             df_features = prepare_features(df)
-            if not df_features.empty:
-                current_features = df_features.iloc[[-1]]
-                prediction = predict_signal(selected_model, current_features)
+            if df_features.empty:
+                logger.warning("Feature preparation returned empty DataFrame. AI skipped.")
+                return (None, None) if return_features else None
                 
+            current_features_row = df_features.iloc[[-1]]
+            
+            # 1. Scikit-Learn (Gradient Boosting) Confirmation
+            asset = candles_data[-1].get('asset', 'unknown').upper() if isinstance(candles_data[-1], dict) else "unknown"
+            is_otc = "-OTC" in asset or "OTC" in asset
+            mtype = "otc" if is_otc else "real"
+            selected_model = ai_models.get(mtype)
+
+            if selected_model:
+                prediction = predict_signal(selected_model, current_features_row.copy())
                 if prediction == 0:
                     logger.info(f"[AI-{mtype.upper()}] REJECTED {signal} ({source})")
                     return (None, None) if return_features else None
                 else:
                     logger.info(f"[AI-{mtype.upper()}] APPROVED {signal} ({source})")
-        except Exception as e:
-            logger.error(f"AI Prediction failed for {mtype}: {e}")
-            pass
 
-    # --- NEW: Neural Network Confirmation ---
-    if signals_found and use_ai:
-        try:
-            # Pass the dynamic expiry to the NN prediction
-            nn_prob = predict_nn_trade(df, expiry=expiry)
-            threshold = 0.65 # User requested 0.65 threshold logic in their script
+            # 2. Neural Network Confirmation
+            # Pass the ALREADY PROCESSED features to the NN
+            nn_prob = predict_nn_trade(df_features, expiry=expiry)
+            threshold = 0.65
             
             if nn_prob < threshold:
                 logger.info(f"[NN] REJECTED {signal} ({source}): Prob {nn_prob:.2f} < {threshold}")
                 return (None, None) if return_features else None
             else:
                 logger.info(f"[NN] APPROVED {signal} ({source}): Prob {nn_prob:.2f} >= {threshold}")
+
         except Exception as e:
-            logger.error(f"NN Confirmation failed: {e}")
+            logger.error(f"AI Confirmation Error: {e}")
+            # Optional: Decide if we fail open or closed. For safety, let's continue if it's just a log error,
+            # but if it crashed the flow, we were already returning None.
+            pass
 
     # If return_features is requested, we need to generate full features
     # even if no signal was found, but usually, we only care when signal exists.

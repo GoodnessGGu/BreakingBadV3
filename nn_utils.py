@@ -92,7 +92,10 @@ def predict_nn_trade(features_df, expiry=1):
         drop_cols = ["signal", "pair", "asset", "market_type", "from", "to", "time", "outcome", "outcome_1m", "outcome_5m"]
         X = features_df.drop(columns=[c for c in drop_cols if c in features_df.columns], errors="ignore")
         
-        # Scaling
+        # Scaling - Ensure we use the exact same feature names/order as the scaler
+        if hasattr(scaler, "feature_names_in_"):
+             X = X[scaler.feature_names_in_]
+        
         X_scaled = scaler.transform(X)
         
         if not TORCH_AVAILABLE:
@@ -102,10 +105,16 @@ def predict_nn_trade(features_df, expiry=1):
 
         model = load_nn_model(expiry, X_tensor.shape[1])
         if not model:
-            return 0.5, False
+            return 0.5
 
         with torch.no_grad():
-            prob = model(X_tensor).item()
+            # Neural network usually expects [Batch, Features]
+            # If item() is failing, ensure we handle the batch dimension
+            pred_tensor = model(X_tensor)
+            if pred_tensor.ndimension() > 1:
+                 prob = pred_tensor[-1].item() # Take the latest prediction
+            else:
+                 prob = pred_tensor.item()
 
         # Custom threshold can be applied in strategies.py
         return prob

@@ -4,7 +4,7 @@ services:
     env: python
     plan: free
     region: frankfurt
-    buildCommand: "pip install -r requirements.txt"
+    buildCommand: "pip install -r requirements-cpu.txt"
     startCommand: "python telegram_bot.py"
     envVars:
       # Sensitive credentials - add manually in Render dashboard

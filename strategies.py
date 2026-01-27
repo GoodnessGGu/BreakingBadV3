@@ -31,10 +31,11 @@ def wma(series, period):
         raw=True
     )
 
-def analyze_strategy(candles_data, use_ai=True, expiry=1):
+def analyze_strategy(candles_data, use_ai=True, expiry=1, return_features=False):
     """
     Analyzes candle data and returns a signal ('CALL', 'PUT', or None).
     expiry: Signal duration in minutes (used for NN confirmation)
+    return_features: If True, returns (signal, features_dict)
     """
     if not candles_data or len(candles_data) < 205: # Need 200 for EMA200
         return None
@@ -197,5 +198,23 @@ def analyze_strategy(candles_data, use_ai=True, expiry=1):
                 logger.info(f"[NN] APPROVED {signal} ({source}): Prob {nn_prob:.2f} >= {threshold}")
         except Exception as e:
             logger.error(f"NN Confirmation failed: {e}")
+
+    # If return_features is requested, we need to generate full features
+    # even if no signal was found, but usually, we only care when signal exists.
+    final_features = None
+    if return_features:
+        # Prepare full feature set (same as ML training)
+        try:
+             # df in this scope has basic info, prepare_features completes it
+             full_df = prepare_features(df.copy())
+             last_row = full_df.iloc[-1].to_dict()
+             
+             # Clean up dict (remove timestamps/objects for CSV compatibility)
+             final_features = {k: v for k, v in last_row.items() if isinstance(v, (int, float, np.number))}
+        except Exception as e:
+             logger.error(f"Error extracting features for logging: {e}")
+
+    if return_features:
+        return signal, final_features
 
     return signal

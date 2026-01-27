@@ -19,6 +19,8 @@ from keep_alive import keep_alive
 from channel_monitor import ChannelMonitor
 from strategies import analyze_strategy
 import pytz
+from trade_database import db
+from ml_utils import retrain_from_live_data
 
 # --- Logging ---
 logging.basicConfig(
@@ -95,9 +97,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [KeyboardButton("📊 Status"), KeyboardButton("💰 Balance")],
         [KeyboardButton("📡 Auto-Monitor"), KeyboardButton("🔄 Switch Channel")],
         [KeyboardButton("🧠 Auto-Trade AI"), KeyboardButton("🛠 Smart Martingale")],
-        [KeyboardButton("⚡ Toggle Mode"), KeyboardButton("⚙️ Settings")],
-        [KeyboardButton("⏸ Pause"), KeyboardButton("▶ Resume")],
-        [KeyboardButton("ℹ️ Help")]
+        [KeyboardButton("📜 History"), KeyboardButton("⚡ Toggle Mode")],
+        [KeyboardButton("⚙️ Settings"), KeyboardButton("ℹ️ Help")],
+        [KeyboardButton("⏸ Pause"), KeyboardButton("▶ Resume")]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     
@@ -162,6 +164,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     elif text == "🛠 Smart Martingale":
         await smart_martingale_menu(update, context)
+    elif text == "📜 History":
+        await trade_history_stats(update, context)
     elif text.startswith("Toggle RM:"):
         # Handle toggles from sub-menu
         await handle_martingale_toggle(update, context)
@@ -214,7 +218,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /refill - Reset demo balance to $10,000\n"
         "• /pause / /resume - Bot master switches\n\n"
         "*AI & Advanced:*\n"
-        "• /toggle_mode - Cycle through AUTO/BINARY/DIGITAL executions\n\n"
+        "• /toggle_mode - Cycle through AUTO/BINARY/DIGITAL executions\n"
+        "• /retrain - Trigger AI model retraining from live data\n\n"
         "💡 *Tip:* Use the buttons below for faster access!"
     )
     await update.message.reply_text(help_text, parse_mode="Markdown")
@@ -274,6 +279,70 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg, parse_mode="Markdown")
     except Exception as e:
         await update.message.reply_text(f"⚠️ Failed to fetch status: {e}")
+
+async def trade_history_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Displays trading performance statistics."""
+    try:
+        stats_7d = db.get_statistics(days=7)
+        stats_24h = db.get_statistics(days=1)
+        best_pairs = db.get_best_pairs(days=7)
+        
+        sym = api.get_currency_symbol()
+        
+        msg = (
+            "📜 *Performance Report*\n\n"
+            "*Last 24 Hours:*\n"
+            f"• Trades: {stats_24h['total_trades']}\n"
+            f"• Win Rate: {stats_24h['win_rate']:.1f}%\n"
+            f"• Profit: {sym}{stats_24h['total_profit']:.2f}\n"
+            f"• Straight Wins: {stats_24h.get('straight_wins', 0)}\n"
+            f"• Gale Wins: {stats_24h.get('gale_wins', 0)}\n\n"
+            "*Last 7 Days:*\n"
+            f"• Total Trades: {stats_7d['total_trades']}\n"
+            f"• Wins/Losses: {stats_7d['wins']} / {stats_7d['losses']}\n"
+            f"• Win Rate: {stats_7d['win_rate']:.1f}%\n"
+            f"• Total Profit: {sym}{stats_7d['total_profit']:.2f}\n\n"
+            "*Top Assets (7d):*\n"
+        )
+        
+        if best_pairs:
+            for p in best_pairs:
+                msg += f"• {p['asset']}: {p['win_rate']:.0f}% WR | {sym}{p['total_profit']:.2f}\n"
+        else:
+            msg += "No asset data yet."
+            
+        await update.message.reply_text(msg, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Error in trade_history_stats: {e}")
+        await update.message.reply_text(f"⚠️ Failed to load history: {e}")
+
+async def retrain_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Triggers model retraining."""
+    await update.message.reply_text("🔄 AI Retraining started... this may take a moment.")
+    try:
+        # Check if feedback file exists and has enough rows
+        feedback_path = "live_trade_feedback.csv"
+        if not os.path.exists(feedback_path):
+            await update.message.reply_text("❌ No live trade feedback data found. Trade more first!")
+            return
+
+        import pandas as pd
+        df = pd.read_csv(feedback_path)
+        if len(df) < 50:
+            await update.message.reply_text(f"❌ Not enough data yet ({len(df)}/50 trades).")
+            return
+
+        # Run retraining in a thread to not block the bot
+        loop = asyncio.get_event_loop()
+        clf = await loop.run_in_executor(None, retrain_from_live_data, feedback_path)
+        
+        if clf:
+            await update.message.reply_text("✅ AI Model successfully retrained and updated with live data!")
+        else:
+            await update.message.reply_text("⚠️ Retraining completed but no improvement or error occurred.")
+    except Exception as e:
+        logger.error(f"Retrain command error: {e}")
+        await update.message.reply_text(f"❌ Retraining failed: {e}")
 
 async def process_and_schedule_signals(update: Update, parsed_signals: list):
     """Schedules and executes trades based on parsed signals."""
@@ -608,7 +677,7 @@ async def auto_trade_loop(asset, timeframe, context, chat_id):
             # 280 is safe for all strategies.py filters.
             candles = api.get_candle_history(asset, 280, tf_seconds)
             
-            signal = analyze_strategy(candles, expiry=1)
+            signal, entry_features = analyze_strategy(candles, expiry=1, return_features=True)
             
             if signal:
                 msg = f"🎯 Strategy Signal found for *{asset}*: *{signal}*\n🚀 Executing trade..."
@@ -636,7 +705,8 @@ async def auto_trade_loop(asset, timeframe, context, chat_id):
                 res = await run_trade(
                     api, asset, signal, 1, amount, 
                     notification_callback=notify_result,
-                    auto_martingale=not config.smart_martingale_autotrade
+                    auto_martingale=not config.smart_martingale_autotrade,
+                    features=entry_features
                 )
                 
                 # Update Smart Martingale state for next signal
@@ -786,6 +856,7 @@ def main():
     app.add_handler(CommandHandler("resume", resume_bot))
     app.add_handler(CommandHandler("suppress", toggle_suppression))
     app.add_handler(CommandHandler("mode", toggle_mode))
+    app.add_handler(CommandHandler("retrain", retrain_command))
     app.add_handler(CommandHandler("shutdown", shutdown_bot))
     
     app.add_handler(CommandHandler("autotrade", start_auto_trade))

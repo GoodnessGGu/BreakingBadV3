@@ -12,6 +12,18 @@ from utilities import get_timestamps
 
 logger = logging.getLogger(__name__)
 
+CURRENCY_MAP = {
+    "USD": "$",
+    "EUR": "€",
+    "GBP": "£",
+    "NGN": "₦",
+    "BRL": "R$",
+    "INR": "₹",
+    "RUB": "₽",
+    "GHS": "GH₵",
+    "ZAR": "R"
+}
+
 
 @dataclass
 class TournamentAccount:
@@ -62,23 +74,15 @@ class AccountManager:
             # Extract balances/accounts information from profile message
             balances = self.message_handler.profile_msg['msg']['balances']
             for balance in balances:
-                if balance['type'] == 4:  # Demo account
-                    self.available_accounts['demo'] = balance
-                elif balance['type'] == 1:  # Real account
-                    self.available_accounts['real'] = balance
+                b_type = 'demo' if balance['type'] == 4 else 'real'
+                self.available_accounts[b_type] = balance
+                
+                # Resolve symbol from 'currency' field (e.g. 'USD')
+                code = balance.get('currency', 'USD')
+                self.currency_symbols[b_type] = CURRENCY_MAP.get(code, code)
 
             # Set current account ID based on the configured account type
             self.current_account_id = self.available_accounts[self.current_account_type]['id']
-
-            # Extract currency info for the currently active balance
-            # Usually, profile message contains a global currency_char
-            global_char = self.message_handler.profile_msg['msg'].get('currency_char', '$')
-            
-            # Map currencies to available accounts
-            for mtype in self.available_accounts.keys():
-                # We assume the profile char applies to the main account, 
-                # but let's try to be resilient.
-                self.currency_symbols[mtype] = global_char
 
             logger.info(f'Currently Active Account - {self.current_account_type.capitalize()}, '
                         f"Balance: {self.currency_symbols[self.current_account_type]}{self.available_accounts[self.current_account_type]['amount']:.2f}"
@@ -217,8 +221,9 @@ class AccountManager:
             
             # Update specific currency for this account if found in balance data
             for acc in accounts:
-                if acc['id'] == target_account_id and 'currency_char' in acc:
-                    self.currency_symbols[self.current_account_type] = acc['currency_char']
+                if acc['id'] == target_account_id:
+                    code = acc.get('currency', 'USD')
+                    self.currency_symbols[self.current_account_type] = CURRENCY_MAP.get(code, code)
 
             logger.info(
                 f'Successfully switched to {account_type.capitalize()} Account (ID: {target_account_id}, Balance: {self.currency_symbols[self.current_account_type]}{self.get_active_account_balance()})')

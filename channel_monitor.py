@@ -206,7 +206,7 @@ class ChannelMonitor:
             # Fetch history for validation
             # Use 280 candles (same as realtime_bot.py)
             candles = api.get_candle_history(pair, 280, 60) 
-            strategy_signal = analyze_strategy(candles, expiry=expiry)
+            strategy_signal, entry_features = analyze_strategy(candles, expiry=expiry, return_features=True)
             
             if strategy_signal != direction.upper():
                 block_msg = f"❌ BLOCKED Channel Signal: {pair} {direction} (Strategy/AI Disagrees: {strategy_signal})"
@@ -234,7 +234,8 @@ class ChannelMonitor:
             result = await run_trade(
                 api, pair, direction, expiry, amount, 
                 notification_callback=trade_notification,
-                auto_martingale=not config.smart_martingale_channel
+                auto_martingale=not config.smart_martingale_channel,
+                features=entry_features
             )
             
             # Update state
@@ -288,7 +289,7 @@ class ChannelMonitor:
             try:
                 # Use 280 candles for validation
                 candles = api.get_candle_history(signal['pair'], 280, 60)
-                strategy_signal = analyze_strategy(candles, expiry=signal['expiry'])
+                strategy_signal, entry_features = analyze_strategy(candles, expiry=signal['expiry'], return_features=True)
                 
                 if strategy_signal != signal['direction'].upper():
                     block_msg = f"❌ BLOCKED Channel Signal: {signal['pair']} {signal['direction']} (Strategy/AI Disagrees: {strategy_signal})"
@@ -314,7 +315,8 @@ class ChannelMonitor:
                 result = await run_trade(
                     api, pair, signal['direction'], signal['expiry'], amount, 
                     notification_callback=trade_notification,
-                    auto_martingale=not config.smart_martingale_channel
+                    auto_martingale=not config.smart_martingale_channel,
+                    features=entry_features
                 )
 
                 # Update state

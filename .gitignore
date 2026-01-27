@@ -8,3 +8,7 @@ venv/
 *.log
 supervisor.log
 .DS_Store
+# Sensitive Files
+service_account.json
+trades.db*
+live_trade_feedback.csv

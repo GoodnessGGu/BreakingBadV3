@@ -24,6 +24,7 @@ requests
 websocket-client
 
 # Deep Learning
+--extra-index-url https://download.pytorch.org/whl/cpu
 torch
 
 # Environment variable management

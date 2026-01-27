@@ -301,5 +301,33 @@ def predict_signal(model, features_df):
         logger.error(f"Prediction error: {e}")
         return 1 # Fallback
 
+def retrain_from_live_data(feedback_path="live_trade_feedback.csv"):
+    """
+    Triggers retraining using accumulated live feedback data.
+    """
+    if not os.path.exists(feedback_path):
+        logger.warning(f"No feedback data found at {feedback_path}")
+        return None
+    
+    try:
+        df = pd.read_csv(feedback_path)
+        if len(df) < 50: # Minimum data threshold
+            logger.info(f"Not enough feedback data ({len(df)}/50) to retrain.")
+            return None
+        
+        logger.info(f"🔄 Retraining model with {len(df)} live trade results...")
+        
+        # Determine market type (split if needed, or just retrain current)
+        # For simplicity, we'll retrain 'otc' as it's most common
+        clf = train_model(data_path=feedback_path, market_type="otc")
+        
+        if clf:
+            logger.info("✅ Model retrained and saved successfully.")
+            return clf
+    except Exception as e:
+        logger.error(f"❌ Continuous learning error: {e}")
+    
+    return None
+
 if __name__ == "__main__":
-    train_model()
+    retrain_from_live_data()

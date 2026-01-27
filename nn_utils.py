@@ -1,5 +1,18 @@
-import torch
-import torch.nn as nn
+try:
+    import torch
+    import torch.nn as nn
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+    class nn:
+        class Module: pass
+        class Sequential:
+            def __init__(self, *args): pass
+        def Linear(*args): pass
+        def ReLU(*args): pass
+        def BatchNorm1d(*args): pass
+        def Dropout(*args): pass
+        def Sigmoid(*args): pass
 import joblib
 import pandas as pd
 import os
@@ -7,7 +20,10 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+if TORCH_AVAILABLE:
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+else:
+    device = "cpu"
 
 # =========================
 # MODEL
@@ -44,9 +60,13 @@ def load_nn_model(expiry, input_size):
     if not os.path.exists(path):
         return None
         
+    if not TORCH_AVAILABLE:
+        logger.warning(f"NN Confirmation skipped (Torch not installed) for {path}")
+        return None
+        
     model = BinaryOptionsNN(input_size)
     try:
-        model.load_state_dict(torch.load(path, map_location=device))
+        model.load_state_dict(torch.load(path, map_location=device, weights_only=True))
         model.to(device)
         model.eval()
         return model
@@ -74,6 +94,10 @@ def predict_nn_trade(features_df, expiry=1):
         
         # Scaling
         X_scaled = scaler.transform(X)
+        
+        if not TORCH_AVAILABLE:
+            return 0.5
+
         X_tensor = torch.tensor(X_scaled, dtype=torch.float32).to(device)
 
         model = load_nn_model(expiry, X_tensor.shape[1])

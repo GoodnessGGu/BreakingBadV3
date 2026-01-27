@@ -12,6 +12,8 @@ from markets import MarketManager
 from accounts import AccountManager
 from wsmanager.iqwebsocket import WebSocketManager
 from wsmanager.message_handler import MessageHandler
+from trade_database import db
+from gsheet_logger import gsheet_logger
 
 # Setup logging configuration
 logging.basicConfig(
@@ -365,11 +367,13 @@ from settings import config
 # Global set to track active trades to prevent overlapping signals
 ACTIVE_TRADES = set()
 
-async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notification_callback=None, auto_martingale=True):
+async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notification_callback=None, auto_martingale=True, features=None):
     """
     Executes a trade and handles martingale.
     If auto_martingale is True (default), it handles immediate recovery internally.
     If auto_martingale is False, it executes one attempt and returns, allowing for Next-Signal Martingale.
+    
+    If 'features' (dict) is provided, the entry state and outcome will be logged to live_trade_feedback.csv
     """
     # Use config if max_gales is not explicitly provided
     if max_gales is None:
@@ -457,21 +461,58 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
                  pnl_ok, pnl = await api.get_binary_trade_outcome(order_id, expiry=expiry)
 
             balance = api.get_current_account_balance()
-
+ 
             # Accumulate PnL (pnl is negative on loss, positive on win)
             if pnl is not None:
                 total_pnl += pnl
+
+            # --- LIVE FEEDBACK LOGGING ---
+            if features:
+                try:
+                    import pandas as pd
+                    import os
+                    row = features.copy()
+                    row['asset'] = asset
+                    row['direction'] = direction
+                    row['expiry'] = expiry
+                    row['result'] = 1 if (pnl_ok and pnl > 0) else 0
+                    row['pnl'] = pnl
+                    row['timestamp'] = time.time()
+                    
+                    feedback_file = "live_trade_feedback.csv"
+                    df_new = pd.DataFrame([row])
+                    if not os.path.exists(feedback_file):
+                        df_new.to_csv(feedback_file, index=False)
+                    else:
+                        df_new.to_csv(feedback_file, mode='a', header=False, index=False)
+                except Exception as e:
+                    logger.error(f"Failed to log live feedback: {e}")
 
             if pnl_ok and pnl > 0:
                 logger.info(f"✅ WIN on {asset} | Profit: ${pnl:.2f} | Net PnL: ${total_pnl:.2f} | Balance: ${balance:.2f}")
                 if notification_callback:
                     await notification_callback(f"✅ WIN on {asset} | Net PnL: ${total_pnl:.2f}")
+                # Prepare log data
+                log_data = {
+                    "asset": asset,
+                    "direction": direction,
+                    "expiry": expiry,
+                    "amount": amount, # Original amount or current_amount? Usually original is better for base stats, but current is good for actual risk. Let's use current_amount for this specific attempt.
+                    "result": "WIN",
+                    "profit": total_pnl,
+                    "gale_level": gale,
+                    "timestamp": datetime.now().isoformat(),
+                    "signal_source": "auto-trade" if features else "manual"
+                }
+                db.save_trade(log_data)
+                gsheet_logger.log_trade(log_data)
+
                 return {
                     "asset": asset,
                     "direction": direction,
                     "expiry": expiry,
                     "result": "WIN",
-                    "gales": gale,
+                    "gale_level": gale,
                     "profit": total_pnl
                 }
             else:
@@ -489,12 +530,27 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
                         await notification_callback(f"💀 LOSS on {asset} after {max_gales} gales. Net PnL: ${total_pnl:.2f}")
 
         logger.error(f"💀 Lost all attempts ({max_gales} gales) on {asset}")
+        # Prepare log data for total loss
+        log_data = {
+            "asset": asset,
+            "direction": direction,
+            "expiry": expiry,
+            "amount": amount,
+            "result": "LOSS",
+            "profit": total_pnl,
+            "gale_level": max_gales,
+            "timestamp": datetime.now().isoformat(),
+            "signal_source": "auto-trade" if features else "manual"
+        }
+        db.save_trade(log_data)
+        gsheet_logger.log_trade(log_data)
+
         return {
             "asset": asset,
             "direction": direction,
             "expiry": expiry,
             "result": "LOSS",
-            "gales": max_gales,
+            "gale_level": max_gales,
             "profit": total_pnl
         }
     finally:

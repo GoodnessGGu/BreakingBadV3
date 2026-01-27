@@ -156,13 +156,19 @@ class TradeDatabase:
             losses = sum(1 for t in trades if t['result'] == 'LOSS')
             total_profit = sum(t['profit'] for t in trades if t['profit'])
             
+            # Gale Stats
+            straight_wins = sum(1 for t in trades if t['result'] == 'WIN' and t['gale_level'] == 0)
+            gale_wins = wins - straight_wins
+            
             return {
                 'total_trades': len(trades),
                 'wins': wins,
                 'losses': losses,
                 'win_rate': (wins / len(trades) * 100) if trades else 0,
                 'total_profit': total_profit,
-                'avg_profit': total_profit / len(trades) if trades else 0
+                'avg_profit': total_profit / len(trades) if trades else 0,
+                'straight_wins': straight_wins,
+                'gale_wins': gale_wins
             }
         except Exception as e:
             logger.error(f"❌ Failed to calculate statistics: {e}")

@@ -38,7 +38,7 @@ def analyze_strategy(candles_data, use_ai=True, expiry=1, return_features=False)
     return_features: If True, returns (signal, features_dict)
     """
     if not candles_data or len(candles_data) < 205: # Need 200 for EMA200
-        return None
+        return (None, None) if return_features else None
 
     # Convert list of dicts to DataFrame
     df = pd.DataFrame(candles_data)
@@ -102,13 +102,13 @@ def analyze_strategy(candles_data, use_ai=True, expiry=1, return_features=False)
     if sniper_put: signals_found.append(("PUT", "Sniper"))
     
     if not signals_found:
-        return None
+        return (None, None) if return_features else None
         
     # Check for contradictions
     directions = set([s[0] for s in signals_found])
     if len(directions) > 1:
         logger.info(f"❌ CONTRADICTION: Both CALL and PUT found. Skipping.")
-        return None
+        return (None, None) if return_features else None
         
     # Standard choice: Use the first one found, but track count
     signal, source = signals_found[0]
@@ -125,7 +125,7 @@ def analyze_strategy(candles_data, use_ai=True, expiry=1, return_features=False)
     # Avoid: Extremes only. Hour 0 (OTC spread) and 23 (market close)
     if current_hour in [0, 23]:
          logger.info(f"❌ BLOCKED {source} {signal}: Risky Session (Hour {current_hour})")
-         return None
+         return (None, None) if return_features else None
 
     # 5. ATR Volatility Filter (Phase 3)
     if 'atr' not in df.columns:
@@ -138,26 +138,26 @@ def analyze_strategy(candles_data, use_ai=True, expiry=1, return_features=False)
         # Allow more volatility: spike threshold 3.5x, dead market 0.2x
         if atr_curr > (atr_avg * 3.5):
             logger.info(f"❌ BLOCKED {source} {signal}: Volatility Spike (ATR {atr_curr:.5f} > Avg*3.5)")
-            return None
+            return (None, None) if return_features else None
         if atr_curr < (atr_avg * 0.2):
             logger.info(f"❌ BLOCKED {source} {signal}: Dead Market (ATR {atr_curr:.5f} < Avg*0.2)")
-            return None
+            return (None, None) if return_features else None
 
     # 1. RSI Filter (Phase 1)
     if signal == "CALL" and rsi_curr > 70:
         logger.info(f"❌ BLOCKED {source} CALL: RSI {rsi_curr:.1f} > 70 (Overbought)")
-        return None
+        return (None, None) if return_features else None
     elif signal == "PUT" and rsi_curr < 30:
         logger.info(f"❌ BLOCKED {source} PUT: RSI {rsi_curr:.1f} < 30 (Oversold)")
-        return None
+        return (None, None) if return_features else None
         
     # 2. EMA200 Trend Filter (Phase 1)
     if signal == "CALL" and close_curr < ema200_curr:
         logger.info(f"❌ BLOCKED {source} CALL: Price below EMA200 (Downtrend)")
-        return None
+        return (None, None) if return_features else None
     elif signal == "PUT" and close_curr > ema200_curr:
         logger.info(f"❌ BLOCKED {source} PUT: Price above EMA200 (Uptrend)")
-        return None
+        return (None, None) if return_features else None
             
     # --- AI Confirmation ---
     # Determine model type
@@ -177,7 +177,7 @@ def analyze_strategy(candles_data, use_ai=True, expiry=1, return_features=False)
                 
                 if prediction == 0:
                     logger.info(f"[AI-{mtype.upper()}] REJECTED {signal} ({source})")
-                    return None
+                    return (None, None) if return_features else None
                 else:
                     logger.info(f"[AI-{mtype.upper()}] APPROVED {signal} ({source})")
         except Exception as e:
@@ -193,7 +193,7 @@ def analyze_strategy(candles_data, use_ai=True, expiry=1, return_features=False)
             
             if nn_prob < threshold:
                 logger.info(f"[NN] REJECTED {signal} ({source}): Prob {nn_prob:.2f} < {threshold}")
-                return None
+                return (None, None) if return_features else None
             else:
                 logger.info(f"[NN] APPROVED {signal} ({source}): Prob {nn_prob:.2f} >= {threshold}")
         except Exception as e:

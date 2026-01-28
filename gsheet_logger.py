@@ -68,7 +68,10 @@ class GSheetLogger:
     def log_trade(self, trade_data):
         """Append a trade row to Google Sheets."""
         if not self._connected:
-            return False
+            # Try to connect on the fly (lazy connection)
+            self._connect()
+            if not self._connected:
+                return False
             
         try:
             row = [

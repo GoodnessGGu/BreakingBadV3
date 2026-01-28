@@ -23,7 +23,11 @@ class GSheetLogger:
         if self.sheet_id and (GOOGLE_SERVICE_ACCOUNT_JSON or os.path.exists(self.credentials_file)):
             self._connect()
         else:
-            logger.warning("⚠️ Google Sheets ID or Service Account credentials missing. GSheet sync disabled.")
+            missing = []
+            if not self.sheet_id: missing.append("GOOGLE_SHEET_ID")
+            if not (GOOGLE_SERVICE_ACCOUNT_JSON or os.path.exists(self.credentials_file)): 
+                missing.append("GOOGLE_SERVICE_ACCOUNT_JSON or service_account.json")
+            logger.warning(f"⚠️ GSheet sync disabled. Missing: {', '.join(missing)}")
 
     def _connect(self):
         try:

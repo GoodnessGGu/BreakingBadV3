@@ -632,6 +632,34 @@ async def toggle_trend_filter(update: Update, context: ContextTypes.DEFAULT_TYPE
     status = "STRICT (EMA200)" if config.use_strict_trend else "LENIENT (All Trends)"
     await update.message.reply_text(f"📈 Trend Filter set to: *{status}*", parse_mode="Markdown")
 
+async def test_gsheet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manually test GSheet connection."""
+    from gsheet_logger import gsheet_logger
+    await update.message.reply_text("🧪 Testing Google Sheets connection...")
+    
+    # Force a reconnection attempt
+    gsheet_logger._connect()
+    
+    if gsheet_logger._connected:
+        # Try to append a test row
+        test_data = {
+            "asset": "TEST",
+            "direction": "CALL",
+            "amount": 0,
+            "expiry": 0,
+            "result": "TEST",
+            "profit": 0,
+            "gale_level": 0,
+            "signal_source": "test"
+        }
+        res = gsheet_logger.log_trade(test_data)
+        if res:
+             await update.message.reply_text("✅ GSheet Connection SUCCESS! Test row added.")
+        else:
+             await update.message.reply_text("⚠️ Connected but failed to write row. Check sheet permissions!")
+    else:
+        await update.message.reply_text("❌ GSheet Connection FAILED. Check logs for details.")
+
 async def toggle_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     modes = ['AUTO', 'BINARY', 'DIGITAL']
     current = config.preferred_trading_type
@@ -699,12 +727,16 @@ async def auto_trade_loop(asset, timeframe, context, chat_id):
             # Fetch candles (Need enough for EMA200 + Indicators)
             # 280 is safe for all strategies.py filters.
             candles = api.get_candle_history(asset, 280, tf_seconds)
+
+            # Determine expiry based on timeframe
+            # 60 or less = 1m, anything higher (like 300) = 5m
+            expiry_val = 5 if tf_seconds >= 300 else 1
             
-            signal, entry_features = analyze_strategy(candles, expiry=1, return_features=True)
+            signal, entry_features = analyze_strategy(candles, expiry=expiry_val, return_features=True)
             
             if signal:
-                msg = f"🎯 Strategy Signal found for *{asset}*: *{signal}*\n🚀 Executing trade..."
-                logger.info(f"🎯 Strategy Signal found for {asset}: {signal}")
+                msg = f"🎯 Strategy Signal found for *{asset}*: *{signal}*\n⏳ Expiry: *{expiry_val}m*\n🚀 Executing trade..."
+                logger.info(f"🎯 Strategy Signal found for {asset}: {signal} ({expiry_val}m)")
                 try:
                     await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
                 except Exception as e:
@@ -724,9 +756,9 @@ async def auto_trade_loop(asset, timeframe, context, chat_id):
                 if current_gale > 0:
                     logger.info(f"🔄 Smart Martingale Recovery: {asset} is at Gale {current_gale} (Stake: {sym}{amount:.2f})")
 
-                # Execute trade (1 min expiry default for strategy)
+                # Execute trade with dynamic expiry
                 res = await run_trade(
-                    api, asset, signal, 1, amount, 
+                    api, asset, signal, expiry_val, amount, 
                     notification_callback=notify_result,
                     auto_martingale=not config.smart_martingale_autotrade,
                     features=entry_features
@@ -882,6 +914,7 @@ def main():
     app.add_handler(CommandHandler("retrain", retrain_command))
     app.add_handler(CommandHandler("set_nn", set_nn_threshold))
     app.add_handler(CommandHandler("toggle_trend", toggle_trend_filter))
+    app.add_handler(CommandHandler("test_gsheet", test_gsheet))
     app.add_handler(CommandHandler("shutdown", shutdown_bot))
     
     app.add_handler(CommandHandler("autotrade", start_auto_trade))

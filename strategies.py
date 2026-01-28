@@ -3,6 +3,7 @@ import numpy as np
 import logging
 from ml_utils import load_model, predict_signal, prepare_features, calculate_rsi, calculate_atr
 from nn_utils import predict_nn_trade
+from settings import config
 
 logger = logging.getLogger(__name__)
 
@@ -143,21 +144,22 @@ def analyze_strategy(candles_data, use_ai=True, expiry=1, return_features=False)
             logger.info(f"❌ BLOCKED {source} {signal}: Dead Market (ATR {atr_curr:.5f} < Avg*0.2)")
             return (None, None) if return_features else None
 
-    # 1. RSI Filter (Phase 1)
-    if signal == "CALL" and rsi_curr > 70:
-        logger.info(f"❌ BLOCKED {source} CALL: RSI {rsi_curr:.1f} > 70 (Overbought)")
+    # 1. RSI Filter (Phase 1) - Relaxed to 75/25
+    if signal == "CALL" and rsi_curr > 75:
+        logger.info(f"❌ BLOCKED {source} CALL: RSI {rsi_curr:.1f} > 75 (Overbought)")
         return (None, None) if return_features else None
-    elif signal == "PUT" and rsi_curr < 30:
-        logger.info(f"❌ BLOCKED {source} PUT: RSI {rsi_curr:.1f} < 30 (Oversold)")
+    elif signal == "PUT" and rsi_curr < 25:
+        logger.info(f"❌ BLOCKED {source} PUT: RSI {rsi_curr:.1f} < 25 (Oversold)")
         return (None, None) if return_features else None
         
-    # 2. EMA200 Trend Filter (Phase 1)
-    if signal == "CALL" and close_curr < ema200_curr:
-        logger.info(f"❌ BLOCKED {source} CALL: Price below EMA200 (Downtrend)")
-        return (None, None) if return_features else None
-    elif signal == "PUT" and close_curr > ema200_curr:
-        logger.info(f"❌ BLOCKED {source} PUT: Price above EMA200 (Uptrend)")
-        return (None, None) if return_features else None
+    # 2. EMA200 Trend Filter (Phase 1) - Now Optional
+    if config.use_strict_trend:
+        if signal == "CALL" and close_curr < ema200_curr:
+            logger.info(f"❌ BLOCKED {source} CALL: Price below EMA200 (Downtrend)")
+            return (None, None) if return_features else None
+        elif signal == "PUT" and close_curr > ema200_curr:
+            logger.info(f"❌ BLOCKED {source} PUT: Price above EMA200 (Uptrend)")
+            return (None, None) if return_features else None
             
     # --- AI Confirmation ---
     if signals_found and use_ai:
@@ -187,7 +189,7 @@ def analyze_strategy(candles_data, use_ai=True, expiry=1, return_features=False)
             # 2. Neural Network Confirmation
             # Pass the ALREADY PROCESSED features to the NN
             nn_prob = predict_nn_trade(df_features, expiry=expiry)
-            threshold = 0.65
+            threshold = config.nn_threshold
             
             if nn_prob < threshold:
                 logger.info(f"[NN] REJECTED {signal} ({source}): Prob {nn_prob:.2f} < {threshold}")

@@ -232,9 +232,11 @@ async def settings_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💵 *Amount:* {sym}{config.trade_amount}\n"
         f"💼 *Account:* {config.account_type.upper()}\n"
         f"🔄 *Max Gales:* {config.max_martingale_gales}\n"
-        f"📈 *Multiplier:* {config.martingale_multiplier}x\n"
-        f"🛠 *Smart Martingale:* {config.smart_martingale_autotrade} (AutoTrade)\n"
-        f"🧠 *Preferred Type:* {config.preferred_trading_type}\n"
+        f"🔢 *Multiplier:* {config.martingale_multiplier}x\n"
+        f"🧠 *NN Threshold:* {config.nn_threshold}\n"
+        f"📈 *Trend Filter:* {'✅ STRICT' if config.use_strict_trend else '🔓 LENIENT'}\n"
+        f"🤖 *Smart Martingale:* {config.smart_martingale_autotrade}\n"
+        f"🎯 *Preferred Type:* {config.preferred_trading_type}\n"
         f"🚫 *Suppression:* {'✅ ON' if config.suppress_overlapping_signals else '❌ OFF'}\n"
         f"🌍 *Timezone:* {TIMEZONE_MANUAL}"
     )
@@ -599,15 +601,36 @@ async def toggle_suppression(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(f"ℹ️ Signal suppression is currently {status}.\nUsage: /suppress <on/off>")
         return
     
-    mode = context.args[0].lower()
-    if mode in ['on', 'true', '1', 'yes']:
+    val = context.args[0].lower()
+    if val == "on":
         config.suppress_overlapping_signals = True
-        await update.message.reply_text("✅ Signal suppression enabled.")
-    elif mode in ['off', 'false', '0', 'no']:
+    elif val == "off":
         config.suppress_overlapping_signals = False
-        await update.message.reply_text("✅ Signal suppression disabled.")
     else:
-        await update.message.reply_text("⚠️ Invalid option. Use 'on' or 'off'.")
+        await update.message.reply_text("⚠️ Use 'on' or 'off'.")
+        return
+    
+    status = "ENABLED" if config.suppress_overlapping_signals else "DISABLED"
+    await update.message.reply_text(f"✅ Signal suppression {status}.")
+
+async def set_nn_threshold(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text(f"🧠 *Current NN Threshold:* `{config.nn_threshold}`\nUsage: `/set_nn <0.0-1.0>`", parse_mode="Markdown")
+        return
+    try:
+        val = float(context.args[0])
+        if not (0 <= val <= 1):
+             await update.message.reply_text("⚠️ Threshold must be between 0 and 1.")
+             return
+        config.nn_threshold = val
+        await update.message.reply_text(f"✅ NN Confidence Threshold set to `{config.nn_threshold}`", parse_mode="Markdown")
+    except ValueError:
+        await update.message.reply_text("⚠️ Invalid value.")
+
+async def toggle_trend_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config.use_strict_trend = not config.use_strict_trend
+    status = "STRICT (EMA200)" if config.use_strict_trend else "LENIENT (All Trends)"
+    await update.message.reply_text(f"📈 Trend Filter set to: *{status}*", parse_mode="Markdown")
 
 async def toggle_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     modes = ['AUTO', 'BINARY', 'DIGITAL']
@@ -857,6 +880,8 @@ def main():
     app.add_handler(CommandHandler("suppress", toggle_suppression))
     app.add_handler(CommandHandler("mode", toggle_mode))
     app.add_handler(CommandHandler("retrain", retrain_command))
+    app.add_handler(CommandHandler("set_nn", set_nn_threshold))
+    app.add_handler(CommandHandler("toggle_trend", toggle_trend_filter))
     app.add_handler(CommandHandler("shutdown", shutdown_bot))
     
     app.add_handler(CommandHandler("autotrade", start_auto_trade))

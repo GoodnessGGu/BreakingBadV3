@@ -50,6 +50,9 @@ class TradingConfig:
         self.smart_martingale_autotrade = True
         self.smart_martingale_signals = True
         self.smart_martingale_channel = True
+        # AI Tuning
+        self.nn_threshold = float(os.getenv("NN_THRESHOLD", 0.55))
+        self.use_strict_trend = os.getenv("USE_STRICT_TREND", "False").lower() == "true"
         # Optimization: AUTO, DIGITAL, BINARY
         self.preferred_trading_type = os.getenv("PREFERRED_TRADING_TYPE", "AUTO").upper()
 

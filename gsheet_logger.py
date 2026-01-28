@@ -1,6 +1,7 @@
 import os
 import gspread
 import logging
+import json
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 
@@ -9,6 +10,7 @@ logger = logging.getLogger(__name__)
 # Constants from environment
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
 SERVICE_ACCOUNT_FILE = os.getenv("SERVICE_ACCOUNT_FILE", "service_account.json")
+GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
 
 class GSheetLogger:
     def __init__(self, sheet_id=GOOGLE_SHEET_ID, credentials_file=SERVICE_ACCOUNT_FILE):
@@ -18,15 +20,28 @@ class GSheetLogger:
         self.sheet = None
         self._connected = False
         
-        if self.sheet_id and os.path.exists(self.credentials_file):
+        if self.sheet_id and (GOOGLE_SERVICE_ACCOUNT_JSON or os.path.exists(self.credentials_file)):
             self._connect()
         else:
-            logger.warning("⚠️ Google Sheets ID or Service Account file missing. GSheet sync disabled.")
+            logger.warning("⚠️ Google Sheets ID or Service Account credentials missing. GSheet sync disabled.")
 
     def _connect(self):
         try:
             scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-            creds = ServiceAccountCredentials.from_json_keyfile_name(self.credentials_file, scope)
+            
+            if GOOGLE_SERVICE_ACCOUNT_JSON:
+                try:
+                    # Try to parse the environment variable as JSON
+                    creds_dict = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
+                    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+                    logger.info("🔑 Using Google Service Account from environment variable.")
+                except json.JSONDecodeError:
+                    logger.error("❌ GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON.")
+                    return
+            else:
+                creds = ServiceAccountCredentials.from_json_keyfile_name(self.credentials_file, scope)
+                logger.info(f"🔑 Using Google Service Account file: {self.credentials_file}")
+
             self.client = gspread.authorize(creds)
             self.spreadsheet = self.client.open_by_key(self.sheet_id)
             # Use the first sheet or create 'Trades' if it doesn't exist

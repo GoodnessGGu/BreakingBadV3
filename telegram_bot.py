@@ -6,12 +6,14 @@ import time
 import tempfile
 from datetime import datetime, date, timedelta
 from collections import defaultdict
-from telegram import Update
+from telegram import (
+    Update, ReplyKeyboardMarkup, KeyboardButton, 
+    InlineKeyboardMarkup, InlineKeyboardButton
+)
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
-    ContextTypes, filters
+    ContextTypes, filters, CallbackQueryHandler
 )
-from telegram import ReplyKeyboardMarkup, KeyboardButton
 from iqclient import IQOptionAPI, run_trade
 from signal_parser import parse_signals_from_text, parse_signals_from_file
 from settings import config, TIMEZONE_MANUAL, update_env_variable
@@ -43,6 +45,10 @@ CHANNELS = {
     "2": os.getenv("CHANNEL_ID_2")
 }
 active_channel_key = "1" # Default to channel 1
+
+# Asset Lists for Toggle Menu
+REAL_PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF", "NZDUSD", "EURGBP", "EURJPY", "GBPJPY"]
+OTC_PAIRS = ["EURUSD-OTC", "GBPUSD-OTC", "USDJPY-OTC", "AUDUSD-OTC", "USDCAD-OTC", "USDCHF-OTC", "NZDUSD-OTC", "EURGBP-OTC", "EURJPY-OTC", "GBPJPY-OTC"]
 
 # --- Start Time (for uptime reporting) ---
 START_TIME = time.time()
@@ -147,8 +153,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await pause_bot(update, context)
     elif text == "▶ Resume":
         await resume_bot(update, context)
-    elif text == "� Auto-Trade AI":
-        await list_auto_trades(update, context)
+    elif "Auto-Trade AI" in text:
+        await auto_trade_menu(update, context)
     elif text == "📡 Auto-Monitor":
         if not monitor:
             await update.message.reply_text("❌ Auto-Monitor credentials (API_ID/HASH) not found in `.env`")
@@ -825,7 +831,71 @@ async def stop_auto_trade(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def list_auto_trades(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active = list(active_auto_trades.keys())
     msg = f"🤖 *Active Strategies:*\n{', '.join(active) if active else 'None'}"
-    await update.message.reply_text(msg, parse_mode="Markdown")
+    if isinstance(update, Update) and update.message:
+        await update.message.reply_text(msg, parse_mode="Markdown")
+    return msg
+
+async def auto_trade_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shows the multi-asset toggle menu."""
+    keyboard = []
+    
+    # Header for REAL
+    keyboard.append([InlineKeyboardButton("--- 📈 REAL PAIRS ---", callback_data="none")])
+    # 2 columns for REAL
+    for i in range(0, len(REAL_PAIRS), 2):
+        row = []
+        for pair in REAL_PAIRS[i:i+2]:
+            status = "✅" if pair in active_auto_trades else "❌"
+            row.append(InlineKeyboardButton(f"{status} {pair}", callback_data=f"toggle_asset:{pair}"))
+        keyboard.append(row)
+        
+    # Header for OTC
+    keyboard.append([InlineKeyboardButton("--- 🤖 OTC PAIRS ---", callback_data="none")])
+    # 2 columns for OTC
+    for i in range(0, len(OTC_PAIRS), 2):
+        row = []
+        for pair in OTC_PAIRS[i:i+2]:
+            status = "✅" if pair in active_auto_trades else "❌"
+            row.append(InlineKeyboardButton(f"{status} {pair}", callback_data=f"toggle_asset:{pair}"))
+        keyboard.append(row)
+
+    keyboard.append([InlineKeyboardButton("🔄 Refresh Status", callback_data="refresh_assets")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    msg = "🤖 *Auto-Trade AI Management*\nToggle assets to start/stop the strategy loop."
+    
+    if update.callback_query:
+        await update.callback_query.edit_message_text(msg, reply_markup=reply_markup, parse_mode="Markdown")
+    else:
+        await update.message.reply_text(msg, reply_markup=reply_markup, parse_mode="Markdown")
+
+async def handle_toggle_asset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles toggling an asset from the inline menu."""
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    if data == "refresh_assets":
+        await auto_trade_menu(update, context)
+        return
+        
+    asset = data.split(":")[1]
+    chat_id = update.effective_chat.id
+    
+    if asset in active_auto_trades:
+        # STOP
+        active_auto_trades[asset].cancel()
+        del active_auto_trades[asset]
+        logger.info(f"🛑 Stopped Auto-Trade for {asset} via Menu")
+    else:
+        # START
+        # Using 60s as default for the menu toggles
+        task = asyncio.create_task(auto_trade_loop(asset, 60, context, chat_id))
+        active_auto_trades[asset] = task
+        logger.info(f"🚀 Started Auto-Trade for {asset} via Menu")
+
+    # Refresh menu to show new status
+    await auto_trade_menu(update, context)
 
 async def smart_martingale_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Shows the Smart Martingale toggle menu."""
@@ -916,6 +986,9 @@ def main():
     app.add_handler(CommandHandler("toggle_trend", toggle_trend_filter))
     app.add_handler(CommandHandler("test_gsheet", test_gsheet))
     app.add_handler(CommandHandler("shutdown", shutdown_bot))
+    
+    # Callback query handler for menu toggles
+    app.add_handler(CallbackQueryHandler(handle_toggle_asset, pattern="^toggle_asset:|^refresh_assets"))
     
     app.add_handler(CommandHandler("autotrade", start_auto_trade))
     app.add_handler(CommandHandler("stoptrade", stop_auto_trade))

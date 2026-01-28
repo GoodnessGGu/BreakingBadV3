@@ -78,8 +78,15 @@ class MarketManager:
         
         self.ws_manager.send_message(name, msg)
         
-        # Wait for response
+        # Wait for response with timeout
+        start_wait = time.time()
         while self.message_handler.candles is None:
+            if time.time() - start_wait > 10:
+                logger.error(f"⌛ Timeout waiting for candles for {asset_name}")
+                break
+            if not self.ws_manager.ws_is_active:
+                logger.error(f"🔌 Connection lost while waiting for candles for {asset_name}")
+                break
             time.sleep(0.1)
         
         return self.message_handler.candles

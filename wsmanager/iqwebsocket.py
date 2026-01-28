@@ -34,11 +34,15 @@ class WebSocketManager:
     def start_websocket(self):
         """
         Initialize and start the WebSocket connection in a separate daemon thread.
-        
-        Creates a WebSocketApp instance with event handlers and starts it in a
-        daemon thread to prevent blocking. Waits for connection to be established
-        before returning.
         """
+        # Clean up existing connection if it exists
+        if self.websocket:
+            try:
+                self.websocket.close()
+            except:
+                pass
+        
+        self.ws_is_active = False
 
         # Create WebSocket application with event handlers
         self.websocket = websocket.WebSocketApp(
@@ -142,7 +146,8 @@ class WebSocketManager:
             close_status_code: WebSocket close status code
             close_msg: Close message/reason
         """
-        print("### WebSocket closed ###")
+        logger.info(f"### WebSocket closed: {close_msg} (code: {close_status_code}) ###")
+        self.ws_is_active = False
     
     def close(self):
         """

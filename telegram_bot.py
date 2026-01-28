@@ -66,7 +66,7 @@ gale_states = {
 # --- Ensure IQ Option connection ---
 async def ensure_connection():
     """Ensures the API is connected before executing a command."""
-    if getattr(api, "_connected", False):
+    if api.check_connect():
         return
 
     logger.warning("🔌 IQ Option API disconnected — attempting to reconnect...")

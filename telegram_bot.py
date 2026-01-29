@@ -638,6 +638,16 @@ async def toggle_trend_filter(update: Update, context: ContextTypes.DEFAULT_TYPE
     status = "STRICT (EMA200)" if config.use_strict_trend else "LENIENT (All Trends)"
     await update.message.reply_text(f"📈 Trend Filter set to: *{status}*", parse_mode="Markdown")
 
+async def toggle_channel_ai(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Toggles AI filtering for channel signals."""
+    config.use_ai_filter_for_channel = not config.use_ai_filter_for_channel
+    status = "ENABLED (AI Validated)" if config.use_ai_filter_for_channel else "DISABLED (Raw Signals)"
+    
+    # Persist to .env
+    update_env_variable("USE_AI_FILTER_FOR_CHANNEL", str(config.use_ai_filter_for_channel))
+    
+    await update.message.reply_text(f"📡 Channel AI Filter set to: *{status}*", parse_mode="Markdown")
+
 async def test_gsheet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Manually test GSheet connection."""
     from gsheet_logger import gsheet_logger
@@ -984,6 +994,7 @@ def main():
     app.add_handler(CommandHandler("retrain", retrain_command))
     app.add_handler(CommandHandler("set_nn", set_nn_threshold))
     app.add_handler(CommandHandler("toggle_trend", toggle_trend_filter))
+    app.add_handler(CommandHandler("toggle_channel_ai", toggle_channel_ai))
     app.add_handler(CommandHandler("test_gsheet", test_gsheet))
     app.add_handler(CommandHandler("shutdown", shutdown_bot))
     

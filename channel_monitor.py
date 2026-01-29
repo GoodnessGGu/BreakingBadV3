@@ -202,24 +202,27 @@ class ChannelMonitor:
         api = getattr(self, 'api_instance', None) or getattr(self, 'iq_api', None) or self.api_instance
 
         # --- NEW: Strategy Validation Filter ---
-        try:
-            # Fetch history for validation
-            # Use 280 candles (same as realtime_bot.py)
-            candles = api.get_candle_history(pair, 280, 60) 
-            strategy_signal, entry_features = analyze_strategy(candles, expiry=expiry, return_features=True)
-            
-            if strategy_signal != direction.upper():
-                block_msg = f"❌ BLOCKED Channel Signal: {pair} {direction} (Strategy/AI Disagrees: {strategy_signal})"
-                logger.info(block_msg)
-                if self.notification_callback:
-                    await self.notification_callback(block_msg)
-                return None
-            else:
-                logger.info(f"✅ APPROVED Channel Signal: {pair} {direction} (Strategy/AI Confirmed)")
-        except Exception as e:
-            logger.error(f"Error validating signal with strategy: {e}")
-            # If validation fails, we proceed with caution OR block.
-            # return None 
+        if config.use_ai_filter_for_channel:
+            try:
+                # Fetch history for validation
+                # Use 280 candles (same as realtime_bot.py)
+                candles = api.get_candle_history(pair, 280, 60) 
+                strategy_signal, entry_features = analyze_strategy(candles, expiry=expiry, return_features=True)
+                
+                if strategy_signal != direction.upper():
+                    block_msg = f"❌ BLOCKED Channel Signal: {pair} {direction} (Strategy/AI Disagrees: {strategy_signal})"
+                    logger.info(block_msg)
+                    if self.notification_callback:
+                        await self.notification_callback(block_msg)
+                    return None
+                else:
+                    logger.info(f"✅ APPROVED Channel Signal: {pair} {direction} (Strategy/AI Confirmed)")
+            except Exception as e:
+                logger.error(f"Error validating signal with strategy: {e}")
+                # If validation fails, we proceed with caution OR block.
+                # return None 
+        else:
+            entry_features = None  # No features if filter disabled
 
         try:
             # Assuming run_trade is imported from iqclient
@@ -286,22 +289,25 @@ class ChannelMonitor:
             api = getattr(self, 'api_instance', None) or getattr(self, 'iq_api', None) or self.api_instance
 
             # --- NEW: Strategy Validation Filter ---
-            try:
-                # Use 280 candles for validation
-                candles = api.get_candle_history(signal['pair'], 280, 60)
-                strategy_signal, entry_features = analyze_strategy(candles, expiry=signal['expiry'], return_features=True)
-                
-                if strategy_signal != signal['direction'].upper():
-                    block_msg = f"❌ BLOCKED Channel Signal: {signal['pair']} {signal['direction']} (Strategy/AI Disagrees: {strategy_signal})"
-                    logger.info(block_msg)
-                    if self.notification_callback:
-                        await self.notification_callback(block_msg)
-                    return None
-                else:
-                    logger.info(f"✅ APPROVED Channel Signal: {signal['pair']} {signal['direction']} (Strategy/AI Confirmed)")
-            except Exception as e:
-                logger.error(f"Error validating signal with strategy: {e}")
-                # return None 
+            if config.use_ai_filter_for_channel:
+                try:
+                    # Use 280 candles for validation
+                    candles = api.get_candle_history(signal['pair'], 280, 60)
+                    strategy_signal, entry_features = analyze_strategy(candles, expiry=signal['expiry'], return_features=True)
+                    
+                    if strategy_signal != signal['direction'].upper():
+                        block_msg = f"❌ BLOCKED Channel Signal: {signal['pair']} {signal['direction']} (Strategy/AI Disagrees: {strategy_signal})"
+                        logger.info(block_msg)
+                        if self.notification_callback:
+                            await self.notification_callback(block_msg)
+                        return None
+                    else:
+                        logger.info(f"✅ APPROVED Channel Signal: {signal['pair']} {signal['direction']} (Strategy/AI Confirmed)")
+                except Exception as e:
+                    logger.error(f"Error validating signal with strategy: {e}")
+                    # return None 
+            else:
+                entry_features = None
 
             try:
                 pair = signal.get('pair')

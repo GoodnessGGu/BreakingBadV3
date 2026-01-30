@@ -782,8 +782,11 @@ async def auto_trade_loop(asset, timeframe, context, chat_id):
                 
                 # Update Smart Martingale state for next signal
                 if config.smart_martingale_autotrade:
+                    logger.info(f"🔍 DEBUG: Smart Martingale Check. Result: {res['result']}")
                     if res['result'] == "WIN":
                         gale_states["autotrade"][asset] = 0
+                        logger.info(f"✅ Reset Gale for {asset} to 0")
+                        
                     elif res['result'] == "LOSS":
                         # If we reached max gales, reset or keep? Normally reset after final loss.
                         new_gale = current_gale + 1
@@ -792,6 +795,7 @@ async def auto_trade_loop(asset, timeframe, context, chat_id):
                             gale_states["autotrade"][asset] = 0
                         else:
                             gale_states["autotrade"][asset] = new_gale
+                            logger.info(f"📈 Incremented Gale for {asset} to {new_gale} (Key: autotrade['{asset}'])")
                 
                 # Wait for next candle to avoid duplicate signals on same candle
                 await asyncio.sleep(tf_seconds)

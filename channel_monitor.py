@@ -327,8 +327,10 @@ class ChannelMonitor:
 
                 # Update state
                 if config.smart_martingale_channel:
+                    logger.info(f"🔍 DEBUG: Channel Martingale Check. Result: {result['result']} Pair: {pair}")
                     if result['result'] == "WIN":
                         self.gale_levels[pair] = 0
+                        logger.info(f"✅ Reset Gale for {pair} to 0")
                     elif result['result'] == "LOSS":
                         new_gale = current_gale + 1
                         if new_gale > config.max_martingale_gales:
@@ -336,6 +338,7 @@ class ChannelMonitor:
                             self.gale_levels[pair] = 0
                         else:
                             self.gale_levels[pair] = new_gale
+                            logger.info(f"📈 Incremented Gale for {pair} to {new_gale}")
             except Exception as e:
                 logger.error(f"Error executing signal: {e}")
                 result = None

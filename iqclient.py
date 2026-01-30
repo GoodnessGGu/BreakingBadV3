@@ -544,10 +544,11 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
         }
         db.save_trade(log_data)
         gsheet_logger.log_trade(log_data)
-
+        
+        logger.info(f"🔍 DEBUG: run_trade Returning LOSS for {asset}")
         return {
             "asset": asset,
-            "direction": direction,
+             "direction": direction,
             "expiry": expiry,
             "result": "LOSS",
             "gale_level": max_gales,

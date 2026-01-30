@@ -56,7 +56,8 @@ class GSheetLogger:
                 # Add Header
                 self.sheet.append_row([
                     "Timestamp", "Asset", "Direction", "Amount", "Expiry", 
-                    "Result", "Profit", "Gale Level", "Source"
+                    "Result", "Profit", "Gale Level", "Source",
+                    "RSI", "ADX", "BB_Width", "Close_Price"
                 ])
             
             self._connected = True
@@ -86,7 +87,11 @@ class GSheetLogger:
                 trade_data.get('result', 'N/A'),
                 round(trade_data.get('profit', 0), 2),
                 trade_data.get('gale_level', 0),
-                trade_data.get('signal_source', 'bot')
+                trade_data.get('signal_source', 'bot'),
+                trade_data.get('rsi', ''),
+                trade_data.get('adx', ''),
+                trade_data.get('bb_width', ''),
+                trade_data.get('close', '')
             ]
             self.sheet.append_row(row)
             return True

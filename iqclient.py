@@ -491,9 +491,17 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
 
             if pnl_ok and pnl > 0:
                 logger.info(f"✅ WIN on {asset} | Profit: ${pnl:.2f} | Net PnL: ${total_pnl:.2f} | Balance: ${balance:.2f}")
-                if notification_callback:
-                    await notification_callback(f"✅ WIN on {asset} | Net PnL: ${total_pnl:.2f}")
-                # Prepare log data
+                if total_pnl > 0:
+                    logger.info(f"✅ WIN on {asset} | Profit: ${total_pnl:.2f} | Net PnL: ${total_pnl:.2f} | Balance: ${balance}")
+                
+                 # Extract features for logging
+                feat_log = {}
+                if features:
+                    feat_log['rsi'] = round(features.get('rsi', 0), 2)
+                    feat_log['adx'] = round(features.get('adx', 0), 2)
+                    feat_log['bb_width'] = round(features.get('bb_width', 0), 4)
+                    feat_log['close'] = features.get('close', 0)
+
                 log_data = {
                     "asset": asset,
                     "direction": direction,
@@ -503,7 +511,8 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
                     "profit": total_pnl,
                     "gale_level": gale,
                     "timestamp": datetime.now().isoformat(),
-                    "signal_source": "auto-trade" if features else "manual"
+                    "signal_source": "auto-trade" if features else "manual",
+                    **feat_log
                 }
                 db.save_trade(log_data)
                 gsheet_logger.log_trade(log_data)
@@ -532,6 +541,15 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
 
         logger.error(f"💀 Lost all attempts ({max_gales} gales) on {asset}")
         # Prepare log data for total loss
+        
+        # Extract features for logging
+        feat_log = {}
+        if features:
+            feat_log['rsi'] = round(features.get('rsi', 0), 2)
+            feat_log['adx'] = round(features.get('adx', 0), 2)
+            feat_log['bb_width'] = round(features.get('bb_width', 0), 4)
+            feat_log['close'] = features.get('close', 0)
+
         log_data = {
             "asset": asset,
             "direction": direction,
@@ -541,7 +559,8 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
             "profit": total_pnl,
             "gale_level": max_gales,
             "timestamp": datetime.now().isoformat(),
-            "signal_source": "auto-trade" if features else "manual"
+            "signal_source": "auto-trade" if features else "manual",
+            **feat_log # Merge features
         }
         db.save_trade(log_data)
         gsheet_logger.log_trade(log_data)

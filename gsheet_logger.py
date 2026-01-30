@@ -67,10 +67,13 @@ class GSheetLogger:
 
     def log_trade(self, trade_data):
         """Append a trade row to Google Sheets."""
+        logger.info(f"📊 Sending trade to Google Sheets: {trade_data.get('asset')} {trade_data.get('result')}")
+        
         if not self._connected:
             # Try to connect on the fly (lazy connection)
             self._connect()
             if not self._connected:
+                logger.warning("⚠️ GSheet still disconnected after retry.")
                 return False
             
         try:

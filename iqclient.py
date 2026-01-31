@@ -517,6 +517,9 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
                 db.save_trade(log_data)
                 gsheet_logger.log_trade(log_data)
 
+                if notification_callback:
+                    await notification_callback(f"✅ WIN on {asset} | Profit: ${total_pnl:.2f}")
+
                 return {
                     "asset": asset,
                     "direction": direction,
@@ -528,7 +531,8 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
             else:
                 logger.warning(f"⚠️ LOSS on {asset} (Gale {gale}) | PnL: {pnl} | Net PnL: ${total_pnl:.2f}")
                 
-                if gale < max_gales:
+                # Only announce next gale if we are ACTUALLY going to execute it
+                if gale < internal_max_gales:
                     next_amount = current_amount * config.martingale_multiplier
                     msg = f"⚠️ LOSS on {asset} (Gale {gale}). Martingale to Gale {gale+1}: ${next_amount:.2f}"
                     logger.info(msg)
@@ -536,10 +540,18 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
                         await notification_callback(msg)
                     current_amount = next_amount
                 else:
+                    # Final loss for this run_trade call
                     if notification_callback:
-                        await notification_callback(f"💀 LOSS on {asset} after {max_gales} gales. Net PnL: ${total_pnl:.2f}")
+                        if auto_martingale:
+                             await notification_callback(f"💀 LOSS on {asset} after {gale+1} attempts. Net PnL: ${total_pnl:.2f}")
+                        else:
+                             # For Smart Martingale (single shot), report the loss
+                             await notification_callback(f"⚠️ Trade Lost: {asset} | PnL: ${total_pnl:.2f}")
 
-        logger.error(f"💀 Lost all attempts ({max_gales} gales) on {asset}")
+        if auto_martingale:
+            logger.error(f"💀 Lost all attempts ({max_gales} gales) on {asset}")
+        else:
+            logger.info(f"⚠️ Trade finished (Loss) on {asset}")
         # Prepare log data for total loss
         
         # Extract features for logging

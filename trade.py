@@ -120,7 +120,8 @@ class TradeManager:
         start_time = time.time()
         timeout = get_remaining_secs(self.message_handler.server_time, expiry)
 
-        while time.time() - start_time < timeout + 3:
+        # Increase timeout buffer to handle network/server latency (consistent with binary)
+        while time.time() - start_time < timeout + 30:
             order_data = self.message_handler.position_info.get(order_id, {})
             if order_data and order_data.get("status") == "closed":
                 pnl = order_data.get('pnl', 0)
@@ -129,7 +130,8 @@ class TradeManager:
                 return True, pnl
             await asyncio.sleep(.5)
 
-        return False, None
+        logger.warning(f"Digital Trade Outcome Timed Out (ID: {order_id})")
+        return False, 0.0
 
     # ========== BINARY OPTIONS ==========
     async def _execute_binary_option_trade(self, asset:str, amount:float, direction:str, expiry:int=1):

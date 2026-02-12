@@ -32,6 +32,10 @@ MARTINGALE_MULTIPLIER = 2
 SUPPRESS_OVERLAPPING_SIGNALS = True
 PAUSED = False
 
+# Risk Management
+DEFAULT_DAILY_STOP_LOSS = 0
+DEFAULT_DAILY_TAKE_PROFIT = 0
+
 # Timezones
 TIMEZONE_MANUAL = "America/Sao_Paulo"
 TIMEZONE_AUTO = "Africa/Lagos"
@@ -54,6 +58,11 @@ class TradingConfig:
         self.nn_threshold = float(os.getenv("NN_THRESHOLD", 0.55))
         self.use_strict_trend = os.getenv("USE_STRICT_TREND", "False").lower() == "true"
         self.use_ai_filter_for_channel = os.getenv("USE_AI_FILTER_FOR_CHANNEL", "True").lower() == "true"
+        
+        # Risk Management
+        self.daily_stop_loss = float(os.getenv("DAILY_STOP_LOSS", DEFAULT_DAILY_STOP_LOSS))
+        self.daily_take_profit = float(os.getenv("DAILY_TAKE_PROFIT", DEFAULT_DAILY_TAKE_PROFIT))
+
         # Optimization: AUTO, DIGITAL, BINARY
         self.preferred_trading_type = os.getenv("PREFERRED_TRADING_TYPE", "AUTO").upper()
 

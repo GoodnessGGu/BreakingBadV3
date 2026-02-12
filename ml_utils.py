@@ -102,6 +102,30 @@ def prepare_features(df):
     df['adx'] = calculate_adx(df, 14)
     df['atr'] = calculate_atr(df, 14)
     
+    # Stochastic Oscillator (%K and %D)
+    period = 14
+    smooth_k = 3
+    smooth_d = 3
+    
+    # Calculate %K: (Current Close - Lowest Low) / (Highest High - Lowest Low) * 100
+    low_min = df['min'].rolling(window=period).min()
+    high_max = df['max'].rolling(window=period).max()
+    df['stoch_k'] = 100 * ((df['close'] - low_min) / (high_max - low_min + 1e-9))
+    
+    # Smooth %K to get %K line
+    df['stoch_k'] = df['stoch_k'].rolling(window=smooth_k).mean()
+    
+    # Calculate %D: Moving average of %K
+    df['stoch_d'] = df['stoch_k'].rolling(window=smooth_d).mean()
+    
+    # Stochastic signals: Overbought (>80), Oversold (<20)
+    df['stoch_oversold'] = (df['stoch_k'] < 20).astype(int)
+    df['stoch_overbought'] = (df['stoch_k'] > 80).astype(int)
+    
+    # Stochastic crossover: %K crosses above %D (bullish), %K crosses below %D (bearish)
+    df['stoch_cross_up'] = ((df['stoch_k'] > df['stoch_d']) & (df['stoch_k'].shift(1) <= df['stoch_d'].shift(1))).astype(int)
+    df['stoch_cross_down'] = ((df['stoch_k'] < df['stoch_d']) & (df['stoch_k'].shift(1) >= df['stoch_d'].shift(1))).astype(int)
+    
     # NEW: Rate of Change (Momentum)
     df['roc_5'] = df['close'].pct_change(5)
     df['roc_10'] = df['close'].pct_change(10)
@@ -159,6 +183,64 @@ def prepare_features(df):
     df['pattern_engulfing'] = 0
     df.loc[is_bullish_engulfing, 'pattern_engulfing'] = 1
     df.loc[is_bearish_engulfing, 'pattern_engulfing'] = -1
+
+    # USER OBSERVATION: Oversized Engulfing Reversal Pattern
+    # When engulfing body is 2-3x+ larger than previous, expect reversal
+    prev_body_size = abs(prev_close - prev_open)
+    curr_body_size = abs(curr_close - curr_open)
+    body_ratio = curr_body_size / (prev_body_size + 1e-9)
+    
+    # Oversized bullish engulfing (likely to reverse down)
+    df['pattern_exhaustion_bull'] = ((is_bullish_engulfing) & (body_ratio >= 2.0)).astype(int)
+    # Oversized bearish engulfing (likely to reverse up)
+    df['pattern_exhaustion_bear'] = ((is_bearish_engulfing) & (body_ratio >= 2.0)).astype(int)
+    
+    # Doji Pattern (open ≈ close, indecision)
+    # Body is very small relative to total range
+    total_range = df['max'] - df['min']
+    df['pattern_doji'] = (df['body_size'] / (total_range + 1e-9) < 0.1).astype(int)
+    
+    # Hammer Pattern (bullish reversal)
+    # Small body at top, long lower shadow (2x+ body), little/no upper shadow
+    is_hammer = (
+        (df['lower_shadow'] > 2 * df['body_size']) &
+        (df['upper_shadow'] < 0.3 * df['body_size']) &
+        (df['body_size'] > 0)  # Not a doji
+    )
+    df['pattern_hammer'] = is_hammer.astype(int)
+    
+    # Shooting Star (bearish reversal)
+    # Small body at bottom, long upper shadow (2x+ body), little/no lower shadow
+    is_shooting_star = (
+        (df['upper_shadow'] > 2 * df['body_size']) &
+        (df['lower_shadow'] < 0.3 * df['body_size']) &
+        (df['body_size'] > 0)
+    )
+    df['pattern_shooting_star'] = is_shooting_star.astype(int)
+    
+    # Pin Bar (strong reversal signal)
+    # Very long wick on one side (3x+ body), opposite wick is small
+    is_bullish_pin = (
+        (df['lower_shadow'] > 3 * df['body_size']) &
+        (df['upper_shadow'] < df['body_size'])
+    )
+    is_bearish_pin = (
+        (df['upper_shadow'] > 3 * df['body_size']) &
+        (df['lower_shadow'] < df['body_size'])
+    )
+    df['pattern_pin_bar'] = 0
+    df.loc[is_bullish_pin, 'pattern_pin_bar'] = 1
+    df.loc[is_bearish_pin, 'pattern_pin_bar'] = -1
+    
+    # Inside Bar (consolidation, breakout setup)
+    # Current high < prev high AND current low > prev low
+    prev_high = df['max'].shift(1)
+    prev_low = df['min'].shift(1)
+    df['pattern_inside_bar'] = ((df['max'] < prev_high) & (df['min'] > prev_low)).astype(int)
+    
+    # Strong Momentum Candle (large body relative to recent average)
+    avg_body_20 = df['body_size'].rolling(20).mean()
+    df['pattern_strong_momentum'] = (df['body_size'] > 2 * avg_body_20).astype(int)
 
     # NEW: Signal Indicators as Features
     # AM_IQ logic

@@ -7,6 +7,7 @@ from sklearn.model_selection import train_test_split
 import joblib
 import os
 from nn_utils import BinaryOptionsNN
+from ml_utils import prepare_features
 
 # =========================
 # CONFIG
@@ -46,7 +47,7 @@ def train_nn_for_expiry(expiry, X_scaled, df):
     loss_fn = nn.BCELoss()
     
     # Scheduler: Reduce learning rate when validation loss stops improving
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode='min', factor=0.5, patience=LR_PATIENCE, verbose=True)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode='min', factor=0.5, patience=LR_PATIENCE)
 
     best_val_loss = float('inf')
     epochs_no_improve = 0
@@ -110,10 +111,15 @@ if __name__ == "__main__":
 
     print("Loading data...")
     df = pd.read_csv(CSV_PATH)
+    
+    # Re-calculate features to pick up new Stochastic and Pattern indicators
+    print("Re-calculating features from raw candles...")
+    df = prepare_features(df)
+    
     df = df.dropna()
 
-    # drop non-feature columns
-    drop_cols = ["signal", "pair", "asset", "market_type", "from", "to", "time", "outcome", "outcome_1m", "outcome_5m"]
+    # drop non-feature columns (including 'id' to prevent data leakage)
+    drop_cols = ["id", "signal", "pair", "asset", "market_type", "from", "to", "time", "outcome", "outcome_1m", "outcome_5m"]
     X = df.drop(columns=[c for c in drop_cols if c in df.columns], errors="ignore")
 
     print(f"Features used: {list(X.columns)}")

@@ -405,6 +405,34 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
             "profit": 0.0
         }
 
+    # Check for Daily Stop Loss / Take Profit
+    try:
+        daily_stats = db.get_daily_summary()
+        current_daily_profit = daily_stats.get('total_profit', 0)
+        sym = api.get_currency_symbol()
+        
+        if config.daily_stop_loss > 0 and current_daily_profit <= -config.daily_stop_loss:
+            msg = f"🛑 Daily STOP LOSS Reached: {sym}{current_daily_profit:.2f} (Limit: {sym}{config.daily_stop_loss})"
+            logger.warning(msg)
+            if notification_callback:
+                await notification_callback(msg)
+            return {
+                "asset": asset, "direction": direction, "expiry": expiry,
+                "result": "STOP_LOSS_REACHED", "gales": 0, "profit": 0.0
+            }
+            
+        if config.daily_take_profit > 0 and current_daily_profit >= config.daily_take_profit:
+            msg = f"🏆 Daily TAKE PROFIT Reached: {sym}{current_daily_profit:.2f} (Limit: {sym}{config.daily_take_profit})"
+            logger.warning(msg)
+            if notification_callback:
+                await notification_callback(msg)
+            return {
+                "asset": asset, "direction": direction, "expiry": expiry,
+                "result": "TAKE_PROFIT_REACHED", "gales": 0, "profit": 0.0
+            }
+    except Exception as e:
+        logger.error(f"Error checking daily SL/TP: {e}")
+
     ACTIVE_TRADES.add(trade_key)
     try:
         current_amount = amount

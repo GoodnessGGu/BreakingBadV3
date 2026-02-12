@@ -181,6 +181,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await settings_info(update, context)
     elif text == "ℹ️ Help":
         await help_command(update, context)
+    elif "Set Stop Loss" in text:
+        await set_sl(update, context)
+    elif "Set Take Profit" in text:
+        await set_tp(update, context)
     else:
         # Ignore other text or treat as signal input if you prefer
         pass
@@ -244,6 +248,8 @@ async def settings_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🤖 *Smart Martingale:* {config.smart_martingale_autotrade}\n"
         f"🎯 *Preferred Type:* {config.preferred_trading_type}\n"
         f"🚫 *Suppression:* {'✅ ON' if config.suppress_overlapping_signals else '❌ OFF'}\n"
+        f"🛡 *Daily Stop Loss:* {sym}{config.daily_stop_loss}\n"
+        f"🏆 *Daily Take Profit:* {sym}{config.daily_take_profit}\n"
         f"🌍 *Timezone:* {TIMEZONE_MANUAL}"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
@@ -562,6 +568,34 @@ async def set_martingale(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ Max martingale gales set to {config.max_martingale_gales}")
     except ValueError:
         await update.message.reply_text("⚠️ Invalid number.")
+
+async def set_sl(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        sym = api.get_currency_symbol()
+        await update.message.reply_text(f"🛡 *Current Daily Stop Loss:* `{sym}{config.daily_stop_loss}`\nUsage: `/set_sl <amount>` (0 to disable)", parse_mode="Markdown")
+        return
+    try:
+        val = float(context.args[0])
+        config.daily_stop_loss = val
+        update_env_variable("DAILY_STOP_LOSS", str(val))
+        sym = api.get_currency_symbol()
+        await update.message.reply_text(f"✅ Daily Stop Loss set to `{sym}{val}`", parse_mode="Markdown")
+    except ValueError:
+        await update.message.reply_text("⚠️ Invalid value.")
+
+async def set_tp(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        sym = api.get_currency_symbol()
+        await update.message.reply_text(f"🏆 *Current Daily Take Profit:* `{sym}{config.daily_take_profit}`\nUsage: `/set_tp <amount>` (0 to disable)", parse_mode="Markdown")
+        return
+    try:
+        val = float(context.args[0])
+        config.daily_take_profit = val
+        update_env_variable("DAILY_TAKE_PROFIT", str(val))
+        sym = api.get_currency_symbol()
+        await update.message.reply_text(f"✅ Daily Take Profit set to `{sym}{val}`", parse_mode="Markdown")
+    except ValueError:
+        await update.message.reply_text("⚠️ Invalid value.")
 
 async def switch_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global active_channel_key
@@ -914,19 +948,25 @@ async def handle_toggle_asset(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def smart_martingale_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Shows the Smart Martingale toggle menu."""
     def get_label(val): return "✅ ON" if val else "❌ OFF"
+    sym = api.get_currency_symbol()
     
     keyboard = [
         [KeyboardButton(f"Toggle RM: AutoTrade ({get_label(config.smart_martingale_autotrade)})")],
         [KeyboardButton(f"Toggle RM: Signals ({get_label(config.smart_martingale_signals)})")],
         [KeyboardButton(f"Toggle RM: Channel ({get_label(config.smart_martingale_channel)})")],
+        [KeyboardButton("📉 Set Stop Loss"), KeyboardButton("📈 Set Take Profit")],
         [KeyboardButton("🔙 Back")]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     
     msg = (
-        "🛠 *Smart Martingale Settings*\n\n"
-        "If *ON*, the bot will **wait for the next valid signal** before placing a martingale recovery trade.\n"
-        "If *OFF*, the bot will perform immediate martingale on the next candle."
+        "🛡 *Risk Management & Martingale*\n\n"
+        "🛠 *Smart Martingale:*\n"
+        "If *ON*, the bot waits for the next valid signal before recovery.\n"
+        "If *OFF*, it performs immediate martingale.\n\n"
+        f"📉 *Daily Stop Loss:* `{sym}{config.daily_stop_loss}`\n"
+        f"📈 *Daily Take Profit:* `{sym}{config.daily_take_profit}`\n\n"
+        "💡 _Use the buttons below or commands like /set_sl 50 to change limits._"
     )
     await update.message.reply_text(msg, reply_markup=reply_markup, parse_mode="Markdown")
 
@@ -1001,6 +1041,8 @@ def main():
     app.add_handler(CommandHandler("toggle_channel_ai", toggle_channel_ai))
     app.add_handler(CommandHandler("test_gsheet", test_gsheet))
     app.add_handler(CommandHandler("shutdown", shutdown_bot))
+    app.add_handler(CommandHandler("set_sl", set_sl))
+    app.add_handler(CommandHandler("set_tp", set_tp))
     
     # Callback query handler for menu toggles
     app.add_handler(CallbackQueryHandler(handle_toggle_asset, pattern="^toggle_asset:|^refresh_assets"))

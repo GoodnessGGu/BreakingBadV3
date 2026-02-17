@@ -207,7 +207,12 @@ class ChannelMonitor:
                 # Fetch history for validation
                 # Use 280 candles (same as realtime_bot.py)
                 candles = api.get_candle_history(pair, 280, 60) 
-                strategy_signal, entry_features = analyze_strategy(candles, expiry=expiry, return_features=True)
+                
+                # Fetch orderbook for confirmation (if available)
+                active_id = api.market_manager.get_marginal_asset_id(pair)
+                orderbook = api.message_handler.orderbook.get(active_id)
+                
+                strategy_signal, entry_features = analyze_strategy(candles, expiry=expiry, return_features=True, orderbook=orderbook)
                 
                 if strategy_signal != direction.upper():
                     block_msg = f"❌ BLOCKED Channel Signal: {pair} {direction} (Strategy/AI Disagrees: {strategy_signal})"
@@ -293,7 +298,13 @@ class ChannelMonitor:
                 try:
                     # Use 280 candles for validation
                     candles = api.get_candle_history(signal['pair'], 280, 60)
-                    strategy_signal, entry_features = analyze_strategy(candles, expiry=signal['expiry'], return_features=True)
+                    
+                    # Fetch orderbook for confirmation (if available)
+                    pair = signal.get('pair')
+                    active_id = api.market_manager.get_marginal_asset_id(pair)
+                    orderbook = api.message_handler.orderbook.get(active_id)
+                    
+                    strategy_signal, entry_features = analyze_strategy(candles, expiry=signal['expiry'], return_features=True, orderbook=orderbook)
                     
                     if strategy_signal != signal['direction'].upper():
                         block_msg = f"❌ BLOCKED Channel Signal: {signal['pair']} {signal['direction']} (Strategy/AI Disagrees: {strategy_signal})"

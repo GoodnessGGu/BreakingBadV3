@@ -31,22 +31,32 @@ class MarketManager:
         self.ws_manager = websocket_manager
         self.message_handler = message_handler
     
+    def get_marginal_asset_id(self, asset_name: str) -> int:
+        """
+        Get the ID for the marginal counterpart of an asset.
+        Used for orderflow (depth/quotes) from Marginal-CFD feeds.
+        """
+        base_name = asset_name.replace('-OTC', '').replace('-op', '')
+        
+        try:
+            import marginal_assests
+            import importlib
+            importlib.reload(marginal_assests)
+            if base_name in marginal_assests.UNDERLYING_ASSESTS:
+                return marginal_assests.UNDERLYING_ASSESTS[base_name]
+        except Exception as e:
+            logger.debug(f"Marginal ID lookup failed for {base_name}: {e}")
+            
+        # Fallback to standard ID if no marginal mapping found
+        return self.get_asset_id(asset_name)
+
     def get_asset_id(self, asset_name: str) -> int:
         """
         Get numeric asset ID for trading asset name.
-        
-        Args:
-            asset_name: Trading asset name (e.g., 'EURUSD-op', 'EURUSD-OTC')
-            
-        Returns:
-            Asset ID for API calls
-            
-        Raises:
-            KeyError: If asset not found
         """
         if asset_name in UNDERLYING_ASSESTS:
             return UNDERLYING_ASSESTS[asset_name]
-        raise KeyError(f'{asset_name} not found!')
+        return 0 # Default failure
     
     def get_candle_history(self, asset_name: str, count: int = 50, timeframe: int = 60, end_time: int = None):
         """
@@ -307,17 +317,10 @@ class MarketManager:
                 file.write(f"   '{key}':{value},\n")
             file.write('}\n')
 
-    def subscribe_candles(self, asset_name: str, timeframe: int = 60, plot_timeout: int = None):
+    def subscribe_candles(self, asset_name: str, timeframe: int = 60):
         """
-        Subscribe to real-time candle data with live plotting capability.
-        
-        Args:
-            asset_name (str): Name of the asset to subscribe to (e.g., 'EURUSD')
-            timeframe (int, optional): Candle timeframe in seconds. Defaults to 60.
-                Common values: 60 (1min), 300 (5min), 900 (15min), 3600 (1hr)
+        Subscribe to real-time candle data via WebSocket.
         """
-        
-        # Subscribe to real-time candle data via WebSocket
         self.ws_manager.send_message('subscribeMessage', {
             'name': 'candle-generated',
             'params': {
@@ -327,6 +330,47 @@ class MarketManager:
                 }
             }
         })
+
+    def subscribe_orderbook(self, asset_name: str):
+        """
+        Subscribe to real-time orderbook (depth) for marginal instruments.
+        """
+        active_id = self.get_marginal_asset_id(asset_name)
+        # We try subscribing to both cfd and forex types as some assets bridge them
+        for itype in ['marginal-cfd', 'marginal-forex']:
+            self.ws_manager.send_message('sendMessage', {
+                'name': 'subscribe',
+                'msg': {
+                    'name': 'order-book-changed',
+                    'version': '1.0',
+                    'params': {
+                        'routingFilters': {
+                            'active_id': str(active_id),
+                            'instrument_type': itype
+                        }
+                    }
+                }
+            })
+
+    def subscribe_quotes(self, asset_name: str):
+        """
+        Subscribe to real-time quotes (ticks) for marginal instruments.
+        """
+        active_id = self.get_marginal_asset_id(asset_name)
+        for itype in ['marginal-cfd', 'marginal-forex']:
+            self.ws_manager.send_message('sendMessage', {
+                'name': 'subscribe',
+                'msg': {
+                    'name': 'quote-generated',
+                    'version': '1.0',
+                    'params': {
+                        'routingFilters': {
+                            'active_id': str(active_id),
+                            'instrument_type': itype
+                        }
+                    }
+                }
+            })
 
     def get_binary_payout(self, asset: str) -> float:
         """

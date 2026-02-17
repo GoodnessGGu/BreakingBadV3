@@ -57,6 +57,7 @@ class TradingConfig:
         # AI Tuning
         self.nn_threshold = float(os.getenv("NN_THRESHOLD", 0.55))
         self.use_strict_trend = os.getenv("USE_STRICT_TREND", "False").lower() == "true"
+        self.use_orderflow_confirmation = os.getenv("USE_ORDERFLOW_CONFIRMATION", "True").lower() == "true"
         self.use_ai_filter_for_channel = os.getenv("USE_AI_FILTER_FOR_CHANNEL", "True").lower() == "true"
         
         # Risk Management

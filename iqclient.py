@@ -143,9 +143,27 @@ class IQOptionAPI:
 
             # Set default account and mark as connected
             self.account_manager.set_default_account()
+            
+            # Initialize instrument lists (digital, binary, and marginal-cfd)
+            try:
+                logger.info("Synchronizing trading instruments...")
+                self.market_manager.save_underlying_assests_to_file()
+            except Exception as e:
+                logger.warning(f"Could not synchronize instruments: {e}")
+
             self._connected = True
         else:
             raise ConnectionError("Login failed. Check credentials.")
+
+    def subscribe_orderflow(self, asset_name: str):
+        """
+        Subscribe to both orderbook depth and tick quotes for an asset.
+        Required for advanced orderflow analysis.
+        """
+        self._ensure_connected()
+        self.market_manager.subscribe_orderbook(asset_name)
+        self.market_manager.subscribe_quotes(asset_name)
+        logger.info(f"Orderflow stream enabled for {asset_name}")
 
     # Expose manager methods for convenience
     def get_current_account_balance(self):
@@ -395,7 +413,7 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
         }
 
     if config.paused:
-        logger.info(f"🚫 Trade skipped (bot paused): {asset} {direction.upper()}")
+        logger.info(f"Trade skipped (bot paused): {asset} {direction.upper()}")
         return {
             "asset": asset,
             "direction": direction,
@@ -412,7 +430,7 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
         sym = api.get_currency_symbol()
         
         if config.daily_stop_loss > 0 and current_daily_profit <= -config.daily_stop_loss:
-            msg = f"🛑 Daily STOP LOSS Reached: {sym}{current_daily_profit:.2f} (Limit: {sym}{config.daily_stop_loss})"
+            msg = f"Daily STOP LOSS Reached: {sym}{current_daily_profit:.2f} (Limit: {sym}{config.daily_stop_loss})"
             logger.warning(msg)
             if notification_callback:
                 await notification_callback(msg)
@@ -422,7 +440,7 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
             }
             
         if config.daily_take_profit > 0 and current_daily_profit >= config.daily_take_profit:
-            msg = f"🏆 Daily TAKE PROFIT Reached: {sym}{current_daily_profit:.2f} (Limit: {sym}{config.daily_take_profit})"
+            msg = f"Daily TAKE PROFIT Reached: {sym}{current_daily_profit:.2f} (Limit: {sym}{config.daily_take_profit})"
             logger.warning(msg)
             if notification_callback:
                 await notification_callback(msg)
@@ -459,7 +477,7 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
             
             # Fallback Logic: If Digital failed, try Binary
             if not success and trade_type == "digital":
-                logger.warning(f"⚠️ Digital trade failed: {result_data}. Switching to Binary/Turbo option...")
+                logger.warning(f"Digital trade failed: {result_data}. Switching to Binary/Turbo option...")
                 trade_type = "binary"
                 success, result_data = await api.execute_binary_option_trade(asset, current_amount, direction, expiry=expiry)
                 
@@ -469,7 +487,7 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
             
             if not success:
                 error_msg = str(result_data)
-                logger.error(f"❌ Failed to place trade on {asset} (Digital & Binary): {error_msg}")
+                logger.error(f"Failed to place trade on {asset} (Digital & Binary): {error_msg}")
                 return {
                     "asset": asset,
                     "direction": direction,
@@ -481,7 +499,7 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
                 }
 
             order_id = result_data
-            logger.info(f"🎯 Placed trade: {asset} {direction.upper()} ${current_amount} ({expiry}m expiry)")
+            logger.info(f"Placed trade: {asset} {direction.upper()} ${current_amount} ({expiry}m expiry)")
 
             pnl_ok, pnl = False, None
             if trade_type == "digital":
@@ -518,9 +536,9 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
                     logger.error(f"Failed to log live feedback: {e}")
 
             if pnl_ok and pnl > 0:
-                logger.info(f"✅ WIN on {asset} | Profit: ${pnl:.2f} | Net PnL: ${total_pnl:.2f} | Balance: ${balance:.2f}")
+                logger.info(f"WIN on {asset} | Profit: ${pnl:.2f} | Net PnL: ${total_pnl:.2f} | Balance: ${balance:.2f}")
                 if total_pnl > 0:
-                    logger.info(f"✅ WIN on {asset} | Profit: ${total_pnl:.2f} | Net PnL: ${total_pnl:.2f} | Balance: ${balance}")
+                    logger.info(f"WIN on {asset} | Profit: ${total_pnl:.2f} | Net PnL: ${total_pnl:.2f} | Balance: ${balance}")
                 
                  # Extract features for logging
                 feat_log = {}
@@ -546,7 +564,7 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
                 gsheet_logger.log_trade(log_data)
 
                 if notification_callback:
-                    await notification_callback(f"✅ WIN on {asset} | Profit: ${total_pnl:.2f}")
+                    await notification_callback(f"WIN on {asset} | Profit: ${total_pnl:.2f}")
 
                 return {
                     "asset": asset,
@@ -557,12 +575,12 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
                     "profit": total_pnl
                 }
             else:
-                logger.warning(f"⚠️ LOSS on {asset} (Gale {gale}) | PnL: {pnl} | Net PnL: ${total_pnl:.2f}")
+                logger.warning(f"LOSS on {asset} (Gale {gale}) | PnL: {pnl} | Net PnL: ${total_pnl:.2f}")
                 
                 # Only announce next gale if we are ACTUALLY going to execute it
                 if gale < internal_max_gales:
                     next_amount = current_amount * config.martingale_multiplier
-                    msg = f"⚠️ LOSS on {asset} (Gale {gale}). Martingale to Gale {gale+1}: ${next_amount:.2f}"
+                    msg = f"LOSS on {asset} (Gale {gale}). Martingale to Gale {gale+1}: ${next_amount:.2f}"
                     logger.info(msg)
                     if notification_callback:
                         await notification_callback(msg)
@@ -571,15 +589,15 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
                     # Final loss for this run_trade call
                     if notification_callback:
                         if auto_martingale:
-                             await notification_callback(f"💀 LOSS on {asset} after {gale+1} attempts. Net PnL: ${total_pnl:.2f}")
+                             await notification_callback(f"LOSS on {asset} after {gale+1} attempts. Net PnL: ${total_pnl:.2f}")
                         else:
                              # For Smart Martingale (single shot), report the loss
-                             await notification_callback(f"⚠️ Trade Lost: {asset} | PnL: ${total_pnl:.2f}")
+                             await notification_callback(f"Trade Lost: {asset} | PnL: ${total_pnl:.2f}")
 
         if auto_martingale:
-            logger.error(f"💀 Lost all attempts ({max_gales} gales) on {asset}")
+            logger.error(f"Lost all attempts ({max_gales} gales) on {asset}")
         else:
-            logger.info(f"⚠️ Trade finished (Loss) on {asset}")
+            logger.info(f"Trade finished (Loss) on {asset}")
         # Prepare log data for total loss
         
         # Extract features for logging

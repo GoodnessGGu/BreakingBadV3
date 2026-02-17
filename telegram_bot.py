@@ -782,7 +782,11 @@ async def auto_trade_loop(asset, timeframe, context, chat_id):
             # 60 or less = 1m, anything higher (like 300) = 5m
             expiry_val = 5 if tf_seconds >= 300 else 1
             
-            signal, entry_features = analyze_strategy(candles, expiry=expiry_val, return_features=True)
+            # Fetch orderbook for confirmation (if available)
+            active_id = api.market_manager.get_marginal_asset_id(asset)
+            orderbook = api.message_handler.orderbook.get(active_id)
+            
+            signal, entry_features = analyze_strategy(candles, expiry=expiry_val, return_features=True, orderbook=orderbook)
             
             if signal:
                 msg = f"🎯 Strategy Signal found for *{asset}*: *{signal}*\n⏳ Expiry: *{expiry_val}m*\n🚀 Executing trade..."
@@ -1071,6 +1075,14 @@ def main():
             logger.info("📡 Connecting to IQ Option API...")
             await api._connect()
             logger.info("✅ Connected to IQ Option API.")
+
+            # Enable Orderflow subscriptions for core pairs
+            try:
+                logger.info("📡 Enabling Orderflow subscriptions for EURUSD and GBPUSD...")
+                api.subscribe_orderflow("EURUSD")
+                api.subscribe_orderflow("GBPUSD")
+            except Exception as e:
+                logger.error(f"❌ Failed to subscribe to orderflow: {e}")
 
             # Notify admin that the bot is online
             await notify_admin_startup(app)

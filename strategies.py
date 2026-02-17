@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 import logging
-from ml_utils import load_model, predict_signal, prepare_features, calculate_rsi, calculate_atr
+from ml_utils import load_model, predict_signal, prepare_features, calculate_rsi, calculate_atr, calculate_orderflow_features
 from nn_utils import predict_nn_trade
 from settings import config
 
@@ -32,11 +32,12 @@ def wma(series, period):
         raw=True
     )
 
-def analyze_strategy(candles_data, use_ai=True, expiry=1, return_features=False):
+def analyze_strategy(candles_data, use_ai=True, expiry=1, return_features=False, orderbook=None):
     """
     Analyzes candle data and returns a signal ('CALL', 'PUT', or None).
     expiry: Signal duration in minutes (used for NN confirmation)
     return_features: If True, returns (signal, features_dict)
+    orderbook: Current Market Depth data for orderflow validation
     """
     if not candles_data or len(candles_data) < 205: # Need 200 for EMA200
         return (None, None) if return_features else None
@@ -144,6 +145,11 @@ def analyze_strategy(candles_data, use_ai=True, expiry=1, return_features=False)
             logger.info(f"❌ BLOCKED {source} {signal}: Dead Market (ATR {atr_curr:.5f} < Avg*0.2)")
             return (None, None) if return_features else None
 
+    # --- Orderflow Confirmation (Marginal Data) ---
+    if signal and config.use_orderflow_confirmation:
+        if not check_orderflow_confirmation(signal, orderbook):
+             return (None, None) if return_features else None
+
     # 1. RSI Filter (Phase 1) - Relaxed to 75/25
     if signal == "CALL" and rsi_curr > 75:
         logger.info(f"❌ BLOCKED {source} CALL: RSI {rsi_curr:.1f} > 75 (Overbought)")
@@ -222,3 +228,28 @@ def analyze_strategy(candles_data, use_ai=True, expiry=1, return_features=False)
         return signal, final_features
 
     return signal
+
+def check_orderflow_confirmation(signal, orderbook):
+    """
+    Validates a signal using real-time orderflow imbalance from Marginal-CFD data.
+    """
+    if not orderbook:
+        # Fail open: if no data, don't block.
+        return True
+        
+    of = calculate_orderflow_features(orderbook)
+    
+    # CALL Confirmation: Positive delta and Imbalance > 0.8
+    if signal == "CALL":
+        if of['of_imbalance'] < 0.8 or of['of_delta'] < 0:
+            logger.info(f"📊 [Orderflow] REJECTED CALL | Imbal: {of['of_imbalance']:.2f} | Delta: {of['of_delta']:.0f}")
+            return False
+            
+    # PUT Confirmation: Negative delta and Imbalance < 1.2
+    if signal == "PUT":
+        if of['of_imbalance'] > 1.2 or of['of_delta'] > 0:
+            logger.info(f"📊 [Orderflow] REJECTED PUT | Imbal: {of['of_imbalance']:.2f} | Delta: {of['of_delta']:.0f}")
+            return False
+            
+    logger.info(f"📊 [Orderflow] APPROVED {signal} | Imbal: {of['of_imbalance']:.2f}")
+    return True

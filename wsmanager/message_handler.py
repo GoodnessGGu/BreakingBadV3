@@ -26,6 +26,9 @@ class MessageHandler:
         
         self.recent_binary_opens = []
         self.position_info = {}
+        # Orderflow data storage
+        self.orderbook = {}
+        self.quotes = {}
 
     def handle_message(self, message):
         message_name = message.get('name')
@@ -42,6 +45,11 @@ class MessageHandler:
             "position-changed": self._handle_position_changed,
             "option-opened": self._handle_binary_option_opened,
             "option-closed": self._handle_binary_option_closed,
+            "order-book-changed": self._handle_order_book_changed,
+            "quote-generated": self._handle_quote_generated,
+            "marginal-forex-instruments.get-underlying-list": self._handle_underlying_list,
+            "marginal-cfd-instruments.get-underlying-list": self._handle_underlying_list,
+            "marginal-crypto-instruments.get-underlying-list": self._handle_underlying_list,
         }
         handler = handlers.get(message_name)
         if handler:
@@ -76,10 +84,15 @@ class MessageHandler:
         self.candles = message['msg']['candles']
 
     def _handle_underlying_list(self, message):
-        if message['msg'].get('type', None) == 'digital-option':
-            self._underlying_assests = message['msg']['underlying']
+        msg = message.get('msg', {})
+        if msg.get('type') == 'digital-option':
+            self._underlying_assests = msg.get('underlying', [])
+        elif 'items' in msg:
+            self._underlying_assests = msg['items']
+        elif 'underlying' in msg: # Fallback for other schemas
+            self._underlying_assests = msg['underlying']
         else:
-            self._underlying_assests = message['msg']['items']
+            self._underlying_assests = []
 
     def _handle_position_history(self, message):
         self.hisory_positions = message['msg']['positions']
@@ -144,6 +157,34 @@ class MessageHandler:
                 logger.warning(f"Binary option closed without ID: {message}")
         except Exception as e:
             logger.error(f"Error handling binary option closed: {e}")
+
+    def _handle_order_book_changed(self, message):
+        """
+        Processes real-time orderbook depth for marginal instruments.
+        """
+        try:
+            msg = message["msg"]
+            active_id = msg.get("active_id")
+            if active_id:
+                self.orderbook[active_id] = {
+                    "ask": msg.get("ask", []),
+                    "bid": msg.get("bid", []),
+                    "timestamp": self.server_time
+                }
+        except Exception as e:
+            logger.error(f"Error handling orderbook change: {e}")
+
+    def _handle_quote_generated(self, message):
+        """
+        Processes real-time quote generation (tick data).
+        """
+        try:
+            msg = message["msg"]
+            active_id = msg.get("active_id")
+            if active_id:
+                self.quotes[active_id] = msg
+        except Exception as e:
+            logger.error(f"Error handling quote: {e}")
 
     # Utility
     def _save_data(self, message, filename):

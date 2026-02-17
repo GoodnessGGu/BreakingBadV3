@@ -70,6 +70,50 @@ def calculate_atr(df, period=14):
     atr = tr.rolling(window=period).mean()
     return atr
 
+# --- Orderflow & Volume Analysis ---
+def calculate_orderflow_features(orderbook_data, quotes_data=None):
+    """
+    Extracts high-probability orderflow features from market depth and tick data.
+    """
+    metrics = {
+        'of_delta': 0.0,
+        'of_imbalance': 0.0,
+        'of_spread': 0.0,
+        'of_pressure': 0.0 # Ratio of top levels volume
+    }
+    
+    if not orderbook_data:
+        return metrics
+
+    bids = orderbook_data.get('bid', [])
+    asks = orderbook_data.get('ask', [])
+    
+    if not bids or not asks:
+        return metrics
+
+    # 1. Total Liquidity Depth
+    total_bid_vol = sum(b.get('volume', 0) for b in bids)
+    total_ask_vol = sum(a.get('volume', 0) for a in asks)
+    
+    metrics['of_delta'] = total_bid_vol - total_ask_vol
+    metrics['of_imbalance'] = (total_bid_vol + 1e-9) / (total_ask_vol + 1e-9)
+    
+    # 2. Top-of-Book Spread
+    metrics['of_spread'] = asks[0]['price'] - bids[0]['price']
+    
+    # 3. Aggressive Pressure (Top 3 levels)
+    top_bid_vol = sum(b.get('volume', 0) for b in bids[:3])
+    top_ask_vol = sum(a.get('volume', 0) for a in asks[:3])
+    metrics['of_pressure'] = (top_bid_vol + 1e-9) / (top_ask_vol + 1e-9)
+    
+    return metrics
+
+def calculate_vwap(df):
+    """Calculates Volume Weighted Average Price."""
+    v = df['volume']
+    p = (df['max'] + df['min'] + df['close']) / 3
+    return (p * v).cumsum() / v.cumsum()
+
 def prepare_features(df):
     """
     Generates technical indicators as features for the ML model.
@@ -134,10 +178,12 @@ def prepare_features(df):
     df['sma_20'] = df['close'].rolling(window=20).mean()
     df['sma_50'] = df['close'].rolling(window=50).mean()
     df['ema_100'] = df['close'].ewm(span=100, adjust=False).mean()
+    df['vwap'] = calculate_vwap(df)
     
-    # NEW: Price Distance from MAs
+    # NEW: Price Distance from MAs/VWAP
     df['dist_sma20'] = (df['close'] - df['sma_20']) / df['close']
     df['dist_sma50'] = (df['close'] - df['sma_50']) / df['close'] 
+    df['dist_vwap'] = (df['close'] - df['vwap']) / df['close']
     
     # 3. Bollinger Bands
     df['bb_upper'], df['bb_lower'] = calculate_bollinger_bands(df['close'], 20, 2)

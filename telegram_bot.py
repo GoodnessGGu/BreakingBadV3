@@ -966,7 +966,7 @@ async def smart_martingale_menu(update: Update, context: ContextTypes.DEFAULT_TY
         "If *OFF*, it performs immediate martingale.\n\n"
         f"📉 *Daily Stop Loss:* `{sym}{config.daily_stop_loss}`\n"
         f"📈 *Daily Take Profit:* `{sym}{config.daily_take_profit}`\n\n"
-        "💡 _Use the buttons below or commands like /set_sl 50 to change limits._"
+        "💡 _Use the buttons below or commands like_ `/set_sl 50` _to change limits._"
     )
     await update.message.reply_text(msg, reply_markup=reply_markup, parse_mode="Markdown")
 

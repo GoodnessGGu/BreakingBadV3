@@ -774,19 +774,32 @@ async def auto_trade_loop(asset, timeframe, context, chat_id):
 
             await ensure_connection()
             
-            # Fetch candles (Need enough for EMA200 + Indicators)
-            # 280 is safe for all strategies.py filters.
-            candles = api.get_candle_history(asset, 280, tf_seconds)
+            # Use the timeframe specified by the user for analysis
+            analysis_tf = int(timeframe)
+            candles = api.get_candle_history(asset, 280, analysis_tf)
 
             # Determine expiry based on timeframe
             # 60 or less = 1m, anything higher (like 300) = 5m
-            expiry_val = 5 if tf_seconds >= 300 else 1
+            expiry_val = 5 if analysis_tf >= 300 else 1
             
             # Fetch orderbook for confirmation (if available)
             active_id = api.market_manager.get_marginal_asset_id(asset)
             orderbook = api.message_handler.orderbook.get(active_id)
             
             signal, entry_features = analyze_strategy(candles, expiry=expiry_val, return_features=True, orderbook=orderbook)
+
+            # --- AI-Only Signal Detection (Fallback) ---
+            if not signal and entry_features and 'nn_prob' in entry_features:
+                prob = entry_features['nn_prob']
+                threshold = config.nn_threshold
+                if prob >= threshold:
+                    # IMPROVED: Check 'rsi' in features to guess intent if prob is high
+                    if entry_features.get('rsi', 50) < 35:
+                         signal = "CALL"
+                         logger.info(f"🧠 AI-ONLY CALL found for {asset} (Prob {prob:.2f} @ RSI {entry_features['rsi']})")
+                    elif entry_features.get('rsi', 50) > 65:
+                         signal = "PUT"
+                         logger.info(f"🧠 AI-ONLY PUT found for {asset} (Prob {prob:.2f} @ RSI {entry_features['rsi']})")
             
             if signal:
                 msg = f"🎯 Strategy Signal found for *{asset}*: *{signal}*\n⏳ Expiry: *{expiry_val}m*\n🚀 Executing trade..."

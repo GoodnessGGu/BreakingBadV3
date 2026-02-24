@@ -168,59 +168,53 @@ def analyze_strategy(candles_data, use_ai=True, expiry=1, return_features=False,
             return (None, None) if return_features else None
             
     # --- AI Confirmation ---
-    if signals_found and use_ai:
+    if use_ai:
         try:
-            # Prepare features ONCE for both models
+            # Prepare features
             df_features = prepare_features(df)
             if df_features.empty:
                 logger.warning("Feature preparation returned empty DataFrame. AI skipped.")
-                return (None, None) if return_features else None
-                
-            current_features_row = df_features.iloc[[-1]]
-            
-            # 1. Scikit-Learn (Gradient Boosting) Confirmation
-            asset = candles_data[-1].get('asset', 'unknown').upper() if isinstance(candles_data[-1], dict) else "unknown"
-            is_otc = "-OTC" in asset or "OTC" in asset
-            mtype = "otc" if is_otc else "real"
-            selected_model = ai_models.get(mtype)
-
-            if selected_model:
-                prediction = predict_signal(selected_model, current_features_row.copy())
-                if prediction == 0:
-                    logger.info(f"[AI-{mtype.upper()}] REJECTED {signal} ({source})")
-                    return (None, None) if return_features else None
-                else:
-                    logger.info(f"[AI-{mtype.upper()}] APPROVED {signal} ({source})")
-
-            # 2. Neural Network Confirmation
-            # Pass the ALREADY PROCESSED features to the NN
-            nn_prob = predict_nn_trade(df_features, expiry=expiry)
-            threshold = config.nn_threshold
-            
-            if nn_prob < threshold:
-                logger.info(f"[NN] REJECTED {signal} ({source}): Prob {nn_prob:.2f} < {threshold}")
-                return (None, None) if return_features else None
             else:
-                logger.info(f"[NN] APPROVED {signal} ({source}): Prob {nn_prob:.2f} >= {threshold}")
+                current_features_row = df_features.iloc[[-1]]
+
+                # 1. Scikit-Learn (Gradient Boosting) Confirmation
+                asset = candles_data[-1].get('asset', 'unknown').upper() if isinstance(candles_data[-1], dict) else "unknown"
+                is_otc = "-OTC" in asset or "OTC" in asset
+                mtype = "otc" if is_otc else "real"
+                selected_model = ai_models.get(mtype)
+
+                if selected_model and signal:
+                    prediction = predict_signal(selected_model, current_features_row.copy())
+                    if prediction == 0:
+                        logger.info(f"[AI-{mtype.upper()}] REJECTED {signal} ({source})")
+                        signal = None
+                    else:
+                        logger.info(f"[AI-{mtype.upper()}] APPROVED {signal} ({source})")
+
+                # 2. Neural Network Confirmation
+                nn_prob = predict_nn_trade(df_features, expiry=expiry)
+                threshold = config.nn_threshold
+
+                if signal:
+                    if nn_prob < threshold:
+                        logger.info(f"[NN] REJECTED {signal} ({source}): Prob {nn_prob:.2f} < {threshold}")
+                        signal = None
+                    else:
+                        logger.info(f"[NN] APPROVED {signal} ({source}): Prob {nn_prob:.2f} >= {threshold}")
 
         except Exception as e:
             logger.error(f"AI Confirmation Error: {e}")
-            # Optional: Decide if we fail open or closed. For safety, let's continue if it's just a log error,
-            # but if it crashed the flow, we were already returning None.
-            pass
 
-    # If return_features is requested, we need to generate full features
-    # even if no signal was found, but usually, we only care when signal exists.
+    # If return_features is requested, generate full features dict
     final_features = None
     if return_features:
-        # Prepare full feature set (same as ML training)
         try:
-             # df in this scope has basic info, prepare_features completes it
              full_df = prepare_features(df.copy())
              last_row = full_df.iloc[-1].to_dict()
-             
-             # Clean up dict (remove timestamps/objects for CSV compatibility)
              final_features = {k: v for k, v in last_row.items() if isinstance(v, (int, float, np.number))}
+             # Add NN probability to features for external use
+             if 'nn_prob' not in final_features:
+                  final_features['nn_prob'] = predict_nn_trade(full_df, expiry=expiry)
         except Exception as e:
              logger.error(f"Error extracting features for logging: {e}")
 

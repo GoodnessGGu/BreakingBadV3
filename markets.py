@@ -91,7 +91,7 @@ class MarketManager:
         # Wait for response with timeout
         start_wait = time.time()
         while self.message_handler.candles is None:
-            if time.time() - start_wait > 10:
+            if time.time() - start_wait > 15:
                 logger.error(f"⌛ Timeout waiting for candles for {asset_name}")
                 break
             if not self.ws_manager.ws_is_active:

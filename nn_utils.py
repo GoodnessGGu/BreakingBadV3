@@ -47,6 +47,8 @@ class BinaryOptionsNN(nn.Module):
     def forward(self, x):
         return self.net(x)
 
+TradingNN = BinaryOptionsNN
+
 # =========================
 # UTILS
 # =========================
@@ -54,6 +56,12 @@ def get_scaler():
     if os.path.exists("scaler.pkl"):
         return joblib.load("scaler.pkl")
     return None
+
+def get_nn_features():
+    scaler = get_scaler()
+    if scaler and hasattr(scaler, "feature_names_in_"):
+        return list(scaler.feature_names_in_)
+    return ['rsi', 'adx', 'atr', 'bb_width', 'close']
 
 def load_nn_model(expiry, input_size):
     path = f"model_{expiry}m.pth"

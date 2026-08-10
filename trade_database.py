@@ -40,10 +40,25 @@ class TradeDatabase:
                     error_message TEXT
                 )
             """)
-            
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS virtual_trades (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    asset TEXT NOT NULL,
+                    direction TEXT NOT NULL,
+                    expiry INTEGER NOT NULL,
+                    rejection_reason TEXT NOT NULL,
+                    entry_price REAL,
+                    exit_price REAL,
+                    virtual_result TEXT DEFAULT 'PENDING_VIRTUAL',
+                    features_json TEXT
+                )
+            """)
+
             conn.commit()
             conn.close()
-            logger.info(f"✅ Trade database initialized: {self.db_path}")
+            logger.info(f"✅ Trade database & counterfactual virtual trades table initialized: {self.db_path}")
         except Exception as e:
             logger.error(f"❌ Failed to initialize database: {e}")
     
@@ -214,7 +229,32 @@ class TradeDatabase:
         except Exception as e:
             logger.error(f"❌ Failed to get daily summary: {e}")
             return {}
-    
+
+    def get_recent_win_rate(self, limit: int = 10) -> float:
+        """Get the win rate of the last N trades (0.0 to 1.0)."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                SELECT result FROM trades 
+                ORDER BY timestamp DESC 
+                LIMIT ?
+            """, (limit,))
+            
+            rows = cursor.fetchall()
+            conn.close()
+            
+            if not rows:
+                return 1.0 # Default to perfect if no trades yet
+            
+            wins = sum(1 for row in rows if row['result'] == 'WIN')
+            return wins / len(rows)
+        except Exception as e:
+            logger.error(f"❌ Error fetching recent win rate: {e}")
+            return 1.0
+
     def get_best_pairs(self, days: int = 30, limit: int = 5) -> List[Dict]:
         """Get best performing currency pairs."""
         try:
@@ -254,6 +294,104 @@ class TradeDatabase:
         except Exception as e:
             logger.error(f"❌ Failed to get best pairs: {e}")
             return []
+
+    def save_virtual_trade(self, virtual_data: Dict) -> Optional[int]:
+        """Saves a skipped/rejected trade signal for counterfactual learning."""
+        try:
+            import json
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            features_str = json.dumps(virtual_data.get('features', {})) if isinstance(virtual_data.get('features'), dict) else str(virtual_data.get('features', '{}'))
+            
+            cursor.execute("""
+                INSERT INTO virtual_trades (
+                    timestamp, asset, direction, expiry, rejection_reason,
+                    entry_price, exit_price, virtual_result, features_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                virtual_data.get('timestamp', datetime.now().isoformat()),
+                virtual_data.get('asset', 'UNKNOWN'),
+                virtual_data.get('direction', 'UNKNOWN'),
+                virtual_data.get('expiry', 1),
+                virtual_data.get('rejection_reason', 'UNKNOWN'),
+                virtual_data.get('entry_price', 0.0),
+                virtual_data.get('exit_price', 0.0),
+                virtual_data.get('virtual_result', 'PENDING_VIRTUAL'),
+                features_str
+            ))
+            
+            trade_id = cursor.lastrowid
+            conn.commit()
+            conn.close()
+            logger.info(f"🧪 [Counterfactual] Virtual trade logged (ID: {trade_id}) | Reason: {virtual_data.get('rejection_reason')}")
+            return trade_id
+        except Exception as e:
+            logger.error(f"❌ Failed to save virtual trade: {e}")
+            return None
+
+    def update_virtual_trade_outcome(self, trade_id: int, exit_price: float, virtual_result: str) -> bool:
+        """Updates the outcome of a skipped/rejected trade after expiry."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                UPDATE virtual_trades
+                SET exit_price = ?, virtual_result = ?
+                WHERE id = ?
+            """, (exit_price, virtual_result, trade_id))
+            
+            conn.commit()
+            conn.close()
+            logger.info(f"🎯 [Counterfactual] Virtual trade #{trade_id} outcome updated -> {virtual_result}")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Failed to update virtual trade outcome: {e}")
+            return False
+
+    def get_filter_efficiency_stats(self, days: int = 7) -> Dict:
+        """Calculates filter precision and blocked trade accuracy."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            
+            cutoff_date = (datetime.now() - timedelta(days=days)).isoformat()
+            cursor.execute("""
+                SELECT * FROM virtual_trades
+                WHERE timestamp >= ? AND virtual_result != 'PENDING_VIRTUAL'
+            """, (cutoff_date,))
+            
+            rows = [dict(r) for r in cursor.fetchall()]
+            conn.close()
+            
+            total_rejected = len(rows)
+            saved_losses = sum(1 for r in rows if r['virtual_result'] == 'VIRTUAL_LOSS')
+            missed_wins = sum(1 for r in rows if r['virtual_result'] == 'VIRTUAL_WIN')
+            filter_accuracy = (saved_losses / total_rejected * 100) if total_rejected > 0 else 0.0
+            
+            reasons_summary = {}
+            for r in rows:
+                reason = r.get('rejection_reason', 'UNKNOWN')
+                if reason not in reasons_summary:
+                    reasons_summary[reason] = {'total': 0, 'saved_losses': 0, 'missed_wins': 0}
+                reasons_summary[reason]['total'] += 1
+                if r['virtual_result'] == 'VIRTUAL_LOSS':
+                    reasons_summary[reason]['saved_losses'] += 1
+                elif r['virtual_result'] == 'VIRTUAL_WIN':
+                    reasons_summary[reason]['missed_wins'] += 1
+
+            return {
+                'total_rejected': total_rejected,
+                'saved_losses': saved_losses,
+                'missed_wins': missed_wins,
+                'filter_accuracy': filter_accuracy,
+                'reasons_breakdown': reasons_summary
+            }
+        except Exception as e:
+            logger.error(f"❌ Failed to compute filter stats: {e}")
+            return {'total_rejected': 0, 'saved_losses': 0, 'missed_wins': 0, 'filter_accuracy': 0.0, 'reasons_breakdown': {}}
 
 
 # Global database instance

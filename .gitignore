@@ -12,3 +12,5 @@ supervisor.log
 trades.db*
 live_trade_feedback.csv
 service_account.json
+*.session
+logs.*.csv

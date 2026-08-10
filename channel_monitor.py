@@ -3,7 +3,7 @@ import os
 import asyncio
 import logging
 import pytz
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from telethon import TelegramClient, events
 
@@ -12,6 +12,8 @@ from iqclient import run_trade
 from signal_parser import parse_signals_from_text
 from channel_signal_parser import parse_channel_signal, is_signal_message
 from strategies import analyze_strategy
+from trade_database import TradeDatabase
+from trade import calculate_dynamic_trade_amount
 
 logger = logging.getLogger(__name__)
 
@@ -212,7 +214,15 @@ class ChannelMonitor:
                 active_id = api.market_manager.get_marginal_asset_id(pair)
                 orderbook = api.message_handler.orderbook.get(active_id)
                 
-                strategy_signal, entry_features = analyze_strategy(candles, expiry=expiry, return_features=True, orderbook=orderbook)
+                # Fetch recent performance for adaptive loop
+                db_inst = TradeDatabase()
+                win_rate = db_inst.get_recent_win_rate(limit=10)
+
+                strategy_signal, entry_features = analyze_strategy(
+                    candles, expiry=expiry, return_features=True, 
+                    orderbook=orderbook, recent_win_rate=win_rate,
+                    api=api
+                )
                 
                 if strategy_signal != direction.upper():
                     # Instead of blocking immediately, we log that strategy doesn't see a signal,
@@ -229,7 +239,7 @@ class ChannelMonitor:
         try:
             # Assuming run_trade is imported from iqclient
             current_gale = self.gale_levels.get(pair, 0)
-            amount = config.trade_amount * (config.martingale_multiplier ** current_gale)
+            amount = calculate_dynamic_trade_amount(api=api, base_amount=config.trade_amount, gale_level=current_gale)
             
             if current_gale > 0:
                  sym = api.get_currency_symbol()
@@ -240,7 +250,8 @@ class ChannelMonitor:
                 api, pair, direction, expiry, amount, 
                 notification_callback=trade_notification,
                 auto_martingale=not config.smart_martingale_channel,
-                features=entry_features
+                features=entry_features,
+                target_time=datetime.now(timezone.utc)
             )
             
             # Update state
@@ -302,7 +313,15 @@ class ChannelMonitor:
                     active_id = api.market_manager.get_marginal_asset_id(pair)
                     orderbook = api.message_handler.orderbook.get(active_id)
                     
-                    strategy_signal, entry_features = analyze_strategy(candles, expiry=signal['expiry'], return_features=True, orderbook=orderbook)
+                    # Fetch recent performance
+                    db_inst = TradeDatabase()
+                    win_rate = db_inst.get_recent_win_rate(limit=10)
+
+                    strategy_signal, entry_features = analyze_strategy(
+                        candles, expiry=signal['expiry'], return_features=True, 
+                        orderbook=orderbook, recent_win_rate=win_rate,
+                        api=api
+                    )
                     
                     if strategy_signal != signal['direction'].upper():
                         logger.info(f"⚠️ Strategy {strategy_signal} differs from Channel {signal['direction'].upper()} for {signal['pair']}. AI will decide.")
@@ -317,7 +336,7 @@ class ChannelMonitor:
             try:
                 pair = signal.get('pair')
                 current_gale = self.gale_levels.get(pair, 0)
-                amount = config.trade_amount * (config.martingale_multiplier ** current_gale)
+                amount = calculate_dynamic_trade_amount(api=api, base_amount=config.trade_amount, gale_level=current_gale)
                 
                 if current_gale > 0:
                      sym = api.get_currency_symbol()
@@ -327,7 +346,8 @@ class ChannelMonitor:
                     api, pair, signal['direction'], signal['expiry'], amount, 
                     notification_callback=trade_notification,
                     auto_martingale=not config.smart_martingale_channel,
-                    features=entry_features
+                    features=entry_features,
+                    target_time=datetime.now(timezone.utc)
                 )
 
                 # Update state

@@ -1,3 +1,5 @@
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="sklearn.utils.parallel")
 import pandas as pd
 import numpy as np
 import joblib
@@ -70,6 +72,50 @@ def calculate_atr(df, period=14):
     atr = tr.rolling(window=period).mean()
     return atr
 
+def calculate_sr_levels(df, lookback=200):
+    """
+    Identifies Support and Resistance levels using Fractal Highs/Lows.
+    Returns (support_levels, resistance_levels)
+    """
+    if len(df) < lookback:
+        return [], []
+    
+    # Use only last 'lookback' candles
+    data = df.iloc[-lookback:].copy()
+    
+    # Identify Fractals (neighboring context)
+    # A local high is higher than 2 candles before and 2 after
+    data['is_resistance'] = (data['max'] > data['max'].shift(1)) & \
+                             (data['max'] > data['max'].shift(2)) & \
+                             (data['max'] > data['max'].shift(-1)) & \
+                             (data['max'] > data['max'].shift(-2))
+    
+    data['is_support'] = (data['min'] < data['min'].shift(1)) & \
+                          (data['min'] < data['min'].shift(2)) & \
+                          (data['min'] < data['min'].shift(-1)) & \
+                          (data['min'] < data['min'].shift(-2))
+    
+    res_levels = data[data['is_resistance']]['max'].tolist()
+    sup_levels = data[data['is_support']]['min'].tolist()
+    
+    return sorted(sup_levels), sorted(res_levels)
+
+def identify_candle_sequence(df, count=3):
+    """
+    Analyzes the last N candles to determine if they form a consistent group.
+    Returns: 'BULLISH' (all green), 'BEARISH' (all red), or 'MIXED'
+    """
+    if len(df) < count:
+        return 'MIXED'
+    
+    last_n = df.iloc[-count:]
+    is_green = (last_n['close'] > last_n['open']).all()
+    is_red = (last_n['close'] < last_n['open']).all()
+    
+    if is_green: return 'BULLISH'
+    if is_red: return 'BEARISH'
+    return 'MIXED'
+
 # --- Orderflow & Volume Analysis ---
 def calculate_orderflow_features(orderbook_data, quotes_data=None):
     """
@@ -109,10 +155,13 @@ def calculate_orderflow_features(orderbook_data, quotes_data=None):
     return metrics
 
 def calculate_vwap(df):
-    """Calculates Volume Weighted Average Price."""
+    """Calculates Volume Weighted Average Price. Falls back to typical price when volume is 0 (e.g., OTC pairs)."""
     v = df['volume']
     p = (df['max'] + df['min'] + df['close']) / 3
-    return (p * v).cumsum() / v.cumsum()
+    cum_vol = v.cumsum()
+    # Avoid NaN on zero-volume pairs (OTC): fall back to typical price
+    vwap = (p * v).cumsum() / cum_vol.where(cum_vol > 0, other=pd.NA)
+    return vwap.fillna(p)
 
 def prepare_features(df):
     """
@@ -349,22 +398,24 @@ def train_model(data_path="training_data.csv", market_type="otc"):
         logger.error("Data missing 'outcome' column.")
         return
 
-    # Drop non-feature columns
-    drop_cols = ['time', 'outcome', 'signal', 'asset', 'from', 'to']
+    # Drop non-feature columns (including string/meta columns that can't be used as features)
+    drop_cols = ['time', 'outcome', 'signal', 'asset', 'from', 'to', 'market_type', 'pair',
+                 'outcome_1m', 'outcome_5m', 'id']
     X = df.drop(columns=[c for c in drop_cols if c in df.columns])
     y = df['outcome']
     
     # Split
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
     
-    # Train - Gradient Boosting
-    logger.info("Training Gradient Boosting Classifier...")
-    # Parameters tuned for stability
-    clf = GradientBoostingClassifier(
-        n_estimators=200, 
-        learning_rate=0.05, 
-        max_depth=4, 
-        random_state=42
+    # Train - Random Forest
+    logger.info("Training Random Forest Classifier...")
+    # Parameters tuned for stability and better generalization than GB
+    clf = RandomForestClassifier(
+        n_estimators=100, 
+        max_depth=10, 
+        min_samples_split=5,
+        random_state=42,
+        n_jobs=-1 # Use all cores
     )
     clf.fit(X_train, y_train)
     
@@ -401,6 +452,90 @@ def load_model(market_type="otc"):
             logger.error(f"Failed to load legacy model: {e}")
     
     return None
+
+LOSS_DETECTOR_PATH_TEMPLATE = os.path.join(MODELS_DIR, "loss_detector_{}.pkl")
+
+def train_loss_detector(data_path="training_data.csv", market_type="otc"):
+    """
+    Trains a loss detector model with FLIPPED labels.
+    y=1 means LOSS, y=0 means WIN.
+    The model learns consistent losing patterns rather than noisy winning ones.
+    """
+    if not os.path.exists(data_path):
+        logger.error(f"Data file not found: {data_path}")
+        return
+
+    logger.info("Loading data for loss detector training...")
+    df = pd.read_csv(data_path, on_bad_lines='skip')
+    df.dropna(inplace=True)
+
+    if 'outcome' not in df.columns:
+        logger.error("Data missing 'outcome' column.")
+        return
+
+    drop_cols = ['time', 'outcome', 'signal', 'asset', 'from', 'to', 'market_type', 'pair',
+                 'outcome_1m', 'outcome_5m', 'id']
+    X = df.drop(columns=[c for c in drop_cols if c in df.columns])
+
+    # FLIP labels: 1=LOSS, 0=WIN — we want to DETECT losing patterns
+    y = 1 - df['outcome']
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+    logger.info("Training Loss Detector (Random Forest)...")
+    clf = RandomForestClassifier(
+        n_estimators=100,
+        max_depth=10,
+        min_samples_split=5,
+        random_state=42,
+        n_jobs=-1
+    )
+    clf.fit(X_train, y_train)
+
+    y_pred = clf.predict(X_test)
+    acc = accuracy_score(y_test, y_pred)
+    logger.info(f"Loss Detector Accuracy: {acc:.2f}")
+    logger.info("\n" + classification_report(y_test, y_pred))
+
+    if not os.path.exists(MODELS_DIR):
+        os.makedirs(MODELS_DIR)
+
+    save_path = LOSS_DETECTOR_PATH_TEMPLATE.format(market_type)
+    joblib.dump(clf, save_path)
+    logger.info(f"Loss detector saved to {save_path}")
+    return clf
+
+def load_loss_detector(market_type="otc"):
+    """Loads the loss detector model for a specific market type."""
+    path = LOSS_DETECTOR_PATH_TEMPLATE.format(market_type)
+    if os.path.exists(path):
+        try:
+            return joblib.load(path)
+        except Exception as e:
+            logger.error(f"Failed to load loss detector ({market_type}): {e}")
+    return None
+
+def predict_loss(loss_model, features_df) -> float:
+    """
+    Predicts the probability that a trade will LOSE.
+    Returns: float between 0.0 and 1.0 (higher = more likely a loss).
+    """
+    if loss_model is None:
+        return 0.0  # No detector loaded: don't block
+
+    try:
+        if hasattr(loss_model, "feature_names_in_"):
+            for c in set(loss_model.feature_names_in_) - set(features_df.columns):
+                features_df[c] = 0
+            features_df = features_df[loss_model.feature_names_in_]
+
+        proba = loss_model.predict_proba(features_df)
+        # Class 1 = LOSS probability
+        return float(proba[0][1])
+    except Exception as e:
+        logger.error(f"Loss prediction error: {e}")
+        return 0.0
+
 
 def predict_signal(model, features_df):
     """
@@ -443,16 +578,28 @@ def retrain_from_live_data(feedback_path="live_trade_feedback.csv"):
         return None
     
     try:
-        df = pd.read_csv(feedback_path)
+        df = pd.read_csv(feedback_path, on_bad_lines='skip')
         if len(df) < 50: # Minimum data threshold
             logger.info(f"Not enough feedback data ({len(df)}/50) to retrain.")
             return None
         
+        # Normalize column name: feedback logs 'result', train_model expects 'outcome'
+        if 'result' in df.columns and 'outcome' not in df.columns:
+            df = df.rename(columns={'result': 'outcome'})
+        
         logger.info(f"🔄 Retraining model with {len(df)} live trade results...")
         
-        # Determine market type (split if needed, or just retrain current)
-        # For simplicity, we'll retrain 'otc' as it's most common
-        clf = train_model(data_path=feedback_path, market_type="otc")
+        # Save normalized version to temp file for train_model
+        temp_path = feedback_path.replace(".csv", "_normalized.csv")
+        df.to_csv(temp_path, index=False)
+        
+        clf = train_model(data_path=temp_path, market_type="otc")
+        
+        # Clean up temp file
+        try:
+            os.remove(temp_path)
+        except Exception:
+            pass
         
         if clf:
             logger.info("✅ Model retrained and saved successfully.")

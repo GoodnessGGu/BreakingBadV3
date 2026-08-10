@@ -386,7 +386,7 @@ from settings import config
 # Global set to track active trades to prevent overlapping signals
 ACTIVE_TRADES = set()
 
-async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notification_callback=None, auto_martingale=True, features=None):
+async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notification_callback=None, auto_martingale=True, features=None, ignore_sl_tp=False, target_time=None):
     """
     Executes a trade and handles martingale.
     If auto_martingale is True (default), it handles immediate recovery internally.
@@ -394,6 +394,39 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
     
     If 'features' (dict) is provided, the entry state and outcome will be logged to live_trade_feedback.csv
     """
+    from trade import calculate_dynamic_trade_amount, evaluate_virtual_trade_counterfactual
+    from trade_database import db
+
+    # Latency & Entry Safeguard Check
+    if target_time is not None:
+        target_ts = target_time.timestamp() if isinstance(target_time, datetime) else float(target_time)
+        latency_sec = time.time() - target_ts
+        if latency_sec > config.max_entry_delay_seconds:
+            msg = f"⏱️ Entry latency limit exceeded ({latency_sec:.2f}s > {config.max_entry_delay_seconds}s). Trade rejected."
+            logger.warning(msg)
+            if notification_callback:
+                await notification_callback(msg)
+
+            # Record Counterfactual Virtual Trade
+            if config.enable_counterfactual_learning and api:
+                try:
+                    candles = api.get_candle_history(asset, count=1, timeframe=60)
+                    entry_px = float(candles[-1]['close']) if candles else 0.0
+                    vid = db.save_virtual_trade({
+                        'asset': asset, 'direction': direction, 'expiry': expiry,
+                        'rejection_reason': f"LATENCY_EXCEEDED ({latency_sec:.2f}s)",
+                        'entry_price': entry_px, 'features': features or {}
+                    })
+                    if vid:
+                        asyncio.create_task(evaluate_virtual_trade_counterfactual(api, vid, asset, direction, expiry, entry_px, features or {}))
+                except Exception as e:
+                    logger.error(f"Failed to record counterfactual virtual trade: {e}")
+
+            return {
+                "asset": asset, "direction": direction, "expiry": expiry,
+                "result": "LATENCY_REJECTED", "gales": 0, "profit": 0.0
+            }
+
     # Use config if max_gales is not explicitly provided
     if max_gales is None:
         max_gales = config.max_martingale_gales
@@ -424,40 +457,40 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
         }
 
     # Check for Daily Stop Loss / Take Profit
-    try:
-        daily_stats = db.get_daily_summary()
-        current_daily_profit = daily_stats.get('total_profit', 0)
-        sym = api.get_currency_symbol()
-        
-        if config.daily_stop_loss > 0 and current_daily_profit <= -config.daily_stop_loss:
-            msg = f"Daily STOP LOSS Reached: {sym}{current_daily_profit:.2f} (Limit: {sym}{config.daily_stop_loss})"
-            logger.warning(msg)
-            if notification_callback:
-                await notification_callback(msg)
-            return {
-                "asset": asset, "direction": direction, "expiry": expiry,
-                "result": "STOP_LOSS_REACHED", "gales": 0, "profit": 0.0
-            }
+    if not ignore_sl_tp:
+        try:
+            daily_stats = db.get_daily_summary()
+            current_daily_profit = daily_stats.get('total_profit', 0)
+            sym = api.get_currency_symbol()
             
-        if config.daily_take_profit > 0 and current_daily_profit >= config.daily_take_profit:
-            msg = f"Daily TAKE PROFIT Reached: {sym}{current_daily_profit:.2f} (Limit: {sym}{config.daily_take_profit})"
-            logger.warning(msg)
-            if notification_callback:
-                await notification_callback(msg)
-            return {
-                "asset": asset, "direction": direction, "expiry": expiry,
-                "result": "TAKE_PROFIT_REACHED", "gales": 0, "profit": 0.0
-            }
-    except Exception as e:
-        logger.error(f"Error checking daily SL/TP: {e}")
+            if config.daily_stop_loss > 0 and current_daily_profit <= -config.daily_stop_loss:
+                msg = f"Daily STOP LOSS Reached: {sym}{current_daily_profit:.2f} (Limit: {sym}{config.daily_stop_loss})"
+                logger.warning(msg)
+                if notification_callback:
+                    await notification_callback(msg)
+                return {
+                    "asset": asset, "direction": direction, "expiry": expiry,
+                    "result": "STOP_LOSS_REACHED", "gales": 0, "profit": 0.0
+                }
+                
+            if config.daily_take_profit > 0 and current_daily_profit >= config.daily_take_profit:
+                msg = f"Daily TAKE PROFIT Reached: {sym}{current_daily_profit:.2f} (Limit: {sym}{config.daily_take_profit})"
+                logger.warning(msg)
+                if notification_callback:
+                    await notification_callback(msg)
+                return {
+                    "asset": asset, "direction": direction, "expiry": expiry,
+                    "result": "TAKE_PROFIT_REACHED", "gales": 0, "profit": 0.0
+                }
+        except Exception as e:
+            logger.error(f"Error checking daily SL/TP: {e}")
+    else:
+        logger.info(f"Stop Loss / Take Profit check skipped for {asset} (ignore_sl_tp=True)")
 
     ACTIVE_TRADES.add(trade_key)
     try:
-        current_amount = amount
         total_pnl = 0.0  # Track total PnL across all attempts
         
-        # Track which type worked to avoid retrying failed types (e.g. Digital on OTC)
-        # Track which type worked to avoid retrying failed types (e.g. Digital on OTC)
         # Optimization: Start with configured preference (BINARY/DIGITAL/AUTO)
         preferred_type = "binary" if config.preferred_trading_type == "BINARY" else "digital" 
 
@@ -465,6 +498,10 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
         internal_max_gales = max_gales if auto_martingale else 0
 
         for gale in range(internal_max_gales + 1):
+            current_amount = calculate_dynamic_trade_amount(
+                api=api, base_amount=amount, gale_level=gale,
+                accumulated_loss=abs(total_pnl)
+            )
             trade_type = preferred_type
             success = False
             result_data = None
@@ -540,13 +577,23 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
                 if total_pnl > 0:
                     logger.info(f"WIN on {asset} | Profit: ${total_pnl:.2f} | Net PnL: ${total_pnl:.2f} | Balance: ${balance}")
                 
-                 # Extract features for logging
+                 # Extract rich indicators for AI retraining logging
                 feat_log = {}
                 if features:
                     feat_log['rsi'] = round(features.get('rsi', 0), 2)
                     feat_log['adx'] = round(features.get('adx', 0), 2)
                     feat_log['bb_width'] = round(features.get('bb_width', 0), 4)
+                    feat_log['atr'] = round(features.get('atr', 0), 5)
+                    feat_log['ema200_diff'] = round(features.get('close', 0) - features.get('ema200', 0), 5) if 'ema200' in features else 0
+                    feat_log['orderbook_ratio'] = round(features.get('orderbook_ratio', 1.0), 2)
+                    feat_log['recent_win_rate'] = round(features.get('recent_win_rate', 1.0), 2)
+                    feat_log['loss_prob'] = round(features.get('loss_prob', 0), 2)
+                    feat_log['nn_prob'] = round(features.get('nn_prob', 0), 2)
+                    feat_log['entry_latency'] = round(features.get('entry_latency', 0), 2)
                     feat_log['close'] = features.get('close', 0)
+
+                sig_source = features.get('signal_source') if (features and 'signal_source' in features) else ("auto-trade" if features else "manual")
+                is_rt = features.get('is_realtime_bot', False) if features else False
 
                 log_data = {
                     "asset": asset,
@@ -557,7 +604,8 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
                     "profit": total_pnl,
                     "gale_level": gale,
                     "timestamp": datetime.now().isoformat(),
-                    "signal_source": "auto-trade" if features else "manual",
+                    "signal_source": sig_source,
+                    "is_realtime_bot": is_rt,
                     **feat_log
                 }
                 db.save_trade(log_data)
@@ -600,13 +648,23 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
             logger.info(f"Trade finished (Loss) on {asset}")
         # Prepare log data for total loss
         
-        # Extract features for logging
+        # Extract rich indicators for AI retraining logging
         feat_log = {}
         if features:
             feat_log['rsi'] = round(features.get('rsi', 0), 2)
             feat_log['adx'] = round(features.get('adx', 0), 2)
             feat_log['bb_width'] = round(features.get('bb_width', 0), 4)
+            feat_log['atr'] = round(features.get('atr', 0), 5)
+            feat_log['ema200_diff'] = round(features.get('close', 0) - features.get('ema200', 0), 5) if 'ema200' in features else 0
+            feat_log['orderbook_ratio'] = round(features.get('orderbook_ratio', 1.0), 2)
+            feat_log['recent_win_rate'] = round(features.get('recent_win_rate', 1.0), 2)
+            feat_log['loss_prob'] = round(features.get('loss_prob', 0), 2)
+            feat_log['nn_prob'] = round(features.get('nn_prob', 0), 2)
+            feat_log['entry_latency'] = round(features.get('entry_latency', 0), 2)
             feat_log['close'] = features.get('close', 0)
+
+        sig_source = features.get('signal_source') if (features and 'signal_source' in features) else ("auto-trade" if features else "manual")
+        is_rt = features.get('is_realtime_bot', False) if features else False
 
         log_data = {
             "asset": asset,
@@ -617,7 +675,8 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
             "profit": total_pnl,
             "gale_level": max_gales,
             "timestamp": datetime.now().isoformat(),
-            "signal_source": "auto-trade" if features else "manual",
+            "signal_source": sig_source,
+            "is_realtime_bot": is_rt,
             **feat_log # Merge features
         }
         db.save_trade(log_data)

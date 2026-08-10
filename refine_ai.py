@@ -60,7 +60,10 @@ def refine_models():
             print(f"ℹ️ No live trades found for {tf}")
             continue
 
-        print(f"🚀 Fine-tuning {tf} model with {len(tf_data)} samples...")
+        n_executed = len(tf_data[tf_data.get('executed', 1) == 1]) if 'executed' in tf_data.columns else len(tf_data)
+        n_virtual = len(tf_data[tf_data.get('executed', 1) == 0]) if 'executed' in tf_data.columns else 0
+
+        print(f"🚀 Fine-tuning {tf} model with {len(tf_data)} samples ({n_executed} executed, {n_virtual} counterfactual virtual)...")
 
         # Feature preparation
         X_raw = tf_data[nn_feats].values

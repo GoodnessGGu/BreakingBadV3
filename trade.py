@@ -281,3 +281,95 @@ class TradeManager:
             
         logger.warning(f"Binary Trade Outcome Timed Out (ID: {order_id})")
         return False, 0.0
+
+
+def calculate_dynamic_trade_amount(api=None, base_amount: float = 1.0, gale_level: int = 0, accumulated_loss: float = 0.0, payout_rate: float = 0.85) -> float:
+    """
+    Calculates bet sizing based on config.bet_sizing_mode:
+    - 'PAYOUT_ADJUSTED': Sizing dynamically adjusted by payout rate so payout covers accumulated loss.
+    - 'BALANCE_PERCENT': Base trade amount calculated as a percentage of account balance.
+    - 'FIXED': Standard Martingale multiplier.
+    """
+    from settings import config
+    
+    amount = base_amount
+    
+    if config.bet_sizing_mode == "BALANCE_PERCENT" and api:
+        try:
+            balance = api.get_current_account_balance()
+            if balance > 0:
+                amount = max(1.0, balance * config.balance_risk_percent)
+        except Exception as e:
+            logger.error(f"Error calculating balance percent amount: {e}")
+
+    if gale_level > 0:
+        if config.bet_sizing_mode == "PAYOUT_ADJUSTED" and payout_rate > 0:
+            # Recovery sizing: Amount needed to win back accumulated loss + base profit
+            needed = (accumulated_loss + amount) / payout_rate
+            amount = max(amount * 1.5, needed)
+        else:
+            amount = amount * (config.martingale_multiplier ** gale_level)
+            
+    # Apply hard maximum cap
+    amount = min(amount, config.max_bet_amount)
+    return round(amount, 2)
+
+
+async def evaluate_virtual_trade_counterfactual(api, trade_id: int, asset: str, direction: str, expiry: int, entry_price: float, features: dict = None):
+    """
+    Background task that waits for option expiry, fetches post-expiry candle,
+    evaluates whether a rejected signal WOULD HAVE WON or LOST, and saves the outcome for AI training.
+    """
+    try:
+        # Wait for option expiry duration + 5 seconds buffer
+        await asyncio.sleep((expiry * 60) + 5)
+        
+        if not api:
+            logger.warning(f"⚠️ [Counterfactual] No API instance to fetch exit price for virtual trade #{trade_id}")
+            return
+
+        # Fetch candle history to inspect exit price
+        candles = api.get_candle_history(asset, count=5, timeframe=60)
+        if not candles:
+            logger.warning(f"⚠️ [Counterfactual] Could not fetch exit candles for virtual trade #{trade_id}")
+            return
+            
+        last_candle = candles[-1]
+        exit_price = float(last_candle.get('close', 0.0))
+        
+        direction_upper = direction.upper()
+        if direction_upper == "CALL":
+            virtual_result = "VIRTUAL_WIN" if exit_price > entry_price else ("VIRTUAL_LOSS" if exit_price < entry_price else "VIRTUAL_DRAW")
+        else:
+            virtual_result = "VIRTUAL_WIN" if exit_price < entry_price else ("VIRTUAL_LOSS" if exit_price > entry_price else "VIRTUAL_DRAW")
+
+        from trade_database import db
+        db.update_virtual_trade_outcome(trade_id, exit_price, virtual_result)
+        
+        # Save to live_trade_feedback.csv with executed=0 for off-policy AI model learning
+        if features:
+            try:
+                import pandas as pd
+                import os
+                row = features.copy()
+                row['asset'] = asset
+                row['direction'] = direction
+                row['expiry'] = expiry
+                row['result'] = 1 if virtual_result == "VIRTUAL_WIN" else 0
+                row['executed'] = 0
+                row['pnl'] = 0.0
+                row['timestamp'] = time.time()
+                
+                feedback_file = "live_trade_feedback.csv"
+                df_new = pd.DataFrame([row])
+                if not os.path.exists(feedback_file):
+                    df_new.to_csv(feedback_file, index=False)
+                else:
+                    df_new.to_csv(feedback_file, mode='a', header=False, index=False)
+                logger.info(f"🧠 [Counterfactual] Logged virtual trade feedback sample ({virtual_result}) to AI dataset!")
+            except Exception as e:
+                logger.error(f"Failed to log virtual trade feedback: {e}")
+                
+    except Exception as e:
+        logger.error(f"❌ Error evaluating virtual trade #{trade_id}: {e}")
+

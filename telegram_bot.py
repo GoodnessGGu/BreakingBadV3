@@ -4,7 +4,7 @@ import asyncio
 import logging
 import time
 import tempfile
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 from collections import defaultdict
 from telegram import (
     Update, ReplyKeyboardMarkup, KeyboardButton, 
@@ -23,6 +23,7 @@ from strategies import analyze_strategy
 import pytz
 from trade_database import db
 from ml_utils import retrain_from_live_data
+from trade import calculate_dynamic_trade_amount
 
 # --- Logging ---
 logging.basicConfig(
@@ -416,7 +417,7 @@ async def process_and_schedule_signals(update: Update, parsed_signals: list):
         for s in grouped[sched_time]:
             # Calculate Stake
             current_gale = gale_states["signals"]
-            amount = config.trade_amount * (config.martingale_multiplier ** current_gale)
+            amount = calculate_dynamic_trade_amount(api=api, base_amount=config.trade_amount, gale_level=current_gale)
             sym = api.get_currency_symbol()
             
             if current_gale > 0:
@@ -426,7 +427,8 @@ async def process_and_schedule_signals(update: Update, parsed_signals: list):
             task = asyncio.create_task(run_trade(
                 api, s["pair"], s["direction"], s["expiry"], amount, 
                 notification_callback=notify,
-                auto_martingale=not config.smart_martingale_signals
+                auto_martingale=not config.smart_martingale_signals,
+                target_time=s["time"]
             ))
             all_trade_tasks.append(task)
 
@@ -596,6 +598,72 @@ async def set_tp(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ Daily Take Profit set to `{sym}{val}`", parse_mode="Markdown")
     except ValueError:
         await update.message.reply_text("⚠️ Invalid value.")
+
+async def filter_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shows counterfactual learning and filter accuracy statistics."""
+    try:
+        from trade_database import db
+        stats = db.get_filter_efficiency_stats(days=7)
+        
+        msg = (
+            "🧪 *Counterfactual Learning & Filter Diagnostics (Last 7 Days)*\n\n"
+            f"🚫 *Total Rejected Signals:* `{stats['total_rejected']}`\n"
+            f"🛡️ *Saved Losses (Correct Block):* `{stats['saved_losses']}`\n"
+            f"⚠️ *Missed Wins (Over-Filtered):* `{stats['missed_wins']}`\n"
+            f"🎯 *Filter Accuracy:* `{stats['filter_accuracy']:.1f}%`\n\n"
+            "📊 *Rejection Breakdown:*\n"
+        )
+        
+        reasons = stats.get('reasons_breakdown', {})
+        if not reasons:
+            msg += "_No rejected signal data logged yet._"
+        else:
+            for r_name, r_info in reasons.items():
+                acc = (r_info['saved_losses'] / r_info['total'] * 100) if r_info['total'] > 0 else 0
+                msg += f"• `{r_name}`: {r_info['saved_losses']}/{r_info['total']} saved ({acc:.0f}% accuracy)\n"
+                
+        await update.message.reply_text(msg, parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"Error fetching filter stats: {e}")
+        await update.message.reply_text(f"❌ Failed to fetch filter stats: {e}")
+
+async def set_sizing(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sets money management mode: FIXED, PAYOUT_ADJUSTED, or BALANCE_PERCENT."""
+    if not context.args:
+        await update.message.reply_text(
+            f"💰 *Current Bet Sizing Mode:* `{config.bet_sizing_mode}`\n"
+            f"Usage: `/set_sizing <fixed/payout_adjusted/balance_percent>`",
+            parse_mode="Markdown"
+        )
+        return
+    mode = context.args[0].upper()
+    valid_modes = ['FIXED', 'PAYOUT_ADJUSTED', 'BALANCE_PERCENT']
+    if mode not in valid_modes:
+        await update.message.reply_text(f"⚠️ Invalid mode. Choose from: {', '.join(valid_modes)}")
+        return
+    config.bet_sizing_mode = mode
+    update_env_variable("BET_SIZING_MODE", mode)
+    await update.message.reply_text(f"✅ Bet Sizing Mode set to `{mode}`", parse_mode="Markdown")
+
+async def set_max_delay(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sets maximum entry latency delay in seconds."""
+    if not context.args:
+        await update.message.reply_text(
+            f"⏱️ *Current Max Entry Delay:* `{config.max_entry_delay_seconds}s`\n"
+            f"Usage: `/set_max_delay <seconds>` (e.g. 2.5)",
+            parse_mode="Markdown"
+        )
+        return
+    try:
+        sec = float(context.args[0])
+        if sec <= 0:
+            await update.message.reply_text("⚠️ Delay must be positive.")
+            return
+        config.max_entry_delay_seconds = sec
+        update_env_variable("MAX_ENTRY_DELAY_SECONDS", str(sec))
+        await update.message.reply_text(f"✅ Max Entry Delay set to `{sec}s`", parse_mode="Markdown")
+    except ValueError:
+        await update.message.reply_text("⚠️ Invalid number.")
 
 async def switch_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global active_channel_key
@@ -786,7 +854,16 @@ async def auto_trade_loop(asset, timeframe, context, chat_id):
             active_id = api.market_manager.get_marginal_asset_id(asset)
             orderbook = api.message_handler.orderbook.get(active_id)
             
-            signal, entry_features = analyze_strategy(candles, expiry=expiry_val, return_features=True, orderbook=orderbook)
+            # --- CLOSED LOOP: Fetch recent performance ---
+            from trade_database import TradeDatabase
+            db_inst = TradeDatabase()
+            win_rate = db_inst.get_recent_win_rate(limit=10)
+
+            signal, entry_features = analyze_strategy(
+                candles, expiry=expiry_val, return_features=True, 
+                orderbook=orderbook, recent_win_rate=win_rate,
+                api=api
+            )
 
             # --- AI-Only Signal Detection (Fallback) ---
             if not signal and entry_features and 'nn_prob' in entry_features:
@@ -817,7 +894,7 @@ async def auto_trade_loop(asset, timeframe, context, chat_id):
 
                 # Calculate Stake for Smart Martingale
                 current_gale = gale_states["autotrade"].get(asset, 0)
-                amount = config.trade_amount * (config.martingale_multiplier ** current_gale)
+                amount = calculate_dynamic_trade_amount(api=api, base_amount=config.trade_amount, gale_level=current_gale)
                 sym = api.get_currency_symbol()
                 
                 if current_gale > 0:
@@ -828,7 +905,8 @@ async def auto_trade_loop(asset, timeframe, context, chat_id):
                     api, asset, signal, expiry_val, amount, 
                     notification_callback=notify_result,
                     auto_martingale=not config.smart_martingale_autotrade,
-                    features=entry_features
+                    features=entry_features,
+                    target_time=datetime.now(timezone.utc)
                 )
                 
                 # Update Smart Martingale state for next signal
@@ -1060,6 +1138,9 @@ def main():
     app.add_handler(CommandHandler("shutdown", shutdown_bot))
     app.add_handler(CommandHandler("set_sl", set_sl))
     app.add_handler(CommandHandler("set_tp", set_tp))
+    app.add_handler(CommandHandler("filter_stats", filter_stats))
+    app.add_handler(CommandHandler("set_sizing", set_sizing))
+    app.add_handler(CommandHandler("set_max_delay", set_max_delay))
     
     # Callback query handler for menu toggles
     app.add_handler(CallbackQueryHandler(handle_toggle_asset, pattern="^toggle_asset:|^refresh_assets"))

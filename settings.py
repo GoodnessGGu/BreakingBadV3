@@ -59,6 +59,7 @@ class TradingConfig:
         self.use_strict_trend = os.getenv("USE_STRICT_TREND", "False").lower() == "true"
         self.use_orderflow_confirmation = os.getenv("USE_ORDERFLOW_CONFIRMATION", "True").lower() == "true"
         self.use_ai_filter_for_channel = os.getenv("USE_AI_FILTER_FOR_CHANNEL", "True").lower() == "true"
+        self.use_nn_filter = os.getenv("USE_NN_FILTER", "True").lower() == "true"
         
         # Risk Management
         self.daily_stop_loss = float(os.getenv("DAILY_STOP_LOSS", DEFAULT_DAILY_STOP_LOSS))
@@ -67,12 +68,25 @@ class TradingConfig:
         # Optimization: AUTO, DIGITAL, BINARY
         self.preferred_trading_type = os.getenv("PREFERRED_TRADING_TYPE", "AUTO").upper()
 
+        # Dynamic Sizing & Money Management
+        self.bet_sizing_mode = os.getenv("BET_SIZING_MODE", "PAYOUT_ADJUSTED").upper() # FIXED, PAYOUT_ADJUSTED, BALANCE_PERCENT
+        self.balance_risk_percent = float(os.getenv("BALANCE_RISK_PERCENT", 0.01))
+        self.min_payout_threshold = float(os.getenv("MIN_PAYOUT_THRESHOLD", 0.70))
+        self.max_bet_amount = float(os.getenv("MAX_BET_AMOUNT", 100.0))
+
+        # Latency & Entry Safeguard
+        self.max_entry_delay_seconds = float(os.getenv("MAX_ENTRY_DELAY_SECONDS", 2.5))
+
+        # Counterfactual Learning Engine
+        self.enable_counterfactual_learning = os.getenv("ENABLE_COUNTERFACTUAL_LEARNING", "True").lower() == "true"
+
     def __str__(self):
         return (f"TradingConfig(amount={self.trade_amount}, "
                 f"gales={self.max_martingale_gales}, "
                 f"multiplier={self.martingale_multiplier}, "
-                f"paused={self.paused}, "
-                f"suppress={self.suppress_overlapping_signals}, "
+                f"mode={self.bet_sizing_mode}, "
+                f"max_delay={self.max_entry_delay_seconds}s, "
+                f"counterfactual={self.enable_counterfactual_learning}, "
                 f"account={self.account_type})")
 
 config = TradingConfig()

@@ -106,13 +106,19 @@ Runs pure AM_IQ crossover strategy and logs to Google Sheets tab `Realtime_Bot2_
 python realtime_bot2.py
 ```
 
-### 3. Telegram Control Bot
+### 3. Smart Trail Signals Bot (Higher Expiries & Gale 1 Capping)
+Translates TradingView's 'Smart Trail Signals NO CONDITIONS' indicator with dynamic ATR volatility trailing stops, 3-minute expiries, breakout exhaustion filter, and 15-minute loss cooldown. Logs to Google Sheets tab `Smart_Trail_Trades`:
+```bash
+python smart_trail_bot.py --expiry 3 --max-gales 1
+```
+
+### 4. Telegram Control Bot
 Launches Telegram bot for remote command control and signal monitoring:
 ```bash
 python telegram_bot.py
 ```
 
-### 4. Test Google Sheets Connection
+### 5. Test Google Sheets Connection
 ```bash
 python test_gsheet_conn.py
 ```

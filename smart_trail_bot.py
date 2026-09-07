@@ -206,6 +206,17 @@ async def run_smart_trail_bot(assets=None, base_amount=1.0, timeframe=60, expiry
 
     try:
         while True:
+            # Proactive Connection Health Check & Auto-Reconnect
+            if not getattr(api.websocket, 'ws_is_active', False) or not getattr(api, '_connected', False):
+                logger.warning("⚠️ WebSocket disconnected or closed. Triggering auto-reconnect...")
+                try:
+                    await api.reconnect()
+                    await asyncio.sleep(2)
+                except Exception as rec_err:
+                    logger.error(f"Auto-reconnect failed: {rec_err}. Retrying in 5 seconds...")
+                    await asyncio.sleep(5)
+                    continue
+
             cycle += 1
             print(f"\n--- [SmartTrail] Scan Cycle #{cycle} [{datetime.now().strftime('%H:%M:%S')}] ---", flush=True)
 
@@ -261,33 +272,36 @@ async def run_smart_trail_bot(assets=None, base_amount=1.0, timeframe=60, expiry
                                 logger.warning(f"🛡️ Activating 15-Minute Cooldown on {asset} to prevent streak losses.")
                                 cooldowns[asset] = time.time() + (15 * 60)
 
-                            # Log to Google Sheets tab 'Smart_Trail_Trades'
-                            log_entry = {
-                                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                                'asset': asset,
-                                'direction': signal,
-                                'amount': dynamic_amount,
-                                'expiry': expiry,
-                                'result': trade_result,
-                                'profit': trade_profit,
-                                'gale_level': result.get('gale_level', 0),
-                                'signal_source': 'smart_trail_bot',
-                                'rsi': '',
-                                'adx': '',
-                                'bb_width': '',
-                                'atr': features.get('atr', ''),
-                                'ema200_diff': '',
-                                'orderbook_ratio': '',
-                                'recent_win_rate': '',
-                                'loss_prob': '',
-                                'nn_prob': '',
-                                'entry_latency': '',
-                                'close': features.get('close', '')
-                            }
-                            gsheet_logger.log_trade(log_entry, worksheet_name="Smart_Trail_Trades")
+                            # If trade resulted in error before execution, log error to sheet
+                            if trade_result == "ERROR":
+                                log_entry = {
+                                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                    'asset': asset,
+                                    'direction': signal,
+                                    'amount': dynamic_amount,
+                                    'expiry': expiry,
+                                    'result': 'ERROR',
+                                    'profit': 0.0,
+                                    'gale_level': 0,
+                                    'signal_source': 'smart_trail_bot',
+                                    'atr': features.get('atr', ''),
+                                    'close': features.get('close', '')
+                                }
+                                gsheet_logger.log_trade(log_entry, worksheet_name="Smart_Trail_Trades")
 
                 except Exception as e:
-                    logger.error(f"Error scanning {asset}: {e}")
+                    err_msg = str(e)
+                    logger.error(f"Error scanning {asset}: {err_msg}")
+                    if "closed" in err_msg.lower() or "connection" in err_msg.lower():
+                        logger.warning("🔄 Detected closed connection during asset scan. Reconnecting...")
+                        try:
+                            await api.reconnect()
+                            await asyncio.sleep(2)
+                            break
+                        except Exception as rec_e:
+                            logger.error(f"Reconnect failed: {rec_e}")
+                            await asyncio.sleep(5)
+                            break
 
                 await asyncio.sleep(1.0)
 
@@ -296,13 +310,16 @@ async def run_smart_trail_bot(assets=None, base_amount=1.0, timeframe=60, expiry
     except KeyboardInterrupt:
         logger.info("\n🛑 Smart Trail Bot stopped by user (Ctrl+C).")
     finally:
-        final_balance = api.get_current_account_balance()
-        logger.info("=" * 65)
-        logger.info("            SMART TRAIL SESSION SUMMARY                 ")
-        logger.info("=" * 65)
-        logger.info(f"Final Balance: ${final_balance:.2f} (Net: ${final_balance - balance:+.2f})")
-        logger.info(f"Total Trades Executed: {trades_executed}")
-        logger.info("=" * 65)
+        try:
+            final_balance = api.get_current_account_balance()
+            logger.info("=" * 65)
+            logger.info("            SMART TRAIL SESSION SUMMARY                 ")
+            logger.info("=" * 65)
+            logger.info(f"Final Balance: ${final_balance:.2f} (Net: ${final_balance - balance:+.2f})")
+            logger.info(f"Total Trades Executed: {trades_executed}")
+            logger.info("=" * 65)
+        except Exception:
+            logger.info("Bot session terminated cleanly.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Smart Trail Signals Bot with Higher Expiries")

@@ -155,6 +155,24 @@ class IQOptionAPI:
         else:
             raise ConnectionError("Login failed. Check credentials.")
 
+    async def reconnect(self):
+        """
+        Reconnect to IQ Option WebSocket after network drop or timeout.
+        Restores account mode and synchronization.
+        """
+        logger.info("🔄 Auto-reconnecting to IQ Option...")
+        prev_mode = getattr(self, 'account_mode', 'practice')
+        try:
+            if self.websocket:
+                self.websocket.close()
+        except Exception:
+            pass
+        self._connected = False
+        await self._connect()
+        if prev_mode.lower() == "practice":
+            self.switch_account("practice")
+        logger.info(f"✅ Auto-reconnect successful. Account active: {self.account_mode.upper()}")
+
     def subscribe_orderflow(self, asset_name: str):
         """
         Subscribe to both orderbook depth and tick quotes for an asset.
@@ -457,35 +475,34 @@ async def run_trade(api, asset, direction, expiry, amount, max_gales=None, notif
         }
 
     # Check for Daily Stop Loss / Take Profit
-    if not ignore_sl_tp:
-        try:
-            daily_stats = db.get_daily_summary()
-            current_daily_profit = daily_stats.get('total_profit', 0)
-            sym = api.get_currency_symbol()
-            
-            if config.daily_stop_loss > 0 and current_daily_profit <= -config.daily_stop_loss:
-                msg = f"Daily STOP LOSS Reached: {sym}{current_daily_profit:.2f} (Limit: {sym}{config.daily_stop_loss})"
+    try:
+        daily_stats = db.get_daily_summary()
+        current_daily_profit = daily_stats.get('total_profit', 0)
+        sym = api.get_currency_symbol() if api else "$"
+        
+        sl_reached = (config.daily_stop_loss > 0 and current_daily_profit <= -abs(config.daily_stop_loss))
+        tp_reached = (config.daily_take_profit > 0 and current_daily_profit >= config.daily_take_profit)
+
+        if sl_reached:
+            msg = f"⚠️ [DAILY SL INDICATOR] Daily Stop Loss Reached: {sym}{current_daily_profit:.2f} (Limit: -{sym}{abs(config.daily_stop_loss):.2f})"
+            if ignore_sl_tp:
+                logger.warning(f"{msg} — IGNORED (Trade execution proceeding).")
+            else:
                 logger.warning(msg)
-                if notification_callback:
-                    await notification_callback(msg)
-                return {
-                    "asset": asset, "direction": direction, "expiry": expiry,
-                    "result": "STOP_LOSS_REACHED", "gales": 0, "profit": 0.0
-                }
-                
-            if config.daily_take_profit > 0 and current_daily_profit >= config.daily_take_profit:
-                msg = f"Daily TAKE PROFIT Reached: {sym}{current_daily_profit:.2f} (Limit: {sym}{config.daily_take_profit})"
+                if notification_callback: await notification_callback(msg)
+                return {"asset": asset, "direction": direction, "expiry": expiry, "result": "STOP_LOSS_REACHED", "gales": 0, "profit": 0.0}
+
+        if tp_reached:
+            msg = f"⚠️ [DAILY TP INDICATOR] Daily Take Profit Reached: {sym}{current_daily_profit:.2f} (Limit: {sym}{config.daily_take_profit:.2f})"
+            if ignore_sl_tp:
+                logger.warning(f"{msg} — IGNORED (Trade execution proceeding).")
+            else:
                 logger.warning(msg)
-                if notification_callback:
-                    await notification_callback(msg)
-                return {
-                    "asset": asset, "direction": direction, "expiry": expiry,
-                    "result": "TAKE_PROFIT_REACHED", "gales": 0, "profit": 0.0
-                }
-        except Exception as e:
-            logger.error(f"Error checking daily SL/TP: {e}")
-    else:
-        logger.info(f"Stop Loss / Take Profit check skipped for {asset} (ignore_sl_tp=True)")
+                if notification_callback: await notification_callback(msg)
+                return {"asset": asset, "direction": direction, "expiry": expiry, "result": "TAKE_PROFIT_REACHED", "gales": 0, "profit": 0.0}
+
+    except Exception as e:
+        logger.error(f"Error checking daily SL/TP: {e}")
 
     ACTIVE_TRADES.add(trade_key)
     try:

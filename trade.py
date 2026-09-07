@@ -230,9 +230,19 @@ class TradeManager:
         while time.time() - start_time < timeout:
             order_data = self.message_handler.position_info.get(order_id, {})
             
-            if order_data and (order_data.get("status") == "closed" or order_data.get("close_time")):
-                # Check outcome
-                result = order_data.get('win')
+            is_closed = bool(
+                order_data and (
+                    order_data.get("status") == "closed" or
+                    order_data.get("close_time") is not None or
+                    order_data.get("result") is not None or
+                    order_data.get("actual_expire") is not None
+                )
+            )
+
+            if is_closed:
+                # Check outcome (supports 'result' and 'win', case-insensitive)
+                raw_res = order_data.get('result') or order_data.get('win')
+                result = str(raw_res).lower() if raw_res is not None else None
                 active_id = order_data.get('active_id')
                 
                 invest = float(order_data.get('amount', 0))
@@ -242,7 +252,7 @@ class TradeManager:
                 
                 # Robust status check
                 is_win = result in ['win', 'won'] or (result is None and profit_amount > invest)
-                is_equal = result == 'equal' or (result is None and profit_amount == invest and profit_amount > 0)
+                is_equal = result in ['equal', 'loose_equal', 'tie'] or (result is None and profit_amount == invest and profit_amount > 0)
 
                 if is_win:
                     # If profit_amount suggests it includes stake (Gross), subtract invest

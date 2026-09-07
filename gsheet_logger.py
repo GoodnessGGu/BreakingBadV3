@@ -98,15 +98,22 @@ class GSheetLogger:
         self.worksheets[title] = ws
         return ws
 
-    def log_trade(self, trade_data, worksheet_name=None):
+    def log_trade(self, trade_data, worksheet_name=None, worksheet_title=None):
         """
         Append a detailed trade row to Google Sheets with automatic row color formatting.
         Formats: Green for WIN / VIRTUAL_WIN, Red for LOSS / VIRTUAL_LOSS.
         Routes realtime_bot trades to 'Realtime_Bot_Trades' sheet.
         """
+        if not worksheet_name and worksheet_title:
+            worksheet_name = worksheet_title
+
         source = str(trade_data.get('signal_source', 'bot')).lower()
         if not worksheet_name:
-            if 'realtime' in source or trade_data.get('is_realtime_bot'):
+            if 'smart_trail' in source or 'smarttrail' in source:
+                worksheet_name = "Smart_Trail_Trades"
+            elif 'bot2' in source:
+                worksheet_name = "Realtime_Bot2_Trades"
+            elif 'realtime' in source or trade_data.get('is_realtime_bot'):
                 worksheet_name = "Realtime_Bot_Trades"
             else:
                 worksheet_name = "Trades"

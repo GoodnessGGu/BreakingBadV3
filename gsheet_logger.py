@@ -98,6 +98,93 @@ class GSheetLogger:
         self.worksheets[title] = ws
         return ws
 
+    def get_or_create_forex_worksheet(self, title="Forex_Margin_Trades"):
+        """Fetches or creates dedicated Forex Margin Trades worksheet with headers."""
+        if not self._connected or not self.spreadsheet:
+            self._connect()
+            if not self._connected:
+                return None
+
+        if title in self.worksheets:
+            return self.worksheets[title]
+
+        headers = [
+            "Timestamp", "Asset", "Side", "Lots", "Entry_Price", 
+            "Stop_Loss", "Take_Profit", "Exit_Price", "PnL_USD", 
+            "Pips", "Result", "RR_Ratio", "Exit_Reason", "Position_ID", "Balance_Equity"
+        ]
+
+        try:
+            ws = self.spreadsheet.worksheet(title)
+        except gspread.WorksheetNotFound:
+            ws = self.spreadsheet.add_worksheet(title=title, rows="100", cols="15")
+            ws.append_row(headers)
+            try:
+                ws.format("A1:O1", COLOR_HEADER)
+            except Exception as fe:
+                logger.warning(f"Failed to set header formatting on {title}: {fe}")
+
+        self.worksheets[title] = ws
+        return ws
+
+    def log_forex_margin_trade(self, trade_data: dict, worksheet_title="Forex_Margin_Trades"):
+        """
+        Log a Margin Forex trade (CFD) with Entry/Exit, Lots, Dynamic SL, TP, PnL, Pips, and Result formatting.
+        """
+        logger.info(f"📊 Logging Forex Margin trade to Google Sheet ({worksheet_title}): {trade_data.get('asset')} {trade_data.get('result')}")
+
+        ws = self.get_or_create_forex_worksheet(worksheet_title)
+        if not ws:
+            logger.warning("⚠️ Could not access Google Sheet Forex worksheet.")
+            return False
+
+        try:
+            pnl = float(trade_data.get('pnl', 0.0))
+            if pnl > 0.0001:
+                result_str = "WIN"
+            elif pnl < -0.0001:
+                result_str = "LOSS"
+            else:
+                result_str = "BREAKEVEN"
+
+            row = [
+                trade_data.get('timestamp', datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+                trade_data.get('asset', 'N/A'),
+                trade_data.get('side', trade_data.get('direction', 'N/A')).upper(),
+                trade_data.get('lots', 0.0),
+                trade_data.get('entry_price', 0.0),
+                trade_data.get('stop_loss', 0.0),
+                trade_data.get('take_profit', 0.0),
+                trade_data.get('exit_price', 0.0),
+                round(pnl, 2),
+                round(float(trade_data.get('pips', 0.0)), 1),
+                result_str,
+                trade_data.get('risk_reward', '1:2'),
+                trade_data.get('exit_reason', 'N/A'),
+                str(trade_data.get('position_id', '')),
+                round(float(trade_data.get('balance_equity', 0.0)), 2)
+            ]
+
+            ws.append_row(row)
+            
+            row_idx = len(ws.get_all_values())
+            cell_range = f"A{row_idx}:O{row_idx}"
+
+            if result_str == "WIN":
+                ws.format(cell_range, COLOR_WIN)
+            elif result_str == "LOSS":
+                ws.format(cell_range, COLOR_LOSS)
+            else:
+                ws.format(cell_range, COLOR_EQUAL)
+
+            return True
+
+        except Exception as e:
+            logger.error(f"❌ Failed to log forex margin trade to GSheets: {e}")
+            if "token" in str(e).lower() or "auth" in str(e).lower():
+                self._connect()
+            return False
+
     def log_trade(self, trade_data, worksheet_name=None, worksheet_title=None):
         """
         Append a detailed trade row to Google Sheets with automatic row color formatting.
@@ -177,3 +264,4 @@ class GSheetLogger:
 
 # Global instance
 gsheet_logger = GSheetLogger()
+

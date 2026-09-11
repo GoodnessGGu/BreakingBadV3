@@ -40,8 +40,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger("SmartTrailBot")
 
-# Default OTC testing pairs
-DEFAULT_ASSETS = ["EURUSD-OTC", "GBPUSD-OTC", "USDJPY-OTC", "EURGBP-OTC", "AUDUSD-OTC"]
+# Import Forex Factory calendar and sentiment for real market pairs
+from forex_factory import ff_calendar, ff_sentiment
+
+# Asset lists for Real (weekdays) vs OTC (weekends)
+REAL_ASSETS = ["EURUSD", "GBPUSD", "USDJPY", "EURGBP", "AUDUSD"]
+OTC_ASSETS = ["EURUSD-OTC", "GBPUSD-OTC", "USDJPY-OTC", "EURGBP-OTC", "AUDUSD-OTC"]
+DEFAULT_ASSETS = REAL_ASSETS
 
 def calculate_smart_trail(df: pd.DataFrame, length: int = 14, multiplier: float = 2.0, sensitivity: int = 3):
     """
@@ -228,6 +233,13 @@ async def run_smart_trail_bot(assets=None, base_amount=1.0, timeframe=60, expiry
                     # logger.info(f"⏳ {asset} on loss cooldown ({remaining_cooldown}s remaining)")
                     continue
 
+                # High-Impact News Blackout for Real Market Pairs
+                if not asset.endswith("-OTC"):
+                    in_news, news_event = ff_calendar.is_in_news_window(asset, pre_seconds=60, post_seconds=180, impact="High")
+                    if in_news and news_event:
+                        logger.info(f"⏳ [{asset}] High-Impact News Blackout ({news_event['title']}). Skipping.")
+                        continue
+
                 try:
                     # Fetch candle history (60 candles is ample for ATR 14)
                     candles = api.get_candle_history(asset, count=60, timeframe=timeframe)
@@ -236,6 +248,13 @@ async def run_smart_trail_bot(assets=None, base_amount=1.0, timeframe=60, expiry
 
                     # Analyze Smart Trail Strategy
                     signal, features = analyze_smart_trail_strategy(candles)
+
+                    # Sentiment Directional Lock for Real Market Pairs
+                    if not asset.endswith("-OTC") and signal:
+                        bias, reason = ff_sentiment.get_directional_lock(asset)
+                        if bias and signal != bias:
+                            logger.warning(f"🚫 [{asset}] Signal {signal} blocked by Sentiment Lock ({reason}).")
+                            signal = None
 
                     if signal:
                         trades_executed += 1
@@ -323,7 +342,8 @@ async def run_smart_trail_bot(assets=None, base_amount=1.0, timeframe=60, expiry
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Smart Trail Signals Bot with Higher Expiries")
-    parser.add_argument("--assets", nargs="+", default=DEFAULT_ASSETS, help="List of asset pairs to trade")
+    parser.add_argument("--market", choices=["real", "otc", "all"], default="real", help="Market type: real (weekdays), otc (weekends), or all")
+    parser.add_argument("--assets", nargs="+", default=None, help="Custom list of asset pairs to trade")
     parser.add_argument("--amount", type=float, default=1.0, help="Base trade amount in USD")
     parser.add_argument("--timeframe", type=int, default=60, help="Candle timeframe in seconds (default: 60)")
     parser.add_argument("--expiry", type=int, default=3, help="Option expiry duration in minutes (default: 3)")
@@ -332,9 +352,19 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    # Determine target assets based on market mode
+    if args.assets:
+        target_assets = args.assets
+    elif args.market == "otc":
+        target_assets = OTC_ASSETS
+    elif args.market == "all":
+        target_assets = REAL_ASSETS + OTC_ASSETS
+    else:
+        target_assets = REAL_ASSETS
+
     try:
         asyncio.run(run_smart_trail_bot(
-            assets=args.assets,
+            assets=target_assets,
             base_amount=args.amount,
             timeframe=args.timeframe,
             expiry=args.expiry,

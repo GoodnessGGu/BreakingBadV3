@@ -13,4 +13,6 @@ trades.db*
 live_trade_feedback.csv
 service_account.json
 *.session
+my_telegram_channels.json
+tele_auth_state.json
 logs.*.csv

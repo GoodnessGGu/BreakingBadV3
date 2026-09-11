@@ -321,48 +321,72 @@ class GoldPipsCopier:
         })
 
     async def start_telegram_listener(self):
-        """Start listening for incoming posts in Gold Pips Hunter channel."""
-        logger.info(f"📡 Connecting Telethon listener to 'Gold Pips Hunter' ({GOLD_CHANNEL_ID})...")
-        self.tele_client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
-        await self.tele_client.connect()
+        """Start listening for incoming posts in Gold Pips Hunter channel with auto-reconnect."""
+        logger.info(f"📡 Initializing Telethon listener for 'Gold Pips Hunter' ({GOLD_CHANNEL_ID})...")
+        
+        while True:
+            try:
+                self.tele_client = TelegramClient(
+                    SESSION_NAME, 
+                    API_ID, 
+                    API_HASH,
+                    connection_retries=None,  # Retry indefinitely
+                    retry_delay=5,
+                    auto_reconnect=True
+                )
+                await self.tele_client.connect()
 
-        if not await self.tele_client.is_user_authorized():
-            logger.error("❌ Telegram user session is not authorized. Please run telegram_auth.py first.")
-            return
+                if not await self.tele_client.is_user_authorized():
+                    logger.error("❌ Telegram user session is not authorized. Please run telegram_auth.py first.")
+                    return
 
-        me = await self.tele_client.get_me()
-        logger.info(f"✅ Telegram Listener Active! Logged in as: {me.first_name} (@{me.username})")
-        logger.info(f"🎧 Listening for signals in channel: {GOLD_CHANNEL_ID}...")
+                me = await self.tele_client.get_me()
+                logger.info(f"✅ Telegram Listener Active! Logged in as: {me.first_name} (@{me.username})")
+                logger.info(f"🎧 Listening for signals in channel: {GOLD_CHANNEL_ID}...")
 
-        @self.tele_client.on(events.NewMessage(chats=GOLD_CHANNEL_ID))
-        async def handler(event):
-            text = event.message.text
-            if not text:
-                return
+                @self.tele_client.on(events.NewMessage(chats=GOLD_CHANNEL_ID))
+                async def handler(event):
+                    text = event.message.text
+                    if not text:
+                        return
 
-            logger.info(f"\n📩 [NEW MESSAGE from Gold Pips Hunter]:\n{text}\n")
+                    logger.info(f"\n📩 [NEW MESSAGE from Gold Pips Hunter]:\n{text}\n")
 
-            # 1. Check for management instructions (Breakeven / Close)
-            instr = GoldSignalParser.parse_instruction(text)
-            if instr:
-                if instr["type"] == "BREAKEVEN":
-                    logger.info("🛡️ Received Breakeven Instruction!")
-                    self.apply_breakeven()
-                elif instr["type"] == "CLOSE_ALL":
-                    logger.info("🔒 Received Close All Instruction!")
-                    self.close_all_gold()
-                return
+                    # 1. Check for management instructions (Breakeven / Close)
+                    instr = GoldSignalParser.parse_instruction(text)
+                    if instr:
+                        if instr["type"] == "BREAKEVEN":
+                            logger.info("🛡️ Received Breakeven Instruction!")
+                            self.apply_breakeven()
+                        elif instr["type"] == "CLOSE_ALL":
+                            logger.info("🔒 Received Close All Instruction!")
+                            self.close_all_gold()
+                        return
 
-            # 2. Check for trade signals
-            sig = GoldSignalParser.parse_signal(text)
-            if sig:
-                logger.info(f"🎯 Valid Gold Signal Detected: {sig['side']} | SL: {sig['sl']} | TP1: {sig['tp1']}")
-                self.execute_signal(sig)
-            else:
-                logger.info("Message was commentary or update (no actionable signal).")
+                    # 2. Check for trade signals
+                    sig = GoldSignalParser.parse_signal(text)
+                    if sig:
+                        logger.info(f"🎯 Valid Gold Signal Detected: {sig['side']} | SL: {sig['sl']} | TP1: {sig['tp1']}")
+                        self.execute_signal(sig)
+                    else:
+                        logger.info("Message was commentary or update (no actionable signal).")
 
-        # Keep running
-        await self.tele_client.run_until_disconnected()
+                # Run until disconnected, then loop will reconnect
+                await self.tele_client.run_until_disconnected()
+
+            except (ConnectionError, OSError) as e:
+                logger.warning(f"⚠️ Telegram network connection dropped: {e}. Reconnecting in 10s...")
+                await asyncio.sleep(10)
+            except Exception as e:
+                logger.error(f"❌ Unexpected error in Telegram listener: {e}. Reconnecting in 10s...")
+                await asyncio.sleep(10)
+            finally:
+                if self.tele_client:
+                    try:
+                        await self.tele_client.disconnect()
+                    except Exception:
+                        pass
+
 
 def main():
     parser = argparse.ArgumentParser(description="Gold Pips Hunter Signal Copier")

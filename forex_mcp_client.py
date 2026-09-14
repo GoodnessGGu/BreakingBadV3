@@ -273,11 +273,16 @@ class IQForexMCPClient:
             return res
         return None
 
-    def get_candles(self, asset_id: int, size: int = 60, count: int = 100) -> List[Dict[str, Any]]:
+    def get_candles(self, asset_id: int, size: int = 60, count: int = 100, **kwargs) -> List[Dict[str, Any]]:
         """
         Get historical candles directly from MCP server.
-        Candle size in seconds: 60 (1m), 180 (3m - if supported or resampled), 300 (5m).
+        Candle size in seconds: 60 (1m), 120 (2m), 300 (5m), etc.
         """
+        if "period" in kwargs:
+            size = kwargs["period"]
+        # Map 180 (3m) which is unsupported by IQ to 120 (2m) or 60 (1m)
+        if size == 180:
+            size = 120
         res = self.call_tool("get_candles", {
             "asset_id": asset_id,
             "size": size,

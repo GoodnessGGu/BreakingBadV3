@@ -184,11 +184,13 @@ class CallistoZoneCopier:
     # ------------------------------------------------------------------
     def check_confirmation(self, side: str) -> bool:
         """True if the latest closed candle on any confirm TF agrees with side."""
-        for tf in self.confirm_tfs:
+        # IQ Option CFD MCP supports: 60 (1m), 120 (2m), 300 (5m)
+        for tf_sec in [60, 120, 300]:
+            tf_label = f"{tf_sec // 60}M"
             try:
                 candles = self.mcp.get_candles(
                     asset_id=GOLD_ASSET_ID,
-                    period=tf * 60,
+                    size=tf_sec,
                     count=3
                 )
                 if not candles or len(candles) < 2:
@@ -199,13 +201,13 @@ class CallistoZoneCopier:
                 if o == 0 or c == 0:
                     continue
                 if side == "BUY" and c > o:
-                    logger.info(f"  Bullish {tf}M candle confirmed: O={o:.2f} C={c:.2f}")
+                    logger.info(f"  Bullish {tf_label} candle confirmed: O={o:.2f} C={c:.2f}")
                     return True
                 if side == "SELL" and c < o:
-                    logger.info(f"  Bearish {tf}M candle confirmed: O={o:.2f} C={c:.2f}")
+                    logger.info(f"  Bearish {tf_label} candle confirmed: O={o:.2f} C={c:.2f}")
                     return True
             except Exception as e:
-                logger.warning(f"  Candle error ({tf}M): {e}")
+                logger.warning(f"  Candle error ({tf_label}): {e}")
         return False
 
     # ------------------------------------------------------------------
@@ -415,6 +417,29 @@ class CallistoZoneCopier:
                                 f"Target: {ev.get('target')}"
                             )
                             self.set_zone(ev)
+
+                # Check recent messages on startup to resume any active zone
+                try:
+                    recent = await self.tele_client.get_messages(CALLISTO_CHANNEL, limit=50)
+                    for m in reversed(recent):
+                        if not m.message:
+                            continue
+                        if CallistoZoneParser.is_zone_message(m.message):
+                            age_hours = (datetime.now(timezone.utc) - m.date).total_seconds() / 3600
+                            if age_hours <= 6.0:
+                                evts = CallistoZoneParser.parse_all(m.message)
+                                for ev in evts:
+                                    if ev["type"] == "INVALIDATE":
+                                        self.invalidate_zone(ev["side"])
+                                    elif ev["type"] == "ZONE":
+                                        logger.info(
+                                            f"Loaded active zone on startup ({age_hours:.1f}h ago): "
+                                            f"{ev['side']} {ev['zone_low']:.2f} - {ev['zone_high']:.2f} | "
+                                            f"Target: {ev.get('target')}"
+                                        )
+                                        self.set_zone(ev)
+                except Exception as e:
+                    logger.warning(f"Could not load recent zone on startup: {e}")
 
                 await self.tele_client.run_until_disconnected()
 

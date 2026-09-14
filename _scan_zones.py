@@ -1,4 +1,4 @@
-import sys, asyncio, os
+import sys, asyncio, os, shutil
 sys.stdout.reconfigure(encoding='utf-8')
 sys.path.insert(0, r'C:\Users\GushEx\Documents\IQOPTIONS BOT\BreakingBadV3')
 from dotenv import load_dotenv
@@ -14,9 +14,13 @@ API_ID   = os.getenv('TELEGRAM_API_ID')
 API_HASH = os.getenv('TELEGRAM_API_HASH')
 CALLISTO = -1002848189989
 START    = datetime(2026, 9, 7, tzinfo=timezone.utc)
+BASE     = r'C:\Users\GushEx\Documents\IQOPTIONS BOT\BreakingBadV3'
+SRC_SES  = os.path.join(BASE, 'user_desktop_session.session')
+TMP_SES  = os.path.join(BASE, 'scan_readonly_session')
 
 async def main():
-    client = TelegramClient('user_desktop_session', API_ID, API_HASH)
+    shutil.copy2(SRC_SES, TMP_SES + '.session')
+    client = TelegramClient(TMP_SES, API_ID, API_HASH)
     await client.connect()
     entity = await client.get_entity(CALLISTO)
     dfmt = '%a %d %b %Y'
@@ -64,5 +68,9 @@ async def main():
         print('')
     print('Total zones: ' + str(zone_num))
     await client.disconnect()
+    try:
+        os.remove(TMP_SES + '.session')
+    except Exception:
+        pass
 
 asyncio.run(main())

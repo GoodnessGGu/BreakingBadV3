@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 
 sys.path.append(os.getcwd())
 if sys.platform == "win32":
-    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
 load_dotenv()
 
 from telethon import TelegramClient, events
@@ -126,13 +126,16 @@ class CallistoParser:
 
 class UnifiedCopier:
     def __init__(self, account_type="training", lots=1.0, leverage=100,
-                 tp_target=1, max_slippage=4.0, sl_buffer=SL_BUFFER):
+                 tp_target=1, max_slippage=4.0, sl_buffer=SL_BUFFER,
+                 lookback_mins: int = 10):
         self.account_type = account_type.lower()
         self.lots         = lots
         self.leverage     = leverage
         self.tp_target    = tp_target
         self.max_slippage = max_slippage
         self.sl_buffer    = sl_buffer
+        self.lookback_mins = lookback_mins
+        self.processed_msg_ids = set()
 
         self.mcp         = IQForexMCPClient(base_url="https://marginal-cfd.mcp.iqoption.com")
         self.balance_id  = None
@@ -389,6 +392,10 @@ class UnifiedCopier:
                 # ── Gold Pips Hunter handler ──
                 @self.tele.on(events.NewMessage(chats=GOLD_PIPS_CHANNEL))
                 async def gold_handler(event):
+                    if event.message.id in self.processed_msg_ids:
+                        return
+                    self.processed_msg_ids.add(event.message.id)
+
                     text = event.message.message
                     if not text:
                         return
@@ -410,6 +417,10 @@ class UnifiedCopier:
                 # ── CallistoFx Zone handler ──
                 @self.tele.on(events.NewMessage(chats=CALLISTO_CHANNEL))
                 async def callisto_handler(event):
+                    if event.message.id in self.processed_msg_ids:
+                        return
+                    self.processed_msg_ids.add(event.message.id)
+
                     text = event.message.message
                     if not text:
                         return
@@ -425,28 +436,59 @@ class UnifiedCopier:
                             logger.info(f"Callisto zone: {ev['side']} {ev['zone_low']:.2f}-{ev['zone_high']:.2f} Target:{ev.get('target')}")
                             self.set_zone(ev)
 
-                # Check recent messages on startup to resume any active zone
-                try:
-                    recent = await self.tele.get_messages(CALLISTO_CHANNEL, limit=50)
-                    for m in reversed(recent):
-                        if not m.message:
-                            continue
-                        if CallistoParser.is_zone_message(m.message):
-                            age_hours = (datetime.now(timezone.utc) - m.date).total_seconds() / 3600
-                            if age_hours <= 6.0:
-                                evts = CallistoParser.parse_all(m.message)
-                                for ev in evts:
-                                    if ev["type"] == "INVALIDATE":
-                                        self.invalidate_zone(ev["side"])
-                                    elif ev["type"] == "ZONE":
-                                        logger.info(
-                                            f"Loaded active Callisto zone on startup ({age_hours:.1f}h ago): "
-                                            f"{ev['side']} {ev['zone_low']:.2f} - {ev['zone_high']:.2f} | "
-                                            f"Target: {ev.get('target')}"
-                                        )
-                                        self.set_zone(ev)
-                except Exception as e:
-                    logger.warning(f"Could not load recent zone on startup: {e}")
+                # ── Startup Catch-Up Scan (Last N Minutes) ──
+                if self.lookback_mins > 0:
+                    logger.info(f"🔍 [STARTUP SCAN] Checking messages from the last {self.lookback_mins} minutes...")
+                    now_utc = datetime.now(timezone.utc)
+
+                    # 1. Check Gold Pips Hunter recent messages
+                    try:
+                        gp_recent = await self.tele.get_messages(GOLD_PIPS_CHANNEL, limit=30)
+                        for m in reversed(gp_recent):
+                            if not m.message:
+                                continue
+                            self.processed_msg_ids.add(m.id)
+                            age_mins = (now_utc - m.date).total_seconds() / 60.0
+                            if age_mins <= self.lookback_mins:
+                                text = m.message
+                                logger.info(f"📥 [RECENT GOLD PIPS MSG ({age_mins:.1f}m ago)] #{m.id}:\n{text}")
+                                instr = GoldPipsParser.parse_instruction(text)
+                                if instr:
+                                    if instr["type"] == "BREAKEVEN":
+                                        logger.info("🛡️ [STARTUP] Applying Breakeven instruction!")
+                                        self.apply_breakeven()
+                                    elif instr["type"] == "CLOSE_ALL":
+                                        logger.info("🔒 [STARTUP] Applying Close All instruction!")
+                                        self.close_all_gold()
+                                    continue
+                                sig = GoldPipsParser.parse_signal(text)
+                                if sig:
+                                    logger.info(f"🎯 [STARTUP CATCH-UP ({age_mins:.1f}m ago)] Found signal: {sig['side']} | SL: {sig['sl']} | TP1: {sig['tp1']}")
+                                    self.execute_gold_signal(sig)
+                    except Exception as e:
+                        logger.warning(f"Could not scan recent Gold Pips messages on startup: {e}")
+
+                    # 2. Check CallistoFx Live recent messages
+                    try:
+                        cal_recent = await self.tele.get_messages(CALLISTO_CHANNEL, limit=50)
+                        for m in reversed(cal_recent):
+                            if not m.message:
+                                continue
+                            self.processed_msg_ids.add(m.id)
+                            age_mins = (now_utc - m.date).total_seconds() / 60.0
+                            if age_mins <= self.lookback_mins:
+                                if CallistoParser.is_zone_message(m.message):
+                                    logger.info(f"📥 [RECENT CALLISTO MSG ({age_mins:.1f}m ago)] #{m.id}:\n{m.message}")
+                                    evts = CallistoParser.parse_all(m.message)
+                                    for ev in evts:
+                                        if ev["type"] == "INVALIDATE":
+                                            logger.info(f"❌ [STARTUP CATCH-UP] Invalidating {ev['side']} zone")
+                                            self.invalidate_zone(ev["side"])
+                                        elif ev["type"] == "ZONE":
+                                            logger.info(f"🎯 [STARTUP CATCH-UP ({age_mins:.1f}m ago)] Loaded zone: {ev['side']} {ev['zone_low']:.2f}-{ev['zone_high']:.2f} Target:{ev.get('target')}")
+                                            self.set_zone(ev)
+                    except Exception as e:
+                        logger.warning(f"Could not scan recent Callisto messages on startup: {e}")
 
                 await self.tele.run_until_disconnected()
 
@@ -478,6 +520,7 @@ def main():
     p.add_argument("--tp-target",  type=int,   default=1, choices=[1, 2, 3])
     p.add_argument("--slippage",   type=float, default=4.0)
     p.add_argument("--sl-buffer",  type=float, default=SL_BUFFER)
+    p.add_argument("--lookback-mins", type=int, default=10, help="Lookback window in minutes on startup to catch recent updates (default: 10)")
     args = p.parse_args()
 
     copier = UnifiedCopier(
@@ -486,7 +529,8 @@ def main():
         leverage=args.leverage,
         tp_target=args.tp_target,
         max_slippage=args.slippage,
-        sl_buffer=args.sl_buffer
+        sl_buffer=args.sl_buffer,
+        lookback_mins=args.lookback_mins
     )
     if copier.init_iq():
         asyncio.run(copier.start())

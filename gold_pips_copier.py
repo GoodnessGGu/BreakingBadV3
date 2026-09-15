@@ -31,7 +31,7 @@ sys.path.append(os.getcwd())
 
 # Force UTF-8 on Windows
 if sys.platform == "win32":
-    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
 
 load_dotenv()
 
@@ -136,12 +136,15 @@ class GoldSignalParser:
 
 class GoldPipsCopier:
     def __init__(self, account_type: str = "training", lots: float = 1.0,
-                 leverage: int = 100, tp_target: int = 1, max_slippage: float = 4.0):
+                 leverage: int = 100, tp_target: int = 1, max_slippage: float = 4.0,
+                 lookback_mins: int = 10):
         self.account_type = account_type.lower()
         self.lots = lots
         self.leverage = leverage
         self.tp_target = tp_target  # 1 for TP1, 2 for TP2, 3 for TP3
         self.max_slippage = max_slippage
+        self.lookback_mins = lookback_mins
+        self.processed_msg_ids = set()
         
         # Connect to IQ Option Marginal CFD MCP Gateway
         self.mcp_client = IQForexMCPClient(base_url="https://marginal-cfd.mcp.iqoption.com")
@@ -346,7 +349,11 @@ class GoldPipsCopier:
 
                 @self.tele_client.on(events.NewMessage(chats=GOLD_CHANNEL_ID))
                 async def handler(event):
-                    text = event.message.text
+                    if event.message.id in self.processed_msg_ids:
+                        return
+                    self.processed_msg_ids.add(event.message.id)
+
+                    text = event.message.message
                     if not text:
                         return
 
@@ -370,6 +377,40 @@ class GoldPipsCopier:
                         self.execute_signal(sig)
                     else:
                         logger.info("Message was commentary or update (no actionable signal).")
+
+                # ── Startup Catch-Up Scan (Last N Minutes) ──
+                if self.lookback_mins > 0:
+                    logger.info(f"🔍 [STARTUP SCAN] Checking 'Gold Pips Hunter' messages from the last {self.lookback_mins} minutes...")
+                    try:
+                        recent_msgs = await self.tele_client.get_messages(GOLD_CHANNEL_ID, limit=30)
+                        now_utc = datetime.now(timezone.utc)
+                        for m in reversed(recent_msgs):
+                            if not m.message:
+                                continue
+                            self.processed_msg_ids.add(m.id)
+                            age_mins = (now_utc - m.date).total_seconds() / 60.0
+                            if age_mins <= self.lookback_mins:
+                                text = m.message
+                                logger.info(f"📥 [RECENT MESSAGE ({age_mins:.1f}m ago)] #{m.id}:\n{text}")
+
+                                # Check instructions
+                                instr = GoldSignalParser.parse_instruction(text)
+                                if instr:
+                                    if instr["type"] == "BREAKEVEN":
+                                        logger.info("🛡️ [STARTUP] Applying Breakeven instruction!")
+                                        self.apply_breakeven()
+                                    elif instr["type"] == "CLOSE_ALL":
+                                        logger.info("🔒 [STARTUP] Applying Close All instruction!")
+                                        self.close_all_gold()
+                                    continue
+
+                                # Check signals
+                                sig = GoldSignalParser.parse_signal(text)
+                                if sig:
+                                    logger.info(f"🎯 [STARTUP CATCH-UP ({age_mins:.1f}m ago)] Found signal: {sig['side']} | SL: {sig['sl']} | TP1: {sig['tp1']}")
+                                    self.execute_signal(sig)
+                    except Exception as e:
+                        logger.warning(f"Failed to scan recent messages on startup: {e}")
 
                 # Run until disconnected, then loop will reconnect
                 await self.tele_client.run_until_disconnected()
@@ -395,6 +436,7 @@ def main():
     parser.add_argument("--leverage", type=int, default=100, help="Leverage to use (default: 100)")
     parser.add_argument("--tp-target", type=int, default=1, choices=[1, 2, 3], help="Take Profit target (1, 2, or 3)")
     parser.add_argument("--slippage", type=float, default=4.0, help="Max allowed slippage from entry zone in USD")
+    parser.add_argument("--lookback-mins", type=int, default=10, help="Lookback window in minutes on startup to catch recent signals (default: 10)")
 
     args = parser.parse_args()
 
@@ -403,7 +445,8 @@ def main():
         lots=args.lots,
         leverage=args.leverage,
         tp_target=args.tp_target,
-        max_slippage=args.slippage
+        max_slippage=args.slippage,
+        lookback_mins=args.lookback_mins
     )
 
     if copier.init_iq():

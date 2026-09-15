@@ -32,7 +32,7 @@ from dotenv import load_dotenv
 
 sys.path.append(os.getcwd())
 if sys.platform == "win32":
-    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
 load_dotenv()
 
 from telethon import TelegramClient, events
@@ -135,18 +135,21 @@ class CallistoZoneParser:
 class CallistoZoneCopier:
 
     def __init__(self, account_type="training", lots=1.0, leverage=100,
-                 sl_buffer=SL_BUFFER, confirm_tfs: List[int] = None):
+                 sl_buffer=SL_BUFFER, confirm_tfs: List[int] = None,
+                 lookback_mins: int = 10):
         self.account_type   = account_type.lower()
         self.lots           = lots
         self.leverage       = leverage
         self.sl_buffer      = sl_buffer
         self.confirm_tfs    = confirm_tfs or [1, 3, 5]
+        self.lookback_mins  = lookback_mins
+        self.processed_msg_ids = set()
 
         self.mcp            = IQForexMCPClient(base_url="https://marginal-cfd.mcp.iqoption.com")
         self.balance_id     = None
         self.tele_client    = None
-        self.active_zone: Optional[Dict[str, Any]] = None
-        self.zone_task: Optional[asyncio.Task] = None
+        self.active_zones: Dict[str, Dict[str, Any]] = {}
+        self.zone_tasks: Dict[str, asyncio.Task] = {}
         self.active_positions: Dict[int, Dict[str, Any]] = {}
 
     # ------------------------------------------------------------------
@@ -256,7 +259,8 @@ class CallistoZoneCopier:
             logger.info(f"ORDER FILLED | Order ID: #{res['order_id']}")
             time.sleep(2)
             self._sync_positions()
-            self.active_zone = None   # zone consumed
+            self.active_zones.pop(side, None)
+            self.zone_tasks.pop(side, None)
         else:
             logger.error(f"Order failed: {res}")
 
@@ -289,7 +293,7 @@ class CallistoZoneCopier:
 
             if in_zone:
                 if not price_in_zone:
-                    logger.info(f"Price left zone ({mid:.2f}) — still watching...")
+                    logger.info(f"Price left {side} zone ({mid:.2f}) — still watching...")
                     in_zone = False
                     await asyncio.sleep(POLL_INTERVAL)
                     continue
@@ -303,26 +307,30 @@ class CallistoZoneCopier:
             else:
                 dist_above = mid - zone_high if mid > zone_high else 0
                 dist_below = zone_low - mid  if mid < zone_low  else 0
-                dist_str = f"+{dist_above:.2f} above zone" if dist_above else f"{dist_below:.2f} below zone"
-                logger.info(f"  Watching Gold @ {mid:.2f} | {dist_str}")
+                dist_str = f"+{dist_above:.2f} above {side} zone" if dist_above else f"{dist_below:.2f} below {side} zone"
+                logger.info(f"  Watching Gold @ {mid:.2f} | {side} zone {zone_low:.2f}-{zone_high:.2f} ({dist_str})")
                 await asyncio.sleep(POLL_INTERVAL)
 
-        logger.warning(f"ZONE EXPIRED after {MAX_ZONE_WAIT_HRS}h — no entry. Zone cleared.")
-        self.active_zone = None
+        logger.warning(f"{side} ZONE EXPIRED after {MAX_ZONE_WAIT_HRS}h — no entry. Zone cleared.")
+        self.active_zones.pop(side, None)
+        self.zone_tasks.pop(side, None)
 
     # ------------------------------------------------------------------
     def set_zone(self, zone: Dict[str, Any]):
-        if self.zone_task and not self.zone_task.done():
-            self.zone_task.cancel()
-            logger.info("Previous zone watcher cancelled.")
-        self.active_zone = zone
-        self.zone_task   = asyncio.ensure_future(self._watch_zone(zone))
+        side = zone["side"]
+        if side in self.zone_tasks and not self.zone_tasks[side].done():
+            self.zone_tasks[side].cancel()
+            logger.info(f"Previous {side} zone watcher cancelled and replaced.")
+        self.active_zones[side] = zone
+        self.zone_tasks[side]   = asyncio.ensure_future(self._watch_zone(zone))
+        logger.info(f"Active zones being watched: {list(self.active_zones.keys())}")
 
     def invalidate_zone(self, side: str):
-        if self.active_zone and self.active_zone["side"] == side:
-            if self.zone_task and not self.zone_task.done():
-                self.zone_task.cancel()
-            self.active_zone = None
+        if side in self.active_zones:
+            if side in self.zone_tasks and not self.zone_tasks[side].done():
+                self.zone_tasks[side].cancel()
+            self.active_zones.pop(side, None)
+            self.zone_tasks.pop(side, None)
             logger.info(f"{side} zone invalidated — watcher cancelled.")
         else:
             logger.info(f"Invalidation received for {side} zone but none is active.")
@@ -391,8 +399,10 @@ class CallistoZoneCopier:
 
                 @self.tele_client.on(events.NewMessage(chats=CALLISTO_CHANNEL))
                 async def handler(event):
-                    # Use .message (plain text, no markdown) — .text keeps ** bold markers
-                    # which break zone regex patterns like "**NEW SELL ZONE:**"
+                    if event.message.id in self.processed_msg_ids:
+                        return
+                    self.processed_msg_ids.add(event.message.id)
+
                     text = event.message.message
                     if not text:
                         return
@@ -418,28 +428,34 @@ class CallistoZoneCopier:
                             )
                             self.set_zone(ev)
 
-                # Check recent messages on startup to resume any active zone
-                try:
-                    recent = await self.tele_client.get_messages(CALLISTO_CHANNEL, limit=50)
-                    for m in reversed(recent):
-                        if not m.message:
-                            continue
-                        if CallistoZoneParser.is_zone_message(m.message):
-                            age_hours = (datetime.now(timezone.utc) - m.date).total_seconds() / 3600
-                            if age_hours <= 6.0:
-                                evts = CallistoZoneParser.parse_all(m.message)
-                                for ev in evts:
-                                    if ev["type"] == "INVALIDATE":
-                                        self.invalidate_zone(ev["side"])
-                                    elif ev["type"] == "ZONE":
-                                        logger.info(
-                                            f"Loaded active zone on startup ({age_hours:.1f}h ago): "
-                                            f"{ev['side']} {ev['zone_low']:.2f} - {ev['zone_high']:.2f} | "
-                                            f"Target: {ev.get('target')}"
-                                        )
-                                        self.set_zone(ev)
-                except Exception as e:
-                    logger.warning(f"Could not load recent zone on startup: {e}")
+                # ── Startup Catch-Up Scan (Last N Minutes) ──
+                if self.lookback_mins > 0:
+                    logger.info(f"🔍 [STARTUP SCAN] Checking 'CallistoFx Live' messages from the last {self.lookback_mins} minutes...")
+                    try:
+                        recent = await self.tele_client.get_messages(CALLISTO_CHANNEL, limit=50)
+                        now_utc = datetime.now(timezone.utc)
+                        for m in reversed(recent):
+                            if not m.message:
+                                continue
+                            self.processed_msg_ids.add(m.id)
+                            age_mins = (now_utc - m.date).total_seconds() / 60.0
+                            if age_mins <= self.lookback_mins:
+                                if CallistoZoneParser.is_zone_message(m.message):
+                                    logger.info(f"📥 [RECENT ZONE MSG ({age_mins:.1f}m ago)] #{m.id}:\n{m.message}")
+                                    evts = CallistoZoneParser.parse_all(m.message)
+                                    for ev in evts:
+                                        if ev["type"] == "INVALIDATE":
+                                            logger.info(f"❌ [STARTUP CATCH-UP] Invalidating {ev['side']} zone")
+                                            self.invalidate_zone(ev["side"])
+                                        elif ev["type"] == "ZONE":
+                                            logger.info(
+                                                f"🎯 [STARTUP CATCH-UP ({age_mins:.1f}m ago)] Loaded zone: "
+                                                f"{ev['side']} {ev['zone_low']:.2f} - {ev['zone_high']:.2f} | "
+                                                f"Target: {ev.get('target')}"
+                                            )
+                                            self.set_zone(ev)
+                    except Exception as e:
+                        logger.warning(f"Could not load recent zone on startup: {e}")
 
                 await self.tele_client.run_until_disconnected()
 
@@ -468,13 +484,16 @@ def main():
     parser.add_argument("--leverage",  type=int,   default=100)
     parser.add_argument("--sl-buffer", type=float, default=SL_BUFFER,
                         help=f"USD buffer beyond zone edge for SL (default: {SL_BUFFER})")
+    parser.add_argument("--lookback-mins", type=int, default=10,
+                        help="Lookback window in minutes on startup to catch recent zone updates (default: 10)")
     args = parser.parse_args()
 
     copier = CallistoZoneCopier(
         account_type=args.account,
         lots=args.lots,
         leverage=args.leverage,
-        sl_buffer=args.sl_buffer
+        sl_buffer=args.sl_buffer,
+        lookback_mins=args.lookback_mins
     )
     if copier.init_iq():
         asyncio.run(copier.start_telegram_listener())

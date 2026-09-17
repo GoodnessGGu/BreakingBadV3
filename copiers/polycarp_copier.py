@@ -103,10 +103,13 @@ class PolycarpSignalParser:
 
 class PolycarpCopier(BaseCopier):
     def __init__(self, blitz_mcp: IQBlitzMCPClient, channel_id: int = -1002551711564,
-                 stake_amount: float = 2.0, enabled: bool = True):
+                 stake_amount: float = 2.0, max_gales: int = 2,
+                 martingale_multiplier: float = 2.2, enabled: bool = True):
         super().__init__("PolycarpVIP", channel_id, enabled)
         self.blitz = blitz_mcp
         self.stake_amount = stake_amount
+        self.max_gales = max_gales
+        self.martingale_multiplier = martingale_multiplier
 
         self.balance_id: Optional[int] = None
         self.account_type = "training"
@@ -132,16 +135,19 @@ class PolycarpCopier(BaseCopier):
             return
 
         logger.info(f"📨 [Polycarp] Parsed Signal: {sig['pair']} {sig['direction'].upper()} ({sig['expiry_mins']}m)")
-        asyncio.create_task(self.schedule_and_execute(sig))
+        asyncio.create_task(self.schedule_and_execute(sig, gale_level=0))
 
-    async def schedule_and_execute(self, sig: Dict[str, Any]):
+    async def schedule_and_execute(self, sig: Dict[str, Any], gale_level: int = 0):
         pair = sig["pair"]
         direction = sig["direction"]
         expiry_secs = sig["expiry_secs"]
         entry_time = sig.get("entry_time")
 
-        # 1. Handle scheduling if entry time is specified
-        if entry_time:
+        # Calculate stake based on martingale level
+        stake = round(self.stake_amount * (self.martingale_multiplier ** gale_level), 2)
+
+        # 1. Handle scheduling if entry time is specified (only on initial trade, not gales)
+        if entry_time and gale_level == 0:
             now_tz = datetime.now(entry_time.tzinfo)
             delay = (entry_time - now_tz).total_seconds()
 
@@ -180,17 +186,17 @@ class PolycarpCopier(BaseCopier):
         # Match closest expiration
         chosen_exp = expiry_secs
         if chosen_exp not in avail_expirations:
-            # find closest available
             chosen_exp = min(avail_expirations, key=lambda x: abs(x - expiry_secs))
             logger.info(f"[Polycarp] Adjusted expiration from {expiry_secs}s to {chosen_exp}s based on asset limits.")
 
         # 3. Place Trade on Blitz MCP
-        logger.info(f"🚀 [Polycarp] Executing Blitz trade: {pair} (ID: {asset_id}) {direction.upper()} ${self.stake_amount} ({chosen_exp}s)")
+        gale_tag = f" [Gale {gale_level}]" if gale_level > 0 else ""
+        logger.info(f"🚀 [Polycarp] Executing Blitz trade{gale_tag}: {pair} (ID: {asset_id}) {direction.upper()} ${stake} ({chosen_exp}s)")
         await self.notify(
-            f"⚡ [Polycarp VIP EXECUTING BLITZ TRADE]\n"
+            f"⚡ [Polycarp VIP EXECUTING BLITZ TRADE{gale_tag}]\n"
             f"Asset    : {asset.get('name')}\n"
             f"Direction: {direction.upper()}\n"
-            f"Stake    : ${self.stake_amount:.2f}\n"
+            f"Stake    : ${stake:.2f}\n"
             f"Payout   : {profit_percent}%\n"
             f"Duration : {chosen_exp}s"
         )
@@ -199,57 +205,90 @@ class PolycarpCopier(BaseCopier):
             balance_id=self.balance_id,
             asset_id=asset_id,
             direction=direction,
-            amount=self.stake_amount,
+            amount=stake,
             profit_percent=profit_percent,
             expiration_size=chosen_exp
         )
 
         if "position_id" in res:
             pos_id = res["position_id"]
-            logger.info(f"✅ [Polycarp] Blitz Position Opened! ID: #{pos_id}")
+            logger.info(f"✅ [Polycarp] Blitz Position Opened! ID: #{pos_id}{gale_tag}")
             self.open_trades[pos_id] = {
                 "position_id": pos_id,
                 "asset_id": asset_id,
                 "pair": pair,
                 "direction": direction,
-                "amount": self.stake_amount,
+                "amount": stake,
                 "profit_percent": profit_percent,
                 "expiration_size": chosen_exp,
-                "opened_at": time.time()
+                "gale_level": gale_level,
+                "opened_at": time.time(),
+                "sig": sig
             }
-            await self.notify(f"✅ [Polycarp] Blitz Position Opened! ID: #{pos_id}")
-            asyncio.create_task(self.monitor_settlement(pos_id, chosen_exp))
+            await self.notify(f"✅ [Polycarp] Blitz Position Opened! ID: #{pos_id}{gale_tag}")
+            asyncio.create_task(self.monitor_settlement(pos_id, chosen_exp, gale_level))
         else:
             logger.error(f"❌ [Polycarp] Blitz trade failed: {res}")
             await self.notify(f"❌ [Polycarp] Blitz Trade Failed: {res.get('error', res)}")
 
-    async def monitor_settlement(self, pos_id: int, exp_secs: int):
-        """Wait for position expiration and log final result."""
-        await asyncio.sleep(exp_secs + 6) # wait until expired + buffer
-        try:
-            history = self.blitz.get_trade_history(limit=10)
-            trade = next((h for h in history if h.get("position_id") == pos_id), None)
+    async def monitor_settlement(self, pos_id: int, exp_secs: int, gale_level: int = 0):
+        """Wait for position expiration, handle result, and execute Martingale if loss."""
+        await asyncio.sleep(exp_secs + 4) # wait until expired + buffer
 
-            trade_info = self.open_trades.pop(pos_id, {})
-            pair = trade_info.get("pair", "Blitz Option")
-            direction = trade_info.get("direction", "").upper()
-            stake = trade_info.get("amount", self.stake_amount)
+        trade = None
+        for attempt in range(3):
+            try:
+                history = self.blitz.get_trade_history(limit=15)
+                trade = next((h for h in history if h.get("position_id") == pos_id), None)
+                if trade:
+                    break
+            except Exception as e:
+                logger.warning(f"[Polycarp] Trade history fetch attempt {attempt+1} warning: {e}")
+            await asyncio.sleep(2)
 
-            if trade:
-                win = trade.get("is_win", False)
-                profit = float(trade.get("profit", 0.0))
-                pnl = profit - stake if win else -stake
-                status_emoji = "🏆 WIN" if win else "❌ LOSS"
+        trade_info = self.open_trades.pop(pos_id, {})
+        pair = trade_info.get("pair", "Blitz Option")
+        direction = trade_info.get("direction", "call")
+        stake = trade_info.get("amount", self.stake_amount)
+        sig = trade_info.get("sig", {"pair": pair, "direction": direction, "expiry_secs": exp_secs, "expiry_mins": exp_secs // 60})
+
+        if trade:
+            res_str = str(trade.get("result", "")).lower()
+            profit = float(trade.get("profit", 0.0))
+            is_win = (res_str == "win" or profit > 0)
+            pnl = profit
+
+            gale_label = f" (Gale {gale_level})" if gale_level > 0 else ""
+
+            if is_win:
+                logger.info(f"🏆 [Polycarp] WIN on #{pos_id}{gale_label}! Profit: +${pnl:.2f}")
                 await self.notify(
-                    f"{status_emoji} [Polycarp VIP SETTLED]\n"
-                    f"Position : #{pos_id} ({pair} {direction})\n"
-                    f"Outcome  : {'WIN' if win else 'LOSS'}\n"
-                    f"PnL      : {'+' if pnl >= 0 else ''}${pnl:.2f}"
+                    f"🏆 [Polycarp VIP WIN{gale_label}]\n"
+                    f"Position : #{pos_id} ({pair} {direction.upper()})\n"
+                    f"Result   : WIN\n"
+                    f"Net PnL  : +${pnl:.2f}\n"
+                    f"🎯 Martingale reset to Base."
                 )
             else:
-                logger.info(f"[Polycarp] Position #{pos_id} settled.")
-        except Exception as e:
-            logger.error(f"[Polycarp] Settlement check error: {e}")
+                logger.info(f"❌ [Polycarp] LOSS on #{pos_id}{gale_label}! Net: -${abs(pnl):.2f}")
+                if gale_level < self.max_gales:
+                    next_gale = gale_level + 1
+                    next_stake = round(self.stake_amount * (self.martingale_multiplier ** next_gale), 2)
+                    await self.notify(
+                        f"🔄 [Polycarp VIP MARTINGALE RECOVERY — GALE {next_gale}/{self.max_gales}]\n"
+                        f"Loss on #{pos_id}{gale_label}.\n"
+                        f"Re-entering {pair} {direction.upper()} with ${next_stake:.2f}..."
+                    )
+                    # Immediate re-entry on same pair and direction!
+                    asyncio.create_task(self.schedule_and_execute(sig, gale_level=next_gale))
+                else:
+                    await self.notify(
+                        f"❌ [Polycarp VIP MAX GALE REACHED]\n"
+                        f"Position #{pos_id} ended in LOSS after {self.max_gales} recovery step(s).\n"
+                        f"Stopping Martingale sequence for {pair}."
+                    )
+        else:
+            logger.info(f"[Polycarp] Position #{pos_id} settled.")
 
     def get_status(self) -> Dict[str, Any]:
         return {
@@ -257,5 +296,7 @@ class PolycarpCopier(BaseCopier):
             "enabled": self.is_enabled,
             "channel_id": self.channel_id,
             "stake_amount": self.stake_amount,
+            "max_gales": self.max_gales,
+            "martingale_multiplier": self.martingale_multiplier,
             "open_trades_count": len(self.open_trades)
         }

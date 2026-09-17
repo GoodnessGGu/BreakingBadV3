@@ -13,6 +13,7 @@ import logging
 import asyncio
 from typing import Dict, Any, Optional, List, Callable
 from telethon import TelegramClient, events
+from telethon.sessions import StringSession
 from dotenv import load_dotenv
 
 from copiers.base_copier import BaseCopier
@@ -67,8 +68,14 @@ class ChannelManager:
             logger.error("❌ TELEGRAM_API_ID or TELEGRAM_API_HASH missing in .env")
             return
 
-        logger.info(f"Connecting unified Telethon listener using '{self.session_name}'...")
-        self.client = TelegramClient(self.session_name, self.api_id, self.api_hash)
+        session_string = os.getenv("TELEGRAM_STRING_SESSION")
+        if session_string:
+            logger.info("Connecting unified Telethon listener using StringSession from environment...")
+            self.client = TelegramClient(StringSession(session_string), int(self.api_id), self.api_hash)
+        else:
+            logger.info(f"Connecting unified Telethon listener using session file '{self.session_name}'...")
+            self.client = TelegramClient(self.session_name, int(self.api_id), self.api_hash)
+
         await self.client.connect()
 
         if not await self.client.is_user_authorized():

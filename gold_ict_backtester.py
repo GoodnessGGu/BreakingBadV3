@@ -271,6 +271,6 @@ def print_enhanced_report(trades_df, initial_balance=1000.0):
     print(trades_df[cols].tail(10).to_string(index=False))
 
 if __name__ == "__main__":
-    df = fetch_gold_data(period="60d", interval="5m")
-    trades = backtest_ict_enhanced(df, rr_ratio=2.0, sl_buffer=2.0, use_session_filter=True, use_trend_filter=True)
+    df = fetch_gold_data(period="30d", interval="15m")
+    trades = backtest_ict_enhanced(df, rr_ratio=4.0, sl_buffer=2.0, use_session_filter=False, use_trend_filter=False)
     print_enhanced_report(trades)

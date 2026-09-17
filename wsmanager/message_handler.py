@@ -81,7 +81,13 @@ class MessageHandler:
         self._underlying_assests = message['msg']
 
     def _handle_candles(self, message):
-        self.candles = message['msg']['candles']
+        msg = message.get('msg', {})
+        if isinstance(msg, list):
+            self.candles = msg
+        elif isinstance(msg, dict):
+            self.candles = msg.get('candles', msg.get('data', []))
+        else:
+            self.candles = []
 
     def _handle_underlying_list(self, message):
         msg = message.get('msg', {})

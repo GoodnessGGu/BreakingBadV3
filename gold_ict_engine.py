@@ -11,7 +11,7 @@ Strategy:
   6. Live Google Sheets logging to "Forex_Margin_Trades".
 """
 
-import os, sys, time, logging, asyncio, argparse
+import os, sys, time, logging, asyncio, argparse, requests
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
 import pandas as pd
@@ -31,6 +31,27 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger("GoldICTEngine")
+
+# ── Telegram ───────────────────────────────────────────────────────────────
+_TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN", "")
+_TELEGRAM_CHAT_ID = 6420777416  # your personal Telegram ID
+
+def send_telegram_alert(text: str):
+    """Fire-and-forget Telegram message. Never raises."""
+    if not _TELEGRAM_TOKEN:
+        logger.warning("TELEGRAM_TOKEN missing – skipping alert.")
+        return
+    try:
+        r = requests.post(
+            f"https://api.telegram.org/bot{_TELEGRAM_TOKEN}/sendMessage",
+            json={"chat_id": _TELEGRAM_CHAT_ID, "text": text},
+            timeout=10
+        )
+        if not r.ok:
+            logger.warning(f"Telegram alert failed: {r.status_code} {r.text[:100]}")
+    except Exception as e:
+        logger.warning(f"Telegram alert error: {e}")
+# ───────────────────────────────────────────────────────────────────────────
 
 GOLD_ASSET_ID   = 74
 GOLD_INSTRUMENT = "mcfd.74"
@@ -123,6 +144,13 @@ class GoldICTEngine:
             logger.info(f"   Bearish FVG Zone : {fvg_l:.2f} - {fvg_h:.2f}")
             logger.info(f"   Stop Loss        : {sl:.2f}")
             logger.info("=" * 60)
+            send_telegram_alert(
+                f"🔥 ICT SETUP DETECTED — SELL\n"
+                f"Bearish Liquidity Sweep @ {sweep_peak:.2f}\n"
+                f"FVG Zone : {fvg_l:.2f} – {fvg_h:.2f}\n"
+                f"Stop Loss: {sl:.2f}\n"
+                f"⏳ Waiting for price to retest FVG..."
+            )
             self.pending_fvg = {
                 "side": "SELL",
                 "fvg_high": fvg_h,
@@ -148,6 +176,13 @@ class GoldICTEngine:
             logger.info(f"   Bullish FVG Zone : {fvg_l:.2f} - {fvg_h:.2f}")
             logger.info(f"   Stop Loss        : {sl:.2f}")
             logger.info("=" * 60)
+            send_telegram_alert(
+                f"🔥 ICT SETUP DETECTED — BUY\n"
+                f"Bullish Liquidity Sweep @ {sweep_trough:.2f}\n"
+                f"FVG Zone : {fvg_l:.2f} – {fvg_h:.2f}\n"
+                f"Stop Loss: {sl:.2f}\n"
+                f"⏳ Waiting for price to retest FVG..."
+            )
             self.pending_fvg = {
                 "side": "BUY",
                 "fvg_high": fvg_h,
@@ -186,6 +221,13 @@ class GoldICTEngine:
             logger.info(f"⚡ [ICT EXECUTION] Tapped FVG Zone! Firing {side} @ {exec_px:.2f}")
             logger.info(f"   SL: {sl:.2f} | TP (1:{self.rr_ratio:.1f} RR): {tp:.2f}")
             logger.info("=" * 60)
+            send_telegram_alert(
+                f"⚡ ICT ORDER FIRING — {side}\n"
+                f"Entry : {exec_px:.2f} (FVG retest)\n"
+                f"SL    : {sl:.2f}\n"
+                f"TP    : {tp:.2f}  (1:{self.rr_ratio:.1f} RR)\n"
+                f"Lots  : {self.lots}"
+            )
 
             res = self.mcp.place_market_order(
                 side=side.lower(),
@@ -203,6 +245,14 @@ class GoldICTEngine:
             if "order_id" in res:
                 order_id = res["order_id"]
                 logger.info(f"✅ ICT Order Filled! ID: #{order_id}")
+                send_telegram_alert(
+                    f"✅ ICT ORDER CONFIRMED — {side}\n"
+                    f"Order ID : #{order_id}\n"
+                    f"Entry    : {exec_px:.2f}\n"
+                    f"SL       : {sl:.2f}\n"
+                    f"TP       : {tp:.2f}\n"
+                    f"🔄 Managing trade now..."
+                )
                 self.active_trade = {
                     "order_id": order_id,
                     "position_id": None,
@@ -217,6 +267,7 @@ class GoldICTEngine:
                 self.pending_fvg = None
             else:
                 logger.error(f"Order placement failed: {res}")
+                send_telegram_alert(f"❌ ICT ORDER FAILED — {side}\nResponse: {str(res)[:200]}")
 
     def manage_active_trade(self, cur_prices: Dict[str, float]):
         """Breakeven management: once trade reaches 1.0R, move SL to entry."""

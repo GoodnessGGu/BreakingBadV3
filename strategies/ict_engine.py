@@ -132,6 +132,14 @@ class ICTStrategyEngine:
         self.balance_id = balance_id
         self.account_type = account_type
 
+    def set_lots(self, lots: float):
+        self.lots = max(0.01, round(float(lots), 2))
+        logger.info(f"📊 [ICTEngine] Lot size set to: {self.lots}")
+
+    def set_leverage(self, leverage: int):
+        self.leverage = int(leverage)
+        logger.info(f"⚡ [ICTEngine] Leverage set to: {self.leverage}x")
+
     def enable(self):
         self.is_enabled = True
         logger.info("🟢 [ICTEngine] Enabled")
@@ -432,6 +440,7 @@ class ICTStrategyEngine:
             "name": self.profile["name"],
             "enabled": self.is_enabled,
             "lots": self.lots,
+            "leverage": self.leverage,
             "rr_ratio": self.rr_ratio,
             "pending_fvg": self.pending_fvg,
             "active_trade": self.active_trade

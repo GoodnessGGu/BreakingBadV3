@@ -83,6 +83,14 @@ class GoldPipsCopier(BaseCopier):
         self.balance_id = balance_id
         self.account_type = account_type
 
+    def set_lots(self, lots: float):
+        self.lots = max(0.01, round(float(lots), 2))
+        logger.info(f"📊 [GoldPips] Lot size set to: {self.lots}")
+
+    def set_leverage(self, leverage: int):
+        self.leverage = int(leverage)
+        logger.info(f"⚡ [GoldPips] Leverage set to: {self.leverage}x")
+
     def get_market_price(self) -> Dict[str, float]:
         try:
             p = self.mcp.calculate_order_size(

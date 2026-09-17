@@ -12,8 +12,8 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("📡 Channels Menu", callback_data="btn_channels_menu")
         ],
         [
-            InlineKeyboardButton("🤖 ICT Strategy Engine", callback_data="btn_ict_menu"),
-            InlineKeyboardButton("⚙️ Account Settings", callback_data="btn_account_menu")
+            InlineKeyboardButton("🤖 Gold ICT Engine", callback_data="btn_ict_menu"),
+            InlineKeyboardButton("⚙️ Risk & Sizing", callback_data="btn_settings_menu")
         ],
         [
             InlineKeyboardButton("📋 Active Setups & Trades", callback_data="btn_active_trades"),
@@ -44,6 +44,8 @@ def ict_menu_keyboard(ict_status: Dict[str, Any]) -> InlineKeyboardMarkup:
     status_txt = "ON" if enabled else "OFF"
     cur_sym = ict_status.get("symbol", "XAUUSD")
     cur_rr = ict_status.get("rr_ratio", 2.0)
+    cur_lots = ict_status.get("lots", 1.0)
+    cur_lev = ict_status.get("leverage", 100)
 
     keyboard = [
         [
@@ -53,13 +55,33 @@ def ict_menu_keyboard(ict_status: Dict[str, Any]) -> InlineKeyboardMarkup:
             )
         ],
         [
-            InlineKeyboardButton(f"{'✅ ' if cur_sym == 'XAUUSD' else ''}Gold", callback_data="set_inst_xauusd"),
-            InlineKeyboardButton(f"{'✅ ' if cur_sym == 'EURUSD' else ''}EUR/USD", callback_data="set_inst_eurusd"),
-            InlineKeyboardButton(f"{'✅ ' if cur_sym == 'GBPUSD' else ''}GBP/USD", callback_data="set_inst_gbpusd")
+            InlineKeyboardButton(f"{'🎯 ' if cur_sym == 'XAUUSD' else ''}Gold (XAU)", callback_data="set_inst_xauusd"),
+            InlineKeyboardButton(f"{'🎯 ' if cur_sym == 'EURUSD' else ''}EUR/USD", callback_data="set_inst_eurusd"),
+            InlineKeyboardButton(f"{'🎯 ' if cur_sym == 'GBPUSD' else ''}GBP/USD", callback_data="set_inst_gbpusd")
         ],
         [
-            InlineKeyboardButton(f"{'✅ ' if cur_sym == 'USDJPY' else ''}USD/JPY", callback_data="set_inst_usdjpy"),
-            InlineKeyboardButton(f"{'✅ ' if cur_sym == 'AUDUSD' else ''}AUD/USD", callback_data="set_inst_audusd")
+            InlineKeyboardButton(f"{'🎯 ' if cur_sym == 'USDJPY' else ''}USD/JPY", callback_data="set_inst_usdjpy"),
+            InlineKeyboardButton(f"{'🎯 ' if cur_sym == 'AUDUSD' else ''}AUD/USD", callback_data="set_inst_audusd")
+        ],
+        [
+            InlineKeyboardButton(f"📊 Lot Size: {cur_lots:.2f}", callback_data="noop_ict_lots")
+        ],
+        [
+            InlineKeyboardButton("➖ 0.1", callback_data="ict_lots_minus"),
+            InlineKeyboardButton("0.1", callback_data="set_ict_lots_0.1"),
+            InlineKeyboardButton("0.5", callback_data="set_ict_lots_0.5"),
+            InlineKeyboardButton("1.0", callback_data="set_ict_lots_1.0"),
+            InlineKeyboardButton("2.0", callback_data="set_ict_lots_2.0"),
+            InlineKeyboardButton("➕ 0.1", callback_data="ict_lots_plus")
+        ],
+        [
+            InlineKeyboardButton(f"⚡ Leverage: {cur_lev}x", callback_data="noop_ict_lev")
+        ],
+        [
+            InlineKeyboardButton(f"{'✅ ' if cur_lev == 20 else ''}20x", callback_data="set_ict_lev_20"),
+            InlineKeyboardButton(f"{'✅ ' if cur_lev == 50 else ''}50x", callback_data="set_ict_lev_50"),
+            InlineKeyboardButton(f"{'✅ ' if cur_lev == 100 else ''}100x", callback_data="set_ict_lev_100"),
+            InlineKeyboardButton(f"{'✅ ' if cur_lev == 200 else ''}200x", callback_data="set_ict_lev_200")
         ],
         [
             InlineKeyboardButton(f"{'✅ ' if cur_rr == 1.5 else ''}1:1.5 RR", callback_data="set_rr_1.5"),
@@ -72,20 +94,46 @@ def ict_menu_keyboard(ict_status: Dict[str, Any]) -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(keyboard)
 
-def account_menu_keyboard(account_type: str) -> InlineKeyboardMarkup:
+def settings_menu_keyboard(account_type: str, lots: float, leverage: int, blitz_stake: float) -> InlineKeyboardMarkup:
     is_training = account_type.lower() == "training"
     keyboard = [
         [
             InlineKeyboardButton(
-                f"{'✅ ' if is_training else ''}Practice Account (Training)",
+                f"{'✅ ' if is_training else ''}Practice (Training)",
                 callback_data="set_acc_training"
+            ),
+            InlineKeyboardButton(
+                f"{'✅ ' if not is_training else ''}Real (Regular)",
+                callback_data="set_acc_regular"
             )
         ],
         [
-            InlineKeyboardButton(
-                f"{'✅ ' if not is_training else ''}Real Money Account (Regular)",
-                callback_data="set_acc_regular"
-            )
+            InlineKeyboardButton(f"⚡ Blitz Base Stake: ${blitz_stake:.2f}", callback_data="noop_stake")
+        ],
+        [
+            InlineKeyboardButton("➖ $1", callback_data="stake_minus"),
+            InlineKeyboardButton("$1.00", callback_data="set_stake_1"),
+            InlineKeyboardButton("$2.00", callback_data="set_stake_2"),
+            InlineKeyboardButton("$5.00", callback_data="set_stake_5"),
+            InlineKeyboardButton("$10.00", callback_data="set_stake_10"),
+            InlineKeyboardButton("➕ $1", callback_data="stake_plus")
+        ],
+        [
+            InlineKeyboardButton(f"📊 Global Lots: {lots:.2f} | Lev: {leverage}x", callback_data="noop_fx")
+        ],
+        [
+            InlineKeyboardButton("➖ 0.1", callback_data="global_lots_minus"),
+            InlineKeyboardButton("0.1", callback_data="set_global_lots_0.1"),
+            InlineKeyboardButton("0.5", callback_data="set_global_lots_0.5"),
+            InlineKeyboardButton("1.0", callback_data="set_global_lots_1.0"),
+            InlineKeyboardButton("2.0", callback_data="set_global_lots_2.0"),
+            InlineKeyboardButton("➕ 0.1", callback_data="global_lots_plus")
+        ],
+        [
+            InlineKeyboardButton(f"{'✅ ' if leverage == 20 else ''}20x", callback_data="set_global_lev_20"),
+            InlineKeyboardButton(f"{'✅ ' if leverage == 50 else ''}50x", callback_data="set_global_lev_50"),
+            InlineKeyboardButton(f"{'✅ ' if leverage == 100 else ''}100x", callback_data="set_global_lev_100"),
+            InlineKeyboardButton(f"{'✅ ' if leverage == 200 else ''}200x", callback_data="set_global_lev_200")
         ],
         [
             InlineKeyboardButton("🔙 Back to Main Menu", callback_data="btn_main_menu")

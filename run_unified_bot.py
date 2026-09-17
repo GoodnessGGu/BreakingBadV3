@@ -133,7 +133,10 @@ async def main():
         channel_mgr=channel_mgr,
         ict_engine=ict_engine,
         forex_mcp=forex_mcp,
-        blitz_mcp=blitz_mcp
+        blitz_mcp=blitz_mcp,
+        lots=args.lots,
+        leverage=args.leverage,
+        blitz_stake=args.blitz_stake
     )
     tg_bot.account_type = args.account
 

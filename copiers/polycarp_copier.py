@@ -120,6 +120,10 @@ class PolycarpCopier(BaseCopier):
         self.balance_id = balance_id
         self.account_type = account_type
 
+    def set_stake(self, stake: float):
+        self.stake_amount = max(1.0, round(float(stake), 2))
+        logger.info(f"⚡ [Polycarp] Blitz base stake set to: ${self.stake_amount:.2f}")
+
     async def handle_message(self, text: str, message_id: int, event: Any = None):
         if not self.is_enabled:
             return

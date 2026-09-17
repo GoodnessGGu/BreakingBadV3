@@ -22,73 +22,72 @@ logger = logging.getLogger("PolycarpCopier")
 POLYCARP_DEFAULT_CHANNELS = [-1002551711564, -1003457213931]
 
 class PolycarpSignalParser:
+    CURRENCIES = r'(?:EUR|USD|GBP|JPY|AUD|NZD|CAD|CHF|THB|BRL|TRY|PLN|IDR|SAR|VND|MXN|COP)'
+
     @staticmethod
     def is_signal_message(text: str) -> bool:
         u = text.upper()
-        return ("TRADE:" in u or "NEW SIGNAL" in u) and ("TIMER:" in u or "DIRECTION:" in u)
+        has_dir = any(k in u for k in ["CALL", "PUT", "BUY", "SELL"])
+        has_curr = bool(re.search(PolycarpSignalParser.CURRENCIES, u))
+        return has_dir and has_curr
 
     @staticmethod
     def parse_signal(text: str, default_tz: str = "Africa/Lagos") -> Optional[Dict[str, Any]]:
         """
-        Parses Polycarp VIP room signal format:
-        🔔 NEW SIGNAL!
-        🎫 Trade: 🇦🇺 AUD/JPY 🇯🇵 (OTC)
-        ⏳ Timer: 5 minutes
-        ➡️ Entry: 12:36 PM
-        📈 Direction: BUY 🟩
+        Parses all Polycarp VIP room signal formats:
+        - Standard format (Trade: AUD/JPY (OTC), Timer: 5 min, Direction: BUY)
+        - Uplivon Special format (NZD/CAD OTC, Timeframe: 5 MIN, Direction: CALL)
+        - Quick alert format (EUR/USD, 5m, CALL)
         """
         try:
-            # 1. Extract Pair (supports OTC)
-            trade_match = re.search(r'Trade:\s*.*?([A-Z]{3})/([A-Z]{3}).*?(\(OTC\)|OTC)\b', text, re.IGNORECASE)
-            otc = False
-            if trade_match:
-                base = trade_match.group(1).upper()
-                quote = trade_match.group(2).upper()
-                otc = True
-            else:
-                trade_match = re.search(r'Trade:\s*.*?([A-Z]{3})/([A-Z]{3})', text, re.IGNORECASE)
-                if not trade_match:
-                    return None
-                base = trade_match.group(1).upper()
-                quote = trade_match.group(2).upper()
+            curr_pat = PolycarpSignalParser.CURRENCIES
+            # 1. Extract Pair
+            m = re.search(rf'({curr_pat})\s*/?\s*({curr_pat})', text, re.IGNORECASE)
+            if not m:
+                return None
 
+            base, quote = m.group(1).upper(), m.group(2).upper()
+            surrounding = text[max(0, m.start() - 10):min(len(text), m.end() + 20)].upper()
+            otc = "OTC" in surrounding
             pair = f"{base}/{quote} (OTC)" if otc else f"{base}/{quote}"
 
-            # 2. Extract Timer (expiry)
-            timer_m = re.search(r'Timer:\s*(\d+)\s*minute', text, re.IGNORECASE)
-            expiry_mins = int(timer_m.group(1)) if timer_m else 5
-            expiry_secs = expiry_mins * 60
-
-            # 3. Extract Direction
-            dir_m = re.search(r'Direction:\s*(BUY|SELL|CALL|PUT)', text, re.IGNORECASE)
+            # 2. Extract Direction
+            dir_m = re.search(r'(?:Direction:|Action:|Signal:|\b)(BUY|SELL|CALL|PUT)\b', text, re.IGNORECASE)
             if not dir_m:
                 return None
             raw_dir = dir_m.group(1).upper()
             direction = "call" if raw_dir in ["BUY", "CALL"] else "put"
 
-            # 4. Extract Entry Time
+            # 3. Extract Timer / Expiry
+            timer_m = re.search(r'(?:Timer:|Timeframe:|⏱️|⏳)?\s*(\d+)\s*(?:min|minute|m\b)', text, re.IGNORECASE)
+            expiry_mins = int(timer_m.group(1)) if timer_m else 5
+            expiry_secs = expiry_mins * 60
+
+            # 4. Extract Entry Time (12h or 24h)
             entry_time = None
-            entry_m = re.search(r'Entry:\s*(\d{1,2}):(\d{2})\s*(AM|PM)', text, re.IGNORECASE)
-            if entry_m:
-                hour = int(entry_m.group(1))
-                minute = int(entry_m.group(2))
-                ampm = entry_m.group(3).upper()
+            try:
+                tz = pytz.timezone(default_tz)
+            except Exception:
+                tz = pytz.timezone("Africa/Lagos")
+            now_tz = datetime.now(tz)
 
-                if ampm == "PM" and hour < 12:
-                    hour += 12
-                elif ampm == "AM" and hour == 12:
-                    hour = 0
-
-                try:
-                    tz = pytz.timezone(default_tz)
-                except Exception:
-                    tz = pytz.timezone("Africa/Lagos")
-
-                now_tz = datetime.now(tz)
-                entry_dt = now_tz.replace(hour=hour, minute=minute, second=0, microsecond=0)
-                if (now_tz - entry_dt).total_seconds() > 43200:
-                    entry_dt += timedelta(days=1)
-                entry_time = entry_dt
+            # 12-hour format e.g. 12:36 PM
+            m12 = re.search(r'Entry:\s*(\d{1,2}):(\d{2})\s*(AM|PM)', text, re.IGNORECASE)
+            if m12:
+                hr, mn, ap = int(m12.group(1)), int(m12.group(2)), m12.group(3).upper()
+                if ap == "PM" and hr < 12: hr += 12
+                elif ap == "AM" and hr == 12: hr = 0
+                res = now_tz.replace(hour=hr, minute=mn, second=0, microsecond=0)
+                if (now_tz - res).total_seconds() > 43200: res += timedelta(days=1)
+                entry_time = res
+            else:
+                # 24-hour format e.g. 15:38
+                m24 = re.search(r'Entry:\s*(\d{1,2}):(\d{2})\b', text, re.IGNORECASE)
+                if m24:
+                    hr, mn = int(m24.group(1)), int(m24.group(2))
+                    res = now_tz.replace(hour=hr, minute=mn, second=0, microsecond=0)
+                    if (now_tz - res).total_seconds() > 43200: res += timedelta(days=1)
+                    entry_time = res
 
             return {
                 "pair": pair,

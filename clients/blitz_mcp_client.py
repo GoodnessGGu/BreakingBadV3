@@ -225,33 +225,43 @@ class IQBlitzMCPClient:
     def find_asset(self, pair_str: str) -> Optional[Dict[str, Any]]:
         """
         Smart asset matcher for Polycarp pairs.
-        e.g. 'AUD/JPY (OTC)', 'AUDJPY-OTC', 'AUD/JPY', 'AUDJPY'
+        Extracts base/quote and prioritizes currently OPEN assets!
+        e.g. 'USD/CHF (OTC)' matches open USD/CHF (ID 1879) during weekdays,
+        or open USD/CHF (OTC) (ID 78) during weekends.
         """
+        import re
+        curr_regex = r'(?:EUR|USD|GBP|JPY|AUD|NZD|CAD|CHF|THB|BRL|TRY|PLN|IDR|SAR|VND|MXN|COP)'
+        m = re.search(rf'({curr_regex})[\s/]*({curr_regex})', pair_str.upper())
+        if not m:
+            clean_query = pair_str.replace("/", "").replace(" ", "").replace("(", "").replace(")", "").replace("-", "").upper()
+            return self.asset_cache.get(clean_query)
+
+        base, quote = m.group(1), m.group(2)
+        clean_target = f"{base}/{quote}"
+        is_otc = "OTC" in pair_str.upper()
+
         if not self.asset_cache or (time.time() - self.last_asset_fetch > 60):
             self.list_assets(only_enabled=False)
 
-        clean_query = pair_str.replace("/", "").replace(" ", "").replace("(", "").replace(")", "").replace("-", "").upper()
-        if clean_query in self.asset_cache:
-            return self.asset_cache[clean_query]
+        all_assets = list(self.asset_cache.values())
 
-        is_otc = "OTC" in pair_str.upper()
-        # Search substrings
-        for key, a in self.asset_cache.items():
+        # PRIORITY 1: Match requested type (OTC or Regular) that is currently OPEN
+        for a in all_assets:
             aname = a.get("name", "").upper()
-            if is_otc and "OTC" in aname:
-                # Compare base/quote e.g. AUDJPY in AUD/JPY (OTC)
-                clean_name = aname.replace("/", "").replace(" ", "").replace("(", "").replace(")", "").replace("-", "")
-                if clean_query in clean_name or clean_name in clean_query:
-                    return a
-            elif not is_otc and "OTC" not in aname:
-                clean_name = aname.replace("/", "").replace(" ", "").replace("(", "").replace(")", "").replace("-", "")
-                if clean_query in clean_name or clean_name in clean_query:
+            if clean_target in aname and a.get("is_open"):
+                if (is_otc and "OTC" in aname) or (not is_otc and "OTC" not in aname):
                     return a
 
-        # Fallback to general search
-        for key, a in self.asset_cache.items():
-            clean_name = a.get("name", "").replace("/", "").replace(" ", "").replace("(", "").replace(")", "").replace("-", "").upper()
-            if clean_query in clean_name:
+        # PRIORITY 2: Any matching asset that is currently OPEN
+        for a in all_assets:
+            aname = a.get("name", "").upper()
+            if clean_target in aname and a.get("is_open"):
+                return a
+
+        # PRIORITY 3: Closed matching asset (so caller can report it is closed)
+        for a in all_assets:
+            aname = a.get("name", "").upper()
+            if clean_target in aname:
                 return a
 
         return None
@@ -272,7 +282,19 @@ class IQBlitzMCPClient:
             "expiration_size": int(expiration_size)
         }
         logger.info(f"⚡ [Blitz MCP] Placing {direction.upper()} trade: Asset={asset_id}, Amount=${amount}, Payout={profit_percent}%, Exp={expiration_size}s")
-        return self.call_tool("place_trade", args)
+        res = self.call_tool("place_trade", args)
+
+        # Retry with fresh payout if stale profit_percent rejected
+        if "error" in res and "profit_percent" in str(res["error"]).lower():
+            logger.warning("[Blitz MCP] Stale profit_percent detected. Refreshing assets and retrying...")
+            fresh_assets = self.list_assets(only_enabled=True)
+            for a in fresh_assets:
+                if a.get("asset_id") == int(asset_id):
+                    args["profit_percent"] = int(a.get("profit_percent", profit_percent))
+                    logger.info(f"⚡ [Blitz MCP] Retrying with refreshed payout: {args['profit_percent']}%")
+                    return self.call_tool("place_trade", args)
+
+        return res
 
     def list_positions(self, balance_id: int) -> List[Dict[str, Any]]:
         res = self.call_tool("list_positions", {"balance_id": int(balance_id)})

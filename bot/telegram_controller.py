@@ -124,7 +124,10 @@ class TelegramTradingBot:
 
     async def on_button_click(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
-        await query.answer()
+        try:
+            await query.answer()
+        except Exception:
+            pass
 
         if not self.is_admin(query.from_user.id):
             return

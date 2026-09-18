@@ -86,6 +86,10 @@ class IQForexMCPClient:
             elif resp.status_code == 403:
                 logger.error("❌ 403 Forbidden: Token lacks Margin Forex trading permission.")
                 return {"error": {"code": 403, "message": "Forbidden: Token lacks Margin Forex permission"}}
+            elif resp.status_code in (400, 404, 410) and retry_init and method != "initialize":
+                logger.warning(f"⚠️ Forex MCP HTTP {resp.status_code} (session invalid/expired). Re-initializing...")
+                if self.initialize():
+                    return self.rpc_call(method, params, retry_init=False)
                 
             resp.raise_for_status()
             
@@ -108,14 +112,18 @@ class IQForexMCPClient:
                     
             # Check if error indicates expired/invalid session
             err = data.get("error") if isinstance(data, dict) else None
-            if err and retry_init and "session" in str(err).lower():
-                logger.warning("⚠️ MCP session expired or uninitialized. Re-initializing...")
+            if err and retry_init and ("session" in str(err).lower() or "not found" in str(err).lower()):
+                logger.warning("⚠️ Forex MCP session expired or uninitialized. Re-initializing...")
                 if self.initialize():
                     return self.rpc_call(method, params, retry_init=False)
 
             return data
                 
         except requests.RequestException as e:
+            if retry_init and method != "initialize":
+                logger.warning(f"⚠️ Forex MCP request exception: {e}. Re-initializing session...")
+                if self.initialize():
+                    return self.rpc_call(method, params, retry_init=False)
             logger.error(f"HTTP error during MCP rpc_call({method}): {e}")
             return {"error": {"code": -1, "message": str(e)}}
 

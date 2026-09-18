@@ -8,11 +8,15 @@ venv/
 *.log
 supervisor.log
 .DS_Store
-# Sensitive Files
+# Sensitive & Heavy Folders
 trades.db*
 live_trade_feedback.csv
 service_account.json
-*.session
+*.session*
 my_telegram_channels.json
 tele_auth_state.json
 logs.*.csv
+data/
+models/
+callisto_sample_photos/
+legacy/

@@ -237,9 +237,134 @@ class CallistoCopier(BaseCopier):
                 "opened_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             }
             await self.notify(f"✅ [Callisto] Trade Executed: #{order_id} {side} @ {exec_price:.2f}")
+            asyncio.create_task(self._monitor_position(order_id))
         else:
             logger.error(f"❌ [Callisto] Order failed: {res}")
             await self.notify(f"❌ [Callisto] Order Failed: {res.get('error', res)}")
+
+    async def _monitor_position(self, order_id: int):
+        """Monitors active Callisto trade for 1.0R Breakeven and logs settlement when closed."""
+        await asyncio.sleep(5)
+        pos = self.open_positions.get(order_id)
+        if not pos:
+            return
+
+        # 1. Resolve position_id from list_positions
+        for _ in range(6):
+            if pos.get("position_id"):
+                break
+            try:
+                positions = self.mcp.list_positions(balance_id=self.balance_id)
+                for p in positions:
+                    if p.get("asset_id") == GOLD_ASSET_ID:
+                        pos["position_id"] = p.get("position_id") or p.get("id")
+                        break
+            except Exception as e:
+                logger.warning(f"[Callisto] Position lookup error: {e}")
+            if not pos.get("position_id"):
+                await asyncio.sleep(5)
+
+        pos_id = pos.get("position_id")
+        side = pos["side"]
+        entry = pos["entry_price"]
+        sl = pos["initial_sl"]
+        risk_dist = abs(entry - sl)
+
+        logger.info(f"🛡️ [Callisto] Monitoring position #{pos_id or order_id} for Breakeven & Settlement.")
+
+        while order_id in self.open_positions:
+            await asyncio.sleep(self.poll_interval)
+            try:
+                open_positions = self.mcp.list_positions(balance_id=self.balance_id)
+                is_still_open = False
+                if pos_id:
+                    is_still_open = any((p.get("position_id") or p.get("id")) == pos_id for p in open_positions)
+                else:
+                    is_still_open = any(p.get("asset_id") == GOLD_ASSET_ID for p in open_positions)
+            except Exception as e:
+                logger.warning(f"[Callisto] Error listing positions: {e}")
+                continue
+
+            if not is_still_open:
+                logger.info(f"📊 [Callisto] Position #{pos_id or order_id} closed! Resolving settlement...")
+                await self._log_trade_closure(order_id)
+                self.open_positions.pop(order_id, None)
+                break
+
+            # 1.0R Breakeven shift
+            if not pos.get("moved_to_be") and pos_id:
+                prices = self.get_market_price()
+                mid = prices["mid"]
+                if mid > 0:
+                    hit_1r = (mid - entry >= risk_dist) if side == "BUY" else (entry - mid >= risk_dist)
+                    if hit_1r:
+                        be_buf = 0.25
+                        be_level = round(entry + be_buf if side == "BUY" else entry - be_buf, 2)
+                        logger.info(f"🛡️ [Callisto BREAKEVEN] 1.0R reached on #{pos_id}! Moving SL to {be_level}")
+                        res = self.mcp.change_position_stop_loss(position_id=pos_id, level=be_level)
+                        if not res.get("error"):
+                            pos["sl"] = be_level
+                            pos["moved_to_be"] = True
+                            await self.notify(
+                                f"🛡️ [Callisto BREAKEVEN ACTIVATED]\n"
+                                f"Position: #{pos_id} ({side})\n"
+                                f"SL shifted to: {be_level:.2f}"
+                            )
+
+    async def _log_trade_closure(self, order_id: int):
+        pos = self.open_positions.get(order_id, {})
+        pos_id = pos.get("position_id")
+        side = pos.get("side", "BUY")
+        entry_px = pos.get("entry_price", 0.0)
+        tp = pos.get("tp", 0.0)
+        sl = pos.get("sl", 0.0)
+
+        pnl = 0.0
+        exit_px = 0.0
+        reason = "closed"
+
+        try:
+            history = self.mcp.get_trade_history(balance_id=self.balance_id, limit=10)
+            matched = next((h for h in history if (pos_id and h.get("position_id") == pos_id) or h.get("asset_id") == GOLD_ASSET_ID), None)
+            if matched:
+                pnl = float(matched.get("pnl", 0.0))
+                exit_px = float(matched.get("close_price", 0.0))
+                reason = matched.get("close_reason", "closed")
+        except Exception as e:
+            logger.warning(f"[Callisto] Trade history lookup error: {e}")
+
+        bal = self.mcp.get_training_balance() if self.account_type == "training" else self.mcp.get_real_balance()
+        eq = bal.get("equity", 0.0) if bal else 0.0
+
+        try:
+            gsheet_logger.log_forex_margin_trade({
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "asset": "Callisto Gold (XAUUSD)",
+                "side": side,
+                "lots": self.lots,
+                "entry_price": entry_px,
+                "stop_loss": sl,
+                "take_profit": tp,
+                "exit_price": exit_px,
+                "pnl": pnl,
+                "pips": round(abs(exit_px - entry_px) * 10, 1) if exit_px else 0.0,
+                "risk_reward": "Callisto Zone",
+                "exit_reason": reason,
+                "position_id": pos_id or order_id,
+                "balance_equity": eq
+            })
+        except Exception as e:
+            logger.warning(f"[Callisto] GSheet log error: {e}")
+
+        emoji = "🏆 WIN" if pnl > 0 else "❌ LOSS"
+        await self.notify(
+            f"{emoji} [Callisto TRADE SETTLED]\n"
+            f"Side    : {side}\n"
+            f"Entry   : {entry_px:.2f}\n"
+            f"Exit    : {exit_px:.2f}\n"
+            f"PnL     : ${pnl:+.2f}\n"
+            f"Reason  : {reason}"
+        )
 
     async def handle_message(self, text: str, message_id: int, event: Any = None):
         if not self.is_enabled:

@@ -18,7 +18,7 @@ from typing import Dict, Any, Optional
 from telegram import Update
 from telegram.ext import (
     Application, ApplicationBuilder, CommandHandler,
-    CallbackQueryHandler, ContextTypes
+    CallbackQueryHandler, MessageHandler, ContextTypes, filters
 )
 from dotenv import load_dotenv
 
@@ -28,7 +28,8 @@ from clients.forex_mcp_client import IQForexMCPClient
 from clients.blitz_mcp_client import IQBlitzMCPClient
 from bot.keyboards import (
     main_menu_keyboard, channels_menu_keyboard,
-    ict_menu_keyboard, settings_menu_keyboard, close_all_confirm_keyboard
+    ict_menu_keyboard, settings_menu_keyboard, close_all_confirm_keyboard,
+    persistent_reply_keyboard
 )
 
 logger = logging.getLogger("TelegramController")
@@ -48,6 +49,7 @@ class TelegramTradingBot:
         self.lots = float(lots)
         self.leverage = int(leverage)
         self.blitz_stake = float(blitz_stake)
+        self.is_paused = False
         self.app: Optional[Application] = None
 
     def is_admin(self, user_id: int) -> bool:
@@ -114,9 +116,10 @@ class TelegramTradingBot:
         # ICT Engine
         ict_st = self.ict_engine.get_status()
         ict_icon = "🟢" if ict_st["enabled"] else "🔴"
+        pause_tag = " [PAUSED]" if self.is_paused else ""
 
         text = (
-            f"👑 *BreakingBad V3 — Trading Control Center*\n"
+            f"👑 *BreakingBad V3 — Trading Control Center*{pause_tag}\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"👤 *Account Mode*: `{self.account_type.upper()}`\n"
             f"💵 *Forex/CFD Equity*: `${fx_eq:.2f}`\n"
@@ -146,6 +149,12 @@ class TelegramTradingBot:
             await update.message.reply_text("⛔ Unauthorized access.")
             return
 
+        # Show persistent keyboard buttons
+        await update.message.reply_text(
+            "👑 *BreakingBad V3 Bot is Online & Ready!*\nUse the buttons below for quick control:",
+            reply_markup=persistent_reply_keyboard(),
+            parse_mode="Markdown"
+        )
         text = self.build_status_text()
         await update.message.reply_text(
             text=text,
@@ -158,6 +167,190 @@ class TelegramTradingBot:
             return
         text = self.build_status_text()
         await update.message.reply_text(text=text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
+
+    async def cmd_balance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.is_admin(update.effective_user.id):
+            return
+        fx_bal = self.forex_mcp.get_training_balance() if self.account_type == "training" else self.forex_mcp.get_real_balance()
+        fx_eq = fx_bal.get("equity", 0.0) if fx_bal else 0.0
+        fx_avail = fx_bal.get("available", fx_bal.get("balance", 0.0)) if fx_bal else 0.0
+
+        blitz_bal = self.blitz_mcp.get_training_balance() if self.account_type == "training" else self.blitz_mcp.get_real_balance()
+        blitz_amt = blitz_bal.get("amount", 0.0) if blitz_bal else 0.0
+
+        mode_lbl = "🟡 PRACTICE (Training)" if self.account_type == "training" else "🔴 REAL MONEY (Regular)"
+        msg = (
+            f"💰 *Trading Account Balances*\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"💼 *Mode*: {mode_lbl}\n\n"
+            f"📈 *Forex / CFD Account*:\n"
+            f"  • Equity: `${fx_eq:,.2f}`\n"
+            f"  • Available: `${fx_avail:,.2f}`\n\n"
+            f"⚡ *Blitz Options Account*:\n"
+            f"  • Balance: `${blitz_amt:,.2f}`\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"💡 Adjust sizing via ⚙️ Risk & Sizing or `/account <real/demo>`."
+        )
+        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=persistent_reply_keyboard())
+
+    async def cmd_pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.is_admin(update.effective_user.id):
+            return
+        self.is_paused = True
+        self.ict_engine.enabled = False
+        for c in self.channel_mgr.copiers.values():
+            c.is_enabled = False
+        logger.info("⏸️ [Controller] Bot PAUSED across all engines.")
+        await update.message.reply_text(
+            "⏸️ *Bot PAUSED*\nAll autonomous ICT scanning and signal copier executions are paused.",
+            parse_mode="Markdown",
+            reply_markup=persistent_reply_keyboard()
+        )
+
+    async def cmd_resume(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.is_admin(update.effective_user.id):
+            return
+        self.is_paused = False
+        self.ict_engine.enabled = True
+        for c in self.channel_mgr.copiers.values():
+            c.is_enabled = True
+        logger.info("▶️ [Controller] Bot RESUMED across all engines.")
+        await update.message.reply_text(
+            "▶️ *Bot RESUMED*\nAll autonomous ICT scanning and signal copier executions are now active.",
+            parse_mode="Markdown",
+            reply_markup=persistent_reply_keyboard()
+        )
+
+    async def cmd_channels(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.is_admin(update.effective_user.id):
+            return
+        copiers = self.channel_mgr.list_copiers()
+        await update.message.reply_text(
+            "📡 *Channel Copiers Management*\nToggle signal monitoring for individual channels:",
+            reply_markup=channels_menu_keyboard(copiers),
+            parse_mode="Markdown"
+        )
+
+    async def cmd_active_trades(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.is_admin(update.effective_user.id):
+            return
+        c_copier = self.channel_mgr.get_copier("callistofx")
+        zones_txt = "None"
+        if c_copier and getattr(c_copier, "active_zones", None):
+            zones_txt = "\n".join([f"  • {s}: `{z['zone_low']:.2f} – {z['zone_high']:.2f}` (Target: {z.get('target', 'N/A')})" for s, z in c_copier.active_zones.items()])
+
+        p_copier = self.channel_mgr.get_copier("polycarpvip")
+        blitz_open_cnt = len(getattr(p_copier, "open_trades", {}))
+
+        ict_fvg = self.ict_engine.pending_fvg
+        ict_txt = f"{ict_fvg['side']} [{ict_fvg['fvg_low']:.2f} - {ict_fvg['fvg_high']:.2f}] (SL: {ict_fvg['sl']:.2f})" if ict_fvg else "None"
+        ict_trade = self.ict_engine.active_trade
+        trade_txt = f"{ict_trade['side']} @ {ict_trade['entry_price']:.2f} (SL: {ict_trade['current_sl']:.2f}, TP: {ict_trade['tp']:.2f})" if ict_trade else "None"
+
+        text = (
+            f"📋 *Active Watchers, Zones & Setups*\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"📍 *Callisto Active Zones*:\n{zones_txt}\n\n"
+            f"⚡ *Polycarp Blitz Trades*: `{blitz_open_cnt}` active\n\n"
+            f"🔥 *ICT Pending FVG*: `{ict_txt}`\n"
+            f"🎯 *ICT Active Position*: `{trade_txt}`\n"
+            f"━━━━━━━━━━━━━━━━━━━━"
+        )
+        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=persistent_reply_keyboard())
+
+    async def cmd_account(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.is_admin(update.effective_user.id):
+            return
+        if not context.args:
+            await update.message.reply_text(
+                f"💼 Current Account Mode: *{self.account_type.upper()}*\nUsage: `/account <training/regular>` or `/set_account <real/demo>`",
+                parse_mode="Markdown",
+                reply_markup=persistent_reply_keyboard()
+            )
+            return
+        arg = context.args[0].lower()
+        if arg in ["real", "regular", "live"]:
+            target = "regular"
+        elif arg in ["demo", "training", "practice"]:
+            target = "training"
+        else:
+            await update.message.reply_text("❌ Invalid account mode. Use: `real` or `demo`", parse_mode="Markdown")
+            return
+
+        self.account_type = target
+        bal_fx = self.forex_mcp.get_real_balance() if target == "regular" else self.forex_mcp.get_training_balance()
+        if bal_fx:
+            bid = bal_fx["balance_id"]
+            self.ict_engine.set_balance(bid, target)
+            for c in self.channel_mgr.copiers.values():
+                if hasattr(c, "set_balance"):
+                    c.set_balance(bid, target)
+
+        bal_blitz = self.blitz_mcp.get_real_balance() if target == "regular" else self.blitz_mcp.get_training_balance()
+        if bal_blitz:
+            p_copier = self.channel_mgr.get_copier("polycarpvip")
+            if p_copier and hasattr(p_copier, "set_balance"):
+                p_copier.set_balance(bal_blitz["balance_id"], target)
+
+        lbl = "🔴 REAL MONEY (Regular)" if target == "regular" else "🟡 PRACTICE (Training)"
+        await update.message.reply_text(
+            f"✅ Switched to *{lbl}* Account mode across all engines.",
+            parse_mode="Markdown",
+            reply_markup=persistent_reply_keyboard()
+        )
+
+    async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.is_admin(update.effective_user.id):
+            return
+        msg = (
+            "ℹ️ *BreakingBad V3 Command Center*\n\n"
+            "🖱 *Quick Buttons:*\n"
+            "Use the bottom keyboard for one-tap balance, status, setups, and pause/resume.\n\n"
+            "⚡ *Core Commands:*\n"
+            "• `/status` - Complete bot and account status\n"
+            "• `/balance` - View Forex and Blitz balances\n"
+            "• `/ict` - Autonomous Gold ICT engine controls\n"
+            "• `/channels` - Toggle signal copier channels\n"
+            "• `/settings` or `/risk` - Risk & order sizing menu\n"
+            "• `/active` - Active zones, FVGs, and open trades\n"
+            "• `/pause` / `/resume` - Master trading pause/resume\n"
+            "• `/closeall` - Emergency close all open positions\n\n"
+            "📊 *Sizing Commands:*\n"
+            "• `/lots <val>` - Set global Forex lot size (e.g. `/lots 0.5`)\n"
+            "• `/leverage <val>` - Set global leverage (e.g. `/leverage 100`)\n"
+            "• `/stake <val>` - Set Blitz base stake (e.g. `/stake 5.0`)\n"
+            "• `/account <real/demo>` - Switch account mode"
+        )
+        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=persistent_reply_keyboard())
+
+    async def handle_reply_button(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Processes taps on the persistent reply keyboard."""
+        if not update.message or not update.message.text:
+            return
+        if not self.is_admin(update.effective_user.id):
+            return
+
+        text = update.message.text.strip()
+        if text in ["📊 Status", "Status"]:
+            await self.cmd_status(update, context)
+        elif text in ["💰 Balance", "Balance"]:
+            await self.cmd_balance(update, context)
+        elif text in ["🤖 Gold ICT", "Gold ICT", "ICT"]:
+            await self.cmd_ict(update, context)
+        elif text in ["📡 Channels", "Channels"]:
+            await self.cmd_channels(update, context)
+        elif text in ["⚙️ Risk & Sizing", "Risk & Sizing", "Settings", "⚙️ Settings"]:
+            await self.cmd_settings(update, context)
+        elif text in ["📋 Active Setups", "Active Setups", "Active", "📈 Active Trades"]:
+            await self.cmd_active_trades(update, context)
+        elif text in ["⏸ Pause", "Pause"]:
+            await self.cmd_pause(update, context)
+        elif text in ["▶ Resume", "Resume"]:
+            await self.cmd_resume(update, context)
+        elif text in ["🛑 Close All", "Close All"]:
+            await self.cmd_closeall(update, context)
+        elif text in ["ℹ️ Help", "Help"]:
+            await self.cmd_help(update, context)
 
     async def cmd_ict(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.is_admin(update.effective_user.id):
@@ -519,17 +712,34 @@ class TelegramTradingBot:
         self.app.add_handler(CommandHandler("start", self.cmd_start))
         self.app.add_handler(CommandHandler("menu", self.cmd_start))
         self.app.add_handler(CommandHandler("status", self.cmd_status))
+        self.app.add_handler(CommandHandler("balance", self.cmd_balance))
+        self.app.add_handler(CommandHandler("bal", self.cmd_balance))
         self.app.add_handler(CommandHandler("ict", self.cmd_ict))
+        self.app.add_handler(CommandHandler("channels", self.cmd_channels))
+        self.app.add_handler(CommandHandler("copiers", self.cmd_channels))
+        self.app.add_handler(CommandHandler("active", self.cmd_active_trades))
+        self.app.add_handler(CommandHandler("trades", self.cmd_active_trades))
+        self.app.add_handler(CommandHandler("setups", self.cmd_active_trades))
         self.app.add_handler(CommandHandler("settings", self.cmd_settings))
         self.app.add_handler(CommandHandler("risk", self.cmd_settings))
         self.app.add_handler(CommandHandler("lots", self.cmd_lots))
         self.app.add_handler(CommandHandler("lot", self.cmd_lots))
+        self.app.add_handler(CommandHandler("set_lots", self.cmd_lots))
         self.app.add_handler(CommandHandler("leverage", self.cmd_leverage))
         self.app.add_handler(CommandHandler("lev", self.cmd_leverage))
+        self.app.add_handler(CommandHandler("set_leverage", self.cmd_leverage))
         self.app.add_handler(CommandHandler("stake", self.cmd_stake))
         self.app.add_handler(CommandHandler("blitz", self.cmd_stake))
+        self.app.add_handler(CommandHandler("set_stake", self.cmd_stake))
+        self.app.add_handler(CommandHandler("account", self.cmd_account))
+        self.app.add_handler(CommandHandler("acc", self.cmd_account))
+        self.app.add_handler(CommandHandler("set_account", self.cmd_account))
+        self.app.add_handler(CommandHandler("pause", self.cmd_pause))
+        self.app.add_handler(CommandHandler("resume", self.cmd_resume))
         self.app.add_handler(CommandHandler("closeall", self.cmd_closeall))
+        self.app.add_handler(CommandHandler("help", self.cmd_help))
         self.app.add_handler(CallbackQueryHandler(self.on_button_click))
+        self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_reply_button))
 
         # Wire notification callbacks
         self.channel_mgr.set_notification_callback(self.broadcast_alert)

@@ -1,9 +1,15 @@
-"""
-bot/keyboards.py - Inline Keyboard Layouts for Telegram Controller
-"""
-
-from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+from telegram import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from typing import Dict, Any, List
+
+def persistent_reply_keyboard() -> ReplyKeyboardMarkup:
+    keyboard = [
+        [KeyboardButton("📊 Status"), KeyboardButton("💰 Balance")],
+        [KeyboardButton("🤖 Gold ICT"), KeyboardButton("📡 Channels")],
+        [KeyboardButton("⚙️ Risk & Sizing"), KeyboardButton("📋 Active Setups")],
+        [KeyboardButton("⏸ Pause"), KeyboardButton("▶ Resume")],
+        [KeyboardButton("🛑 Close All"), KeyboardButton("ℹ️ Help")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 def main_menu_keyboard() -> InlineKeyboardMarkup:
     keyboard = [

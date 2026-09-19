@@ -30,9 +30,10 @@ INSTRUMENT_PROFILES = {
         "name": "Gold (XAU/USD)",
         "asset_id": 74,
         "instrument_id": "mcfd.74",
-        "sl_buffer": 2.5,
+        "sl_buffer": 3.0,
         "disp_threshold": 2.0,
         "min_fvg_gap": 0.3,
+        "body_ratio_req": 0.50,
         "default_lots": 1.0,
         "digits": 2
     },
@@ -44,6 +45,7 @@ INSTRUMENT_PROFILES = {
         "sl_buffer": 0.0003,
         "disp_threshold": 0.0004,
         "min_fvg_gap": 0.0001,
+        "body_ratio_req": 0.50,
         "default_lots": 1.0,
         "digits": 5
     },
@@ -55,6 +57,7 @@ INSTRUMENT_PROFILES = {
         "sl_buffer": 0.0004,
         "disp_threshold": 0.0005,
         "min_fvg_gap": 0.0001,
+        "body_ratio_req": 0.50,
         "default_lots": 1.0,
         "digits": 5
     },
@@ -66,6 +69,7 @@ INSTRUMENT_PROFILES = {
         "sl_buffer": 0.04,
         "disp_threshold": 0.05,
         "min_fvg_gap": 0.01,
+        "body_ratio_req": 0.50,
         "default_lots": 1.0,
         "digits": 3
     },
@@ -77,6 +81,7 @@ INSTRUMENT_PROFILES = {
         "sl_buffer": 0.0003,
         "disp_threshold": 0.0004,
         "min_fvg_gap": 0.0001,
+        "body_ratio_req": 0.50,
         "default_lots": 1.0,
         "digits": 5
     }
@@ -85,7 +90,7 @@ INSTRUMENT_PROFILES = {
 class ICTStrategyEngine:
     def __init__(self, mcp_client: IQForexMCPClient, symbol: str = "XAUUSD",
                  account_type: str = "training", lots: float = 1.0,
-                 leverage: int = 100, rr_ratio: float = 2.0, enabled: bool = True):
+                 leverage: int = 100, rr_ratio: float = 2.5, enabled: bool = True):
         self.mcp = mcp_client
         self.account_type = account_type.lower()
         self.lots = lots
@@ -121,6 +126,7 @@ class ICTStrategyEngine:
             self.sl_buffer = self.profile["sl_buffer"]
             self.disp_threshold = self.profile["disp_threshold"]
             self.min_fvg_gap = self.profile["min_fvg_gap"]
+            self.body_ratio_req = self.profile.get("body_ratio_req", 0.50)
             self.digits = self.profile["digits"]
             self.pending_fvg = None
             logger.info(f"🎯 [ICTEngine] Switched instrument to {self.profile['name']} (ID: {self.asset_id})")
@@ -192,29 +198,37 @@ class ICTStrategyEngine:
         recent_high = max(highs[-25:-5])
         recent_low = min(lows[-25:-5])
 
-        # 1. Bearish Liquidity Sweep (High swept + Bearish FVG)
+        # 1. Bearish Liquidity Sweep (High swept + CISD + Bearish FVG + Solid Displacement)
         swept_h = (highs[-3] > recent_high and closes[-3] < recent_high) or \
                   (highs[-2] > recent_high and closes[-2] < recent_high)
         has_bearish_fvg = lows[-3] > (highs[-1] + self.min_fvg_gap)
-        disp_down = closes[-2] < opens[-2] and (highs[-2] - lows[-2]) > self.disp_threshold
+        disp_range_down = highs[-2] - lows[-2]
+        disp_body_down = abs(closes[-2] - opens[-2])
+        disp_down = closes[-2] < opens[-2] and disp_range_down > self.disp_threshold
+        body_ok_down = (disp_body_down / max(0.0001, disp_range_down)) >= self.body_ratio_req
 
-        if swept_h and has_bearish_fvg and disp_down:
+        # Explicit ICT CISD: Displacement closes below the Open of the high-forming candle
+        sweep_open_h = opens[-3] if highs[-3] >= highs[-2] else opens[-2]
+        cisd_down = (closes[-2] < sweep_open_h) or (closes[-1] < sweep_open_h)
+
+        if swept_h and has_bearish_fvg and disp_down and body_ok_down and cisd_down:
             sweep_peak = max(highs[-3], highs[-2])
             sl = round(sweep_peak + self.sl_buffer, self.digits)
             fvg_h = round(lows[-3], self.digits)
             fvg_l = round(highs[-1], self.digits)
 
             logger.info("=" * 60)
-            logger.info(f"🔥 [ICT SETUP DETECTED] {self.symbol} Bearish Liquidity Sweep at {sweep_peak}!")
+            logger.info(f"🔥 [ICT CISD SETUP DETECTED] {self.symbol} Bearish Sweep at {sweep_peak} | CISD Open: {sweep_open_h:.2f}!")
             logger.info(f"   Bearish FVG Zone : {fvg_l} - {fvg_h} | SL: {sl}")
             logger.info("=" * 60)
 
             await self.notify(
-                f"🔥 [ICT SETUP DETECTED — {self.symbol} SELL]\n"
-                f"Sweep Peak: {sweep_peak}\n"
-                f"FVG Zone  : {fvg_l} – {fvg_h}\n"
-                f"Stop Loss : {sl}\n"
-                f"⏳ Waiting for price retest..."
+                f"🔥 [ICT CISD SETUP DETECTED — {self.symbol} SELL]\n"
+                f"Sweep Peak : {sweep_peak:.2f}\n"
+                f"CISD Shift : Broken below {sweep_open_h:.2f}\n"
+                f"FVG Zone   : {fvg_l:.2f} – {fvg_h:.2f}\n"
+                f"Stop Loss  : {sl:.2f}\n"
+                f"⏳ Waiting for FVG retest..."
             )
             self.pending_fvg = {
                 "side": "SELL",
@@ -225,29 +239,37 @@ class ICTStrategyEngine:
             }
             return
 
-        # 2. Bullish Liquidity Sweep (Low swept + Bullish FVG)
+        # 2. Bullish Liquidity Sweep (Low swept + CISD + Bullish FVG + Solid Displacement)
         swept_l = (lows[-3] < recent_low and closes[-3] > recent_low) or \
                   (lows[-2] < recent_low and closes[-2] > recent_low)
         has_bullish_fvg = highs[-3] < (lows[-1] - self.min_fvg_gap)
-        disp_up = closes[-2] > opens[-2] and (highs[-2] - lows[-2]) > self.disp_threshold
+        disp_range_up = highs[-2] - lows[-2]
+        disp_body_up = abs(closes[-2] - opens[-2])
+        disp_up = closes[-2] > opens[-2] and disp_range_up > self.disp_threshold
+        body_ok_up = (disp_body_up / max(0.0001, disp_range_up)) >= self.body_ratio_req
 
-        if swept_l and has_bullish_fvg and disp_up:
+        # Explicit ICT CISD: Displacement closes above the Open of the low-forming candle
+        sweep_open_l = opens[-3] if lows[-3] <= lows[-2] else opens[-2]
+        cisd_up = (closes[-2] > sweep_open_l) or (closes[-1] > sweep_open_l)
+
+        if swept_l and has_bullish_fvg and disp_up and body_ok_up and cisd_up:
             sweep_trough = min(lows[-3], lows[-2])
             sl = round(sweep_trough - self.sl_buffer, self.digits)
             fvg_l = round(highs[-3], self.digits)
             fvg_h = round(lows[-1], self.digits)
 
             logger.info("=" * 60)
-            logger.info(f"🔥 [ICT SETUP DETECTED] {self.symbol} Bullish Liquidity Sweep at {sweep_trough}!")
+            logger.info(f"🔥 [ICT CISD SETUP DETECTED] {self.symbol} Bullish Sweep at {sweep_trough} | CISD Open: {sweep_open_l:.2f}!")
             logger.info(f"   Bullish FVG Zone : {fvg_l} - {fvg_h} | SL: {sl}")
             logger.info("=" * 60)
 
             await self.notify(
-                f"🔥 [ICT SETUP DETECTED — {self.symbol} BUY]\n"
-                f"Sweep Trough: {sweep_trough}\n"
-                f"FVG Zone    : {fvg_l} – {fvg_h}\n"
-                f"Stop Loss   : {sl}\n"
-                f"⏳ Waiting for price retest..."
+                f"🔥 [ICT CISD SETUP DETECTED — {self.symbol} BUY]\n"
+                f"Sweep Trough: {sweep_trough:.2f}\n"
+                f"CISD Shift  : Broken above {sweep_open_l:.2f}\n"
+                f"FVG Zone    : {fvg_l:.2f} – {fvg_h:.2f}\n"
+                f"Stop Loss   : {sl:.2f}\n"
+                f"⏳ Waiting for FVG retest..."
             )
             self.pending_fvg = {
                 "side": "BUY",

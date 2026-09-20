@@ -6,9 +6,10 @@ def persistent_reply_keyboard() -> ReplyKeyboardMarkup:
         [KeyboardButton("📊 Status"), KeyboardButton("💰 Balance")],
         [KeyboardButton("🤖 Gold ICT"), KeyboardButton("📡 Channels")],
         [KeyboardButton("📜 History"), KeyboardButton("📋 Active Setups")],
-        [KeyboardButton("🌐 Market Sessions"), KeyboardButton("⚙️ Risk & Sizing")],
+        [KeyboardButton("🌐 Market Sessions"), KeyboardButton("📰 Economic News")],
+        [KeyboardButton("⚙️ Risk & Sizing"), KeyboardButton("ℹ️ Help")],
         [KeyboardButton("⏸ Pause"), KeyboardButton("▶ Resume")],
-        [KeyboardButton("ℹ️ Help"), KeyboardButton("🛑 Close All")]
+        [KeyboardButton("🛑 Close All")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -28,6 +29,9 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("🌐 Market Sessions", callback_data="btn_sessions"),
+            InlineKeyboardButton("📰 Economic News", callback_data="btn_news")
+        ],
+        [
             InlineKeyboardButton("🛑 EMERGENCY CLOSE ALL", callback_data="btn_close_all_confirm")
         ]
     ]

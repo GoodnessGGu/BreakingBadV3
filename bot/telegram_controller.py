@@ -32,6 +32,7 @@ from bot.keyboards import (
     persistent_reply_keyboard, history_menu_keyboard
 )
 from bot.session_notifier import MarketSessionNotifier
+from bot.news_engine import EconomicNewsEngine
 
 logger = logging.getLogger("TelegramController")
 
@@ -46,6 +47,7 @@ class TelegramTradingBot:
         self.forex_mcp = forex_mcp
         self.blitz_mcp = blitz_mcp
         self.session_notifier = MarketSessionNotifier(broadcast_func=self.broadcast_alert)
+        self.news_engine = EconomicNewsEngine(broadcast_func=self.broadcast_alert)
 
         self.account_type = "training"
         self.lots = float(lots)
@@ -560,10 +562,11 @@ class TelegramTradingBot:
         msg = (
             "ℹ️ *BreakingBad V3 Command Center*\n\n"
             "🖱 *Quick Buttons:*\n"
-            "Use the bottom keyboard for one-tap balance, status, setups, and pause/resume.\n\n"
+            "Use the bottom keyboard for one-tap balance, status, setups, news, and pause/resume.\n\n"
             "⚡ *Core Commands:*\n"
             "• `/status` - Complete bot and account status\n"
             "• `/balance` - View Forex and Blitz balances\n"
+            "• `/news` or `/calendar` - High-impact economic news & CPI/NFP calendar\n"
             "• `/sessions` - View live global market hours & active sessions\n"
             "• `/ict` - Autonomous Gold ICT engine controls\n"
             "• `/channels` - Toggle signal copier channels\n"
@@ -586,6 +589,14 @@ class TelegramTradingBot:
         text = self.session_notifier.get_session_dashboard()
         await update.message.reply_text(text, parse_mode="Markdown", reply_markup=persistent_reply_keyboard())
 
+    async def cmd_news(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.is_admin(update.effective_user.id):
+            return
+        # Ensure fresh calendar data
+        await self.news_engine.fetch_calendar()
+        text = self.news_engine.get_news_dashboard()
+        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=persistent_reply_keyboard())
+
     async def handle_reply_button(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Processes taps on the persistent reply keyboard."""
         if not update.message or not update.message.text:
@@ -600,6 +611,8 @@ class TelegramTradingBot:
             await self.cmd_balance(update, context)
         elif text in ["🌐 Market Sessions", "Market Sessions", "🌐 Sessions", "Sessions"]:
             await self.cmd_sessions(update, context)
+        elif text in ["📰 Economic News", "Economic News", "📰 News", "News", "Calendar", "📅 Calendar"]:
+            await self.cmd_news(update, context)
         elif text in ["🤖 Gold ICT", "Gold ICT", "ICT"]:
             await self.cmd_ict(update, context)
         elif text in ["📡 Channels", "Channels"]:
@@ -949,6 +962,11 @@ class TelegramTradingBot:
             text = self.session_notifier.get_session_dashboard()
             await query.edit_message_text(text=text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
 
+        elif data == "btn_news":
+            await self.news_engine.fetch_calendar()
+            text = self.news_engine.get_news_dashboard()
+            await query.edit_message_text(text=text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
+
         elif data == "btn_close_all_confirm":
             await query.edit_message_text(
                 "⚠️ *Confirm Emergency Close All*\nThis will close ALL open Marginal CFD/Forex positions immediately.",
@@ -984,6 +1002,9 @@ class TelegramTradingBot:
         self.app.add_handler(CommandHandler("sessions", self.cmd_sessions))
         self.app.add_handler(CommandHandler("market", self.cmd_sessions))
         self.app.add_handler(CommandHandler("session", self.cmd_sessions))
+        self.app.add_handler(CommandHandler("news", self.cmd_news))
+        self.app.add_handler(CommandHandler("calendar", self.cmd_news))
+        self.app.add_handler(CommandHandler("events", self.cmd_news))
         self.app.add_handler(CommandHandler("ict", self.cmd_ict))
         self.app.add_handler(CommandHandler("channels", self.cmd_channels))
         self.app.add_handler(CommandHandler("copiers", self.cmd_channels))
@@ -1025,6 +1046,7 @@ class TelegramTradingBot:
         self.is_running = True
         logger.info("🤖 Telegram Bot UI active & listening for user commands!")
         asyncio.create_task(self.session_notifier.run_loop())
+        asyncio.create_task(self.news_engine.run_loop())
         try:
             while self.is_running:
                 await asyncio.sleep(1)
@@ -1034,6 +1056,7 @@ class TelegramTradingBot:
     async def stop(self):
         self.is_running = False
         self.session_notifier.stop()
+        self.news_engine.stop()
         try:
             if self.app:
                 if self.app.updater and getattr(self.app.updater, "running", False):

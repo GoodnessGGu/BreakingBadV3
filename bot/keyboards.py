@@ -62,11 +62,14 @@ def ict_menu_keyboard(ict_status: Dict[str, Any]) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(f"{'🎯 ' if cur_sym == 'XAUUSD' else ''}Gold (XAU)", callback_data="set_inst_xauusd"),
-            InlineKeyboardButton(f"{'🎯 ' if cur_sym == 'EURUSD' else ''}EUR/USD", callback_data="set_inst_eurusd"),
-            InlineKeyboardButton(f"{'🎯 ' if cur_sym == 'GBPUSD' else ''}GBP/USD", callback_data="set_inst_gbpusd")
+            InlineKeyboardButton(f"{'🎯 ' if cur_sym == 'BTCUSD' else ''}Bitcoin (BTC)", callback_data="set_inst_btcusd")
         ],
         [
-            InlineKeyboardButton(f"{'🎯 ' if cur_sym == 'USDJPY' else ''}USD/JPY", callback_data="set_inst_usdjpy"),
+            InlineKeyboardButton(f"{'🎯 ' if cur_sym == 'EURUSD' else ''}EUR/USD", callback_data="set_inst_eurusd"),
+            InlineKeyboardButton(f"{'🎯 ' if cur_sym == 'GBPUSD' else ''}GBP/USD", callback_data="set_inst_gbpusd"),
+            InlineKeyboardButton(f"{'🎯 ' if cur_sym == 'USDJPY' else ''}USD/JPY", callback_data="set_inst_usdjpy")
+        ],
+        [
             InlineKeyboardButton(f"{'🎯 ' if cur_sym == 'AUDUSD' else ''}AUD/USD", callback_data="set_inst_audusd")
         ],
         [

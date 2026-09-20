@@ -37,6 +37,18 @@ INSTRUMENT_PROFILES = {
         "default_lots": 1.0,
         "digits": 2
     },
+    "BTCUSD": {
+        "symbol": "BTCUSD",
+        "name": "Bitcoin (BTC/USD)",
+        "asset_id": 816,
+        "instrument_id": "mcfd.816",
+        "sl_buffer": 50.0,
+        "disp_threshold": 160.0,
+        "min_fvg_gap": 20.0,
+        "body_ratio_req": 0.50,
+        "default_lots": 1.0,
+        "digits": 2
+    },
     "EURUSD": {
         "symbol": "EURUSD",
         "name": "EUR/USD",

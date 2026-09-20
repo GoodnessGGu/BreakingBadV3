@@ -31,6 +31,7 @@ from bot.keyboards import (
     ict_menu_keyboard, settings_menu_keyboard, close_all_confirm_keyboard,
     persistent_reply_keyboard, history_menu_keyboard
 )
+from bot.session_notifier import MarketSessionNotifier
 
 logger = logging.getLogger("TelegramController")
 
@@ -44,6 +45,7 @@ class TelegramTradingBot:
         self.ict_engine = ict_engine
         self.forex_mcp = forex_mcp
         self.blitz_mcp = blitz_mcp
+        self.session_notifier = MarketSessionNotifier(broadcast_func=self.broadcast_alert)
 
         self.account_type = "training"
         self.lots = float(lots)
@@ -562,6 +564,7 @@ class TelegramTradingBot:
             "⚡ *Core Commands:*\n"
             "• `/status` - Complete bot and account status\n"
             "• `/balance` - View Forex and Blitz balances\n"
+            "• `/sessions` - View live global market hours & active sessions\n"
             "• `/ict` - Autonomous Gold ICT engine controls\n"
             "• `/channels` - Toggle signal copier channels\n"
             "• `/settings` or `/risk` - Risk & order sizing menu\n"
@@ -577,6 +580,12 @@ class TelegramTradingBot:
         )
         await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=persistent_reply_keyboard())
 
+    async def cmd_sessions(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.is_admin(update.effective_user.id):
+            return
+        text = self.session_notifier.get_session_dashboard()
+        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=persistent_reply_keyboard())
+
     async def handle_reply_button(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Processes taps on the persistent reply keyboard."""
         if not update.message or not update.message.text:
@@ -589,6 +598,8 @@ class TelegramTradingBot:
             await self.cmd_status(update, context)
         elif text in ["💰 Balance", "Balance"]:
             await self.cmd_balance(update, context)
+        elif text in ["🌐 Market Sessions", "Market Sessions", "🌐 Sessions", "Sessions"]:
+            await self.cmd_sessions(update, context)
         elif text in ["🤖 Gold ICT", "Gold ICT", "ICT"]:
             await self.cmd_ict(update, context)
         elif text in ["📡 Channels", "Channels"]:
@@ -934,6 +945,10 @@ class TelegramTradingBot:
             text = self.build_active_setups_view()
             await query.edit_message_text(text=text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
 
+        elif data == "btn_sessions":
+            text = self.session_notifier.get_session_dashboard()
+            await query.edit_message_text(text=text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
+
         elif data == "btn_close_all_confirm":
             await query.edit_message_text(
                 "⚠️ *Confirm Emergency Close All*\nThis will close ALL open Marginal CFD/Forex positions immediately.",
@@ -966,6 +981,9 @@ class TelegramTradingBot:
         self.app.add_handler(CommandHandler("status", self.cmd_status))
         self.app.add_handler(CommandHandler("balance", self.cmd_balance))
         self.app.add_handler(CommandHandler("bal", self.cmd_balance))
+        self.app.add_handler(CommandHandler("sessions", self.cmd_sessions))
+        self.app.add_handler(CommandHandler("market", self.cmd_sessions))
+        self.app.add_handler(CommandHandler("session", self.cmd_sessions))
         self.app.add_handler(CommandHandler("ict", self.cmd_ict))
         self.app.add_handler(CommandHandler("channels", self.cmd_channels))
         self.app.add_handler(CommandHandler("copiers", self.cmd_channels))
@@ -1006,6 +1024,7 @@ class TelegramTradingBot:
         await self.app.updater.start_polling(drop_pending_updates=True)
         self.is_running = True
         logger.info("🤖 Telegram Bot UI active & listening for user commands!")
+        asyncio.create_task(self.session_notifier.run_loop())
         try:
             while self.is_running:
                 await asyncio.sleep(1)
@@ -1014,6 +1033,7 @@ class TelegramTradingBot:
 
     async def stop(self):
         self.is_running = False
+        self.session_notifier.stop()
         try:
             if self.app:
                 if self.app.updater and getattr(self.app.updater, "running", False):

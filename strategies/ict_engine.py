@@ -203,7 +203,18 @@ class ICTStrategyEngine:
         if not profile:
             return {"buy": 0.0, "sell": 0.0, "mid": 0.0}
 
-        # 1. Try calculate_order_size with asset-clamped leverage
+        # 1. Fetch latest candle for instant live pricing
+        try:
+            candles = self.mcp.get_candles(asset_id=profile["asset_id"], size=60, count=2)
+            if candles and len(candles) > 0:
+                last_c = candles[-1]
+                px = float(last_c.get("close", last_c.get("c", 0.0)))
+                if px > 0:
+                    return {"buy": px, "sell": px, "mid": px}
+        except Exception as e:
+            logger.debug(f"[ICTEngine] Candle price fetch error for {symbol}: {e}")
+
+        # 2. Fallback to calculate_order_size if candle is unavailable
         lev = min(self.leverage, 20 if symbol == "BTCUSD" else self.leverage)
         try:
             p = self.mcp.calculate_order_size(
@@ -217,17 +228,6 @@ class ICTStrategyEngine:
                     return {"buy": buy, "sell": sell, "mid": (buy + sell) / 2}
         except Exception:
             pass
-
-        # 2. Resilient fallback to latest 1-min candle price
-        try:
-            candles = self.mcp.get_candles(asset_id=profile["asset_id"], size=60, count=2)
-            if candles and len(candles) > 0:
-                last_c = candles[-1]
-                px = float(last_c.get("close", last_c.get("c", 0.0)))
-                if px > 0:
-                    return {"buy": px, "sell": px, "mid": px}
-        except Exception as e:
-            logger.debug(f"[ICTEngine] Price fallback error for {symbol}: {e}")
 
         return {"buy": 0.0, "sell": 0.0, "mid": 0.0}
 

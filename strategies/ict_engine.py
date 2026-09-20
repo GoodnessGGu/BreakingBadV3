@@ -529,6 +529,7 @@ class ICTStrategyEngine:
                             if now - last_candle_scan.get(sym, 0) > 60:
                                 df = self.fetch_recent_candles(sym, count=50)
                                 if df is not None:
+                                    logger.info(f"🔍 [ICTEngine] Monitoring {sym} (ID: {INSTRUMENT_PROFILES[sym]['asset_id']}) | Mid Price: ${prices['mid']:.2f} | Analyzed {len(df)} 15M candles")
                                     await self.scan_for_setups(sym, df)
                                 last_candle_scan[sym] = now
 

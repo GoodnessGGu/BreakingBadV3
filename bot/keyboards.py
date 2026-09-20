@@ -5,9 +5,10 @@ def persistent_reply_keyboard() -> ReplyKeyboardMarkup:
     keyboard = [
         [KeyboardButton("📊 Status"), KeyboardButton("💰 Balance")],
         [KeyboardButton("🤖 Gold ICT"), KeyboardButton("📡 Channels")],
-        [KeyboardButton("⚙️ Risk & Sizing"), KeyboardButton("📋 Active Setups")],
+        [KeyboardButton("📜 History"), KeyboardButton("📋 Active Setups")],
+        [KeyboardButton("⚙️ Risk & Sizing"), KeyboardButton("ℹ️ Help")],
         [KeyboardButton("⏸ Pause"), KeyboardButton("▶ Resume")],
-        [KeyboardButton("🛑 Close All"), KeyboardButton("ℹ️ Help")]
+        [KeyboardButton("🛑 Close All")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -18,12 +19,32 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("📡 Channels Menu", callback_data="btn_channels_menu")
         ],
         [
-            InlineKeyboardButton("🤖 Gold ICT Engine", callback_data="btn_ict_menu"),
+            InlineKeyboardButton("🤖 ICT Multi-Engine", callback_data="btn_ict_menu"),
             InlineKeyboardButton("⚙️ Risk & Sizing", callback_data="btn_settings_menu")
         ],
         [
-            InlineKeyboardButton("📋 Active Setups & Trades", callback_data="btn_active_trades"),
+            InlineKeyboardButton("📋 Active Setups", callback_data="btn_active_trades"),
+            InlineKeyboardButton("📜 Trade History", callback_data="history_cat_all")
+        ],
+        [
             InlineKeyboardButton("🛑 EMERGENCY CLOSE ALL", callback_data="btn_close_all_confirm")
+        ]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def history_menu_keyboard(category: str = "all") -> InlineKeyboardMarkup:
+    keyboard = [
+        [
+            InlineKeyboardButton(f"{'✅ ' if category == 'all' else ''}📊 All Trades", callback_data="history_cat_all"),
+            InlineKeyboardButton(f"{'✅ ' if category == 'blitz' else ''}⚡ Blitz Options", callback_data="history_cat_blitz")
+        ],
+        [
+            InlineKeyboardButton(f"{'✅ ' if category == 'cfd' else ''}📈 CFD Copiers", callback_data="history_cat_cfd"),
+            InlineKeyboardButton(f"{'✅ ' if category == 'ict' else ''}🤖 ICT Engine", callback_data="history_cat_ict")
+        ],
+        [
+            InlineKeyboardButton("🔄 Refresh", callback_data=f"history_cat_{category}"),
+            InlineKeyboardButton("🔙 Main Menu", callback_data="btn_main_menu")
         ]
     ]
     return InlineKeyboardMarkup(keyboard)

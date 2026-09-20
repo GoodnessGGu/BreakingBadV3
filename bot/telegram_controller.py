@@ -23,13 +23,13 @@ from telegram.ext import (
 from dotenv import load_dotenv
 
 from copiers.channel_manager import ChannelManager
-from strategies.ict_engine import ICTStrategyEngine
+from strategies.ict_engine import ICTStrategyEngine, INSTRUMENT_PROFILES
 from clients.forex_mcp_client import IQForexMCPClient
 from clients.blitz_mcp_client import IQBlitzMCPClient
 from bot.keyboards import (
     main_menu_keyboard, channels_menu_keyboard,
     ict_menu_keyboard, settings_menu_keyboard, close_all_confirm_keyboard,
-    persistent_reply_keyboard
+    persistent_reply_keyboard, history_menu_keyboard
 )
 
 logger = logging.getLogger("TelegramController")
@@ -260,7 +260,212 @@ class TelegramTradingBot:
             f"🎯 *ICT Active Positions*:\n{ict_trade_txt}\n"
             f"━━━━━━━━━━━━━━━━━━━━"
         )
-        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=persistent_reply_keyboard())
+    def get_active_balance_id(self) -> Optional[int]:
+        if self.ict_engine.balance_id:
+            return self.ict_engine.balance_id
+        bal = self.forex_mcp.get_real_balance() if self.account_type == "regular" else self.forex_mcp.get_training_balance()
+        return bal.get("balance_id") if bal else None
+
+    def build_history_view(self, category: str = "all") -> str:
+        """
+        Fetches and compiles prettified trade history categorized by:
+          - Blitz Options (Polycarp VIP)
+          - Marginal CFD Copiers (Callisto / Gold Pips)
+          - Autonomous ICT Engine (Gold / BTC / Forex)
+        """
+        # 1. Fetch Blitz Options History
+        blitz_trades = []
+        try:
+            raw_blitz = self.blitz_mcp.get_trade_history(limit=30) or []
+            for t in raw_blitz:
+                pos_id = t.get("position_id") or t.get("id", "N/A")
+                asset = t.get("asset_name") or t.get("active") or f"Asset {t.get('asset_id', '')}"
+                res_str = str(t.get("result", "")).lower()
+                profit = float(t.get("profit", 0.0))
+                stake = float(t.get("amount") or t.get("invest") or 0.0)
+                direction = str(t.get("direction") or t.get("type", "CALL")).upper()
+                is_win = (res_str == "win" or profit > 0)
+                is_equal = (res_str == "equal" or (profit == 0 and res_str not in ["loss", "loose"]))
+
+                ts_raw = t.get("close_time") or t.get("open_time") or t.get("created_at")
+                if isinstance(ts_raw, (int, float)):
+                    ts_str = datetime.fromtimestamp(ts_raw).strftime("%H:%M")
+                elif ts_raw:
+                    ts_str = str(ts_raw)[11:16]
+                else:
+                    ts_str = "--:--"
+
+                blitz_trades.append({
+                    "id": pos_id,
+                    "asset": asset,
+                    "direction": direction,
+                    "stake": stake,
+                    "pnl": profit,
+                    "is_win": is_win,
+                    "is_equal": is_equal,
+                    "time": ts_str
+                })
+        except Exception as e:
+            logger.warning(f"[History] Error fetching Blitz history: {e}")
+
+        # 2. Fetch Marginal CFD History (Forex, Gold, ICT)
+        cfd_copier_trades = []
+        ict_trades = []
+        try:
+            bid = self.get_active_balance_id()
+            raw_cfd = self.forex_mcp.get_trade_history(balance_id=bid, limit=30) or []
+            for t in raw_cfd:
+                pos_id = t.get("position_id") or t.get("id", "N/A")
+                asset_id = t.get("asset_id")
+                asset_name = f"Asset #{asset_id}"
+                if asset_id == 74:
+                    asset_name = "Gold (XAUUSD)"
+                elif asset_id == 816:
+                    asset_name = "Bitcoin (BTCUSD)"
+                else:
+                    for sym, prof in INSTRUMENT_PROFILES.items():
+                        if prof.get("asset_id") == asset_id:
+                            asset_name = sym
+                            break
+
+                side = str(t.get("side", "BUY")).upper()
+                lots = float(t.get("lots") or t.get("count") or 1.0)
+                open_px = float(t.get("open_price", 0.0))
+                close_px = float(t.get("close_price", 0.0))
+                pnl = float(t.get("pnl") or t.get("profit") or 0.0)
+                reason = str(t.get("close_reason", "closed"))
+
+                ts_raw = t.get("close_time") or t.get("open_time")
+                if isinstance(ts_raw, (int, float)):
+                    ts_str = datetime.fromtimestamp(ts_raw).strftime("%H:%M")
+                elif ts_raw:
+                    ts_str = str(ts_raw)[11:16]
+                else:
+                    ts_str = "--:--"
+
+                # Check if ICT trade vs Copier trade
+                comment = str(t.get("comment", "")).lower()
+                is_ict = "ict" in comment or ("ict" in asset_name.lower())
+
+                item = {
+                    "id": pos_id,
+                    "asset": asset_name,
+                    "side": side,
+                    "lots": lots,
+                    "open_price": open_px,
+                    "close_price": close_px,
+                    "pnl": pnl,
+                    "reason": reason,
+                    "is_win": pnl > 0,
+                    "is_be": pnl == 0,
+                    "time": ts_str
+                }
+                if is_ict:
+                    ict_trades.append(item)
+                else:
+                    cfd_copier_trades.append(item)
+        except Exception as e:
+            logger.warning(f"[History] Error fetching CFD history: {e}")
+
+        # Metrics calculation
+        all_count = len(blitz_trades) + len(cfd_copier_trades) + len(ict_trades)
+        total_pnl = sum(t["pnl"] for t in blitz_trades) + sum(t["pnl"] for t in cfd_copier_trades) + sum(t["pnl"] for t in ict_trades)
+        total_wins = sum(1 for t in blitz_trades if t["is_win"]) + sum(1 for t in cfd_copier_trades if t["is_win"]) + sum(1 for t in ict_trades if t["is_win"])
+        total_losses = sum(1 for t in blitz_trades if not t["is_win"] and not t["is_equal"]) + sum(1 for t in cfd_copier_trades if not t["is_win"] and not t["is_be"]) + sum(1 for t in ict_trades if not t["is_win"] and not t["is_be"])
+        overall_wr = (total_wins / max(1, total_wins + total_losses)) * 100.0 if (total_wins + total_losses) > 0 else 0.0
+
+        pnl_sign = "+" if total_pnl >= 0 else ""
+        pnl_icon = "🟢" if total_pnl >= 0 else "🔴"
+
+        # Build output message
+        header = (
+            f"📜 *Trading Execution & PnL History*\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"👤 *Account Mode*: `{self.account_type.upper()}`\n"
+            f"{pnl_icon} *Total Realized PnL*: `{pnl_sign}${total_pnl:.2f}`\n"
+            f"🎯 *Overall Win Rate*: `{overall_wr:.1f}%` ({total_wins}W - {total_losses}L)\n"
+            f"📊 *Total Closed Trades*: `{all_count}`\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        )
+
+        body = ""
+
+        # Section 1: Blitz Options (Polycarp VIP)
+        if category in ["all", "blitz"]:
+            b_cnt = len(blitz_trades)
+            b_wins = sum(1 for t in blitz_trades if t["is_win"])
+            b_losses = sum(1 for t in blitz_trades if not t["is_win"] and not t["is_equal"])
+            b_pnl = sum(t["pnl"] for t in blitz_trades)
+            b_wr = (b_wins / max(1, b_wins + b_losses)) * 100.0 if (b_wins + b_losses) > 0 else 0.0
+            b_sign = "+" if b_pnl >= 0 else ""
+
+            body += (
+                f"⚡ *Polycarp Blitz Options* (`{b_cnt}` Trades | `{b_sign}${b_pnl:.2f}` | `{b_wr:.0f}% WR`)\n"
+            )
+            if blitz_trades:
+                for t in blitz_trades[:6]:
+                    icon = "✅" if t["is_win"] else ("🛡️" if t["is_equal"] else "❌")
+                    p_sign = "+" if t["pnl"] >= 0 else ""
+                    body += f"  {icon} `{t['time']}` *{t['asset']}* {t['direction']} ➔ `{p_sign}${t['pnl']:.2f}`\n"
+            else:
+                body += "  _No recent Blitz trades found._\n"
+            body += "\n"
+
+        # Section 2: CFD Copiers (Callisto / Gold Pips)
+        if category in ["all", "cfd"]:
+            c_cnt = len(cfd_copier_trades)
+            c_wins = sum(1 for t in cfd_copier_trades if t["is_win"])
+            c_losses = sum(1 for t in cfd_copier_trades if not t["is_win"] and not t["is_be"])
+            c_pnl = sum(t["pnl"] for t in cfd_copier_trades)
+            c_wr = (c_wins / max(1, c_wins + c_losses)) * 100.0 if (c_wins + c_losses) > 0 else 0.0
+            c_sign = "+" if c_pnl >= 0 else ""
+
+            body += (
+                f"📈 *Forex & Gold CFD Copiers* (`{c_cnt}` Trades | `{c_sign}${c_pnl:.2f}` | `{c_wr:.0f}% WR`)\n"
+            )
+            if cfd_copier_trades:
+                for t in cfd_copier_trades[:6]:
+                    icon = "🏆" if t["is_win"] else ("🛡️" if t["is_be"] else "❌")
+                    p_sign = "+" if t["pnl"] >= 0 else ""
+                    body += f"  {icon} `{t['time']}` *{t['asset']}* {t['side']} ➔ `{p_sign}${t['pnl']:.2f}` ({t['reason']})\n"
+            else:
+                body += "  _No recent CFD copier trades found._\n"
+            body += "\n"
+
+        # Section 3: Autonomous ICT Engine
+        if category in ["all", "ict"]:
+            i_cnt = len(ict_trades)
+            i_wins = sum(1 for t in ict_trades if t["is_win"])
+            i_losses = sum(1 for t in ict_trades if not t["is_win"] and not t["is_be"])
+            i_pnl = sum(t["pnl"] for t in ict_trades)
+            i_wr = (i_wins / max(1, i_wins + i_losses)) * 100.0 if (i_wins + i_losses) > 0 else 0.0
+            i_sign = "+" if i_pnl >= 0 else ""
+
+            body += (
+                f"🤖 *Autonomous ICT Engine* (`{i_cnt}` Trades | `{i_sign}${i_pnl:.2f}` | `{i_wr:.0f}% WR`)\n"
+            )
+            if ict_trades:
+                for t in ict_trades[:6]:
+                    icon = "🏆" if t["is_win"] else ("🛡️" if t["is_be"] else "❌")
+                    p_sign = "+" if t["pnl"] >= 0 else ""
+                    body += f"  {icon} `{t['time']}` *{t['asset']}* {t['side']} ➔ `{p_sign}${t['pnl']:.2f}`\n"
+            else:
+                body += "  _No recent ICT autonomous trades found._\n"
+
+        return header + body
+
+    async def cmd_history(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.is_admin(update.effective_user.id):
+            return
+        cat = "all"
+        if context.args and context.args[0].lower() in ["blitz", "cfd", "ict", "all"]:
+            cat = context.args[0].lower()
+        msg = self.build_history_view(cat)
+        await update.message.reply_text(
+            msg,
+            parse_mode="Markdown",
+            reply_markup=history_menu_keyboard(cat)
+        )
 
     async def cmd_account(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.is_admin(update.effective_user.id):
@@ -317,6 +522,7 @@ class TelegramTradingBot:
             "• `/channels` - Toggle signal copier channels\n"
             "• `/settings` or `/risk` - Risk & order sizing menu\n"
             "• `/active` - Active zones, FVGs, and open trades\n"
+            "• `/history` - View categorized trade & PnL history\n"
             "• `/pause` / `/resume` - Master trading pause/resume\n"
             "• `/closeall` - Emergency close all open positions\n\n"
             "📊 *Sizing Commands:*\n"
@@ -347,6 +553,8 @@ class TelegramTradingBot:
             await self.cmd_settings(update, context)
         elif text in ["📋 Active Setups", "Active Setups", "Active", "📈 Active Trades"]:
             await self.cmd_active_trades(update, context)
+        elif text in ["📜 History", "History", "📋 History", "Trade History", "📊 Stats"]:
+            await self.cmd_history(update, context)
         elif text in ["⏸ Pause", "Pause"]:
             await self.cmd_pause(update, context)
         elif text in ["▶ Resume", "Resume"]:
@@ -471,6 +679,16 @@ class TelegramTradingBot:
             await query.edit_message_text(
                 "📡 *Channel Copiers Management*\nToggle signal monitoring for individual channels:",
                 reply_markup=channels_menu_keyboard(copiers),
+                parse_mode="Markdown"
+            )
+
+        # History Menu & Filtering
+        elif data.startswith("history_cat_"):
+            cat = data.replace("history_cat_", "")
+            txt = self.build_history_view(cat)
+            await query.edit_message_text(
+                txt,
+                reply_markup=history_menu_keyboard(cat),
                 parse_mode="Markdown"
             )
 
@@ -740,6 +958,8 @@ class TelegramTradingBot:
         self.app.add_handler(CommandHandler("set_account", self.cmd_account))
         self.app.add_handler(CommandHandler("pause", self.cmd_pause))
         self.app.add_handler(CommandHandler("resume", self.cmd_resume))
+        self.app.add_handler(CommandHandler("history", self.cmd_history))
+        self.app.add_handler(CommandHandler("stats", self.cmd_history))
         self.app.add_handler(CommandHandler("closeall", self.cmd_closeall))
         self.app.add_handler(CommandHandler("help", self.cmd_help))
         self.app.add_handler(CallbackQueryHandler(self.on_button_click))

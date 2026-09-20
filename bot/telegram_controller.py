@@ -231,35 +231,79 @@ class TelegramTradingBot:
             parse_mode="Markdown"
         )
 
+    def build_active_setups_view(self) -> str:
+        try:
+            # 1. Callisto Zones
+            c_copier = self.channel_mgr.get_copier("callistofx")
+            zones = getattr(c_copier, "active_zones", {}) if c_copier else {}
+            if zones:
+                zones_lines = [f"  • {s}: `{z['zone_low']:.2f} – {z['zone_high']:.2f}` (Target: {z.get('target', 'N/A')})" for s, z in zones.items()]
+                zones_txt = "\n".join(zones_lines)
+            else:
+                zones_txt = "  _No active zones currently watching._"
+
+            # 2. Polycarp Blitz Trades
+            p_copier = self.channel_mgr.get_copier("polycarpvip")
+            blitz_trades = getattr(p_copier, "open_trades", {}) if p_copier else {}
+            if blitz_trades:
+                b_lines = [f"  • #{pid}: {t.get('pair', 'OTC')} {str(t.get('direction', '')).upper()} (${t.get('amount', 2.0)})" for pid, t in blitz_trades.items()]
+                blitz_txt = "\n".join(b_lines)
+            else:
+                blitz_txt = "  _No active Blitz option trades._"
+
+            # 3. ICT Pending FVGs
+            ict_fvgs = getattr(self.ict_engine, "pending_fvgs", {})
+            active_fvgs = [f"  • {s}: {f['side']} `[{f['fvg_low']} – {f['fvg_high']}]` (SL: `{f['sl']}`)" for s, f in ict_fvgs.items() if f]
+            if active_fvgs:
+                fvg_txt = "\n".join(active_fvgs)
+            else:
+                fvg_txt = "  _No pending FVG retests waiting._"
+
+            # 4. ICT Active Positions
+            ict_trades = getattr(self.ict_engine, "active_trades", {})
+            active_pos = [f"  • {s}: {t['side']} @ `{t['entry_price']}` (SL: `{t['current_sl']}`, TP: `{t['tp']}`)" for s, t in ict_trades.items() if t]
+            if active_pos:
+                ict_trade_txt = "\n".join(active_pos)
+            else:
+                ict_trade_txt = "  _No active ICT positions currently running._"
+
+            # 5. Open CFD Positions on IQ Option
+            bid = self.get_active_balance_id()
+            open_cfd = []
+            if bid:
+                try:
+                    open_cfd = self.forex_mcp.list_positions(balance_id=bid) or []
+                except Exception:
+                    pass
+            
+            if open_cfd:
+                cfd_lines = [f"  • #{p.get('position_id') or p.get('id')}: Asset #{p.get('asset_id')} {str(p.get('side', '')).upper()} | PnL: `${float(p.get('pnl', 0.0)):.2f}`" for p in open_cfd]
+                cfd_txt = "\n".join(cfd_lines)
+            else:
+                cfd_txt = "  _No open Marginal CFD positions on broker._"
+
+            text = (
+                f"📋 *Active Watchers, Zones & Live Setups*\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"👤 *Account*: `{self.account_type.upper()}`\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"📍 *Callisto Active Zones*:\n{zones_txt}\n\n"
+                f"⚡ *Polycarp Blitz Trades*:\n{blitz_txt}\n\n"
+                f"🔥 *ICT Pending FVGs*:\n{fvg_txt}\n\n"
+                f"🎯 *ICT Active Setups*:\n{ict_trade_txt}\n\n"
+                f"💼 *Open Broker CFD Positions*:\n{cfd_txt}\n"
+                f"━━━━━━━━━━━━━━━━━━━━"
+            )
+            return text
+        except Exception as e:
+            logger.error(f"[ActiveSetups] Error building view: {e}")
+            return f"📋 *Active Watchers & Setups*\n\n_Error loading active setups: {e}_"
+
     async def cmd_active_trades(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.is_admin(update.effective_user.id):
             return
-        c_copier = self.channel_mgr.get_copier("callistofx")
-        zones_txt = "None"
-        if c_copier and getattr(c_copier, "active_zones", None):
-            zones_txt = "\n".join([f"  • {s}: `{z['zone_low']:.2f} – {z['zone_high']:.2f}` (Target: {z.get('target', 'N/A')})" for s, z in c_copier.active_zones.items()])
-
-        p_copier = self.channel_mgr.get_copier("polycarpvip")
-        blitz_open_cnt = len(getattr(p_copier, "open_trades", {}))
-
-        # ICT Setups & Trades across all assets
-        ict_fvgs = self.ict_engine.pending_fvgs
-        fvg_lines = [f"  • {s}: {f['side']} `[{f['fvg_low']} - {f['fvg_high']}]` (SL: {f['sl']})" for s, f in ict_fvgs.items() if f]
-        ict_fvg_txt = "\n".join(fvg_lines) if fvg_lines else "None"
-
-        ict_trades = self.ict_engine.active_trades
-        trade_lines = [f"  • {s}: {t['side']} @ `{t['entry_price']}` (SL: `{t['current_sl']}`, TP: `{t['tp']}`)" for s, t in ict_trades.items() if t]
-        ict_trade_txt = "\n".join(trade_lines) if trade_lines else "None"
-
-        text = (
-            f"📋 *Active Watchers, Zones & Setups*\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"📍 *Callisto Active Zones*:\n{zones_txt}\n\n"
-            f"⚡ *Polycarp Blitz Trades*: `{blitz_open_cnt}` active\n\n"
-            f"🔥 *ICT Pending FVGs*:\n{ict_fvg_txt}\n\n"
-            f"🎯 *ICT Active Positions*:\n{ict_trade_txt}\n"
-            f"━━━━━━━━━━━━━━━━━━━━"
-        )
+        text = self.build_active_setups_view()
+        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=persistent_reply_keyboard())
     def get_active_balance_id(self) -> Optional[int]:
         if self.ict_engine.balance_id:
             return self.ict_engine.balance_id
@@ -887,21 +931,7 @@ class TelegramTradingBot:
             )
 
         elif data == "btn_active_trades":
-            c_copier = self.channel_mgr.get_copier("callistofx")
-            zones_txt = "None"
-            if c_copier and getattr(c_copier, "active_zones", None):
-                zones_txt = ", ".join([f"{s} [{z['zone_low']} - {z['zone_high']}]" for s, z in c_copier.active_zones.items()])
-
-            ict_fvg = self.ict_engine.pending_fvg
-            ict_txt = f"{ict_fvg['side']} [{ict_fvg['fvg_low']} - {ict_fvg['fvg_high']}]" if ict_fvg else "None"
-
-            text = (
-                f"📋 *Active Watchers & Setups*\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"📍 *Callisto Active Zones*: {zones_txt}\n"
-                f"🔥 *ICT Pending FVG*: {ict_txt}\n"
-                f"⚡ *ICT Active Trade*: {'Active' if self.ict_engine.active_trade else 'None'}\n"
-            )
+            text = self.build_active_setups_view()
             await query.edit_message_text(text=text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
 
         elif data == "btn_close_all_confirm":

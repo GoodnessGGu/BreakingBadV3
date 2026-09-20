@@ -20,46 +20,66 @@ GOLD_ASSET_ID   = 74
 GOLD_INSTRUMENT = "mcfd.74"
 
 class GoldSignalParser:
+    REJECT_KEYWORDS = [
+        "performance", "weekly performance", "daily performance", "recap", "recaps",
+        "win rate", "pips won", "total pips", "market analysis", "giveaway",
+        "free capital", "happy sunday", "happy saturday", "be careful who you trust",
+        "scammers", "waiting for the", "session is coming", "double profit"
+    ]
+
     @staticmethod
     def parse_signal(text: str) -> Optional[Dict[str, Any]]:
         clean = text.lower()
+        
+        # 1. Noise / non-signal filter
+        if any(k in clean for k in GoldSignalParser.REJECT_KEYWORDS):
+            return None
+
         if not any(k in clean for k in ["gold", "xau", "xauusd"]):
             return None
 
+        # 2. Determine side (require explicit buy/sell action)
         side = None
-        if "buy" in clean or "long" in clean:
+        if re.search(r'(?:^|\b)(?:gold\s+|xauusd\s+|xau\s+)?(?:buy\s*now|buy\b|long\b)', clean):
             side = "BUY"
-        elif "sell" in clean or "short" in clean:
+        elif re.search(r'(?:^|\b)(?:gold\s+|xauusd\s+|xau\s+)?(?:sell\s*now|sell\b|short\b)', clean):
             side = "SELL"
         if not side:
             return None
 
-        sl_m  = re.search(r"(?:sl|stop\s*loss)[\s:]*([0-9]+(?:\.[0-9]+)?)", clean)
-        tp1_m = re.search(r"(?:tp1|take\s*profit\s*1?)[\s:]*([0-9]+(?:\.[0-9]+)?)", clean)
-        tp2_m = re.search(r"(?:tp2|take\s*profit\s*2)[\s:]*([0-9]+(?:\.[0-9]+)?)", clean)
-        tp3_m = re.search(r"(?:tp3|take\s*profit\s*3)[\s:]*([0-9]+(?:\.[0-9]+)?)", clean)
-        tp_g  = re.search(r"(?:tp|take\s*profit)[\s:]*([0-9]+(?:\.[0-9]+)?)", clean)
-        ent_m = re.search(r"(?:@|at|entry)[\s:]*([0-9]+(?:\.[0-9]+)?)(?:\s*-\s*([0-9]+(?:\.[0-9]+)?))?", clean)
+        # 3. Stop Loss / Cut Loss (mandatory for execution safety)
+        sl_m = re.search(r'(?:cut\s*loss|cutloss|stop\s*loss|\bsl\b)[^\d\n\r]*([0-9]+(?:\.[0-9]+)?)', clean)
+        if not sl_m:
+            return None
+        sl = float(sl_m.group(1))
 
-        sl   = float(sl_m.group(1))  if sl_m  else None
-        tp1  = float(tp1_m.group(1)) if tp1_m else (float(tp_g.group(1)) if tp_g else None)
-        tp2  = float(tp2_m.group(1)) if tp2_m else None
-        tp3  = float(tp3_m.group(1)) if tp3_m else None
-        emin = float(ent_m.group(1)) if ent_m else None
-        emax = float(ent_m.group(2)) if (ent_m and ent_m.group(2)) else emin
+        # 4. Entry Zone / Range (mandatory to avoid entering on random teaser comments)
+        ent_m = re.search(r'(?:entry\s*zone|entryzone|entry|@|at)[^\d\n\r]*([0-9]+(?:\.[0-9]+)?)(?:\s*[-–—/]\s*([0-9]+(?:\.[0-9]+)?))?', clean)
+        if not ent_m:
+            return None
+        emin = float(ent_m.group(1))
+        emax = float(ent_m.group(2)) if ent_m.group(2) else emin
+
+        # 5. Take Profit levels (support multiple Take Profit lines with emojis)
+        tp_matches = re.findall(r'(?:take\s*profit|tp\s*[123]?)[^\d\n\r]*([0-9]+(?:\.[0-9]+)?)', clean)
+        tps = [float(x) for x in tp_matches] if tp_matches else []
+        tp1 = tps[0] if len(tps) > 0 else None
+        tp2 = tps[1] if len(tps) > 1 else None
+        tp3 = tps[2] if len(tps) > 2 else None
 
         return {
             "type": "SIGNAL", "side": side, "sl": sl,
             "tp1": tp1, "tp2": tp2, "tp3": tp3,
-            "entry_min": emin, "entry_max": emax, "raw": text
+            "entry_min": min(emin, emax), "entry_max": max(emin, emax), "raw": text
         }
 
     @staticmethod
     def parse_instruction(text: str) -> Optional[Dict[str, Any]]:
         clean = text.lower()
-        if any(k in clean for k in ["breakeven", "break even", "move sl to entry", "sl to be", "secure profit"]):
+        # Milestone template gives a choice (Close all vs Breakeven); prioritize Breakeven to let winning positions run risk-free
+        if any(k in clean for k in ["breakeven", "break even", "move sl to entry", "sl to be", "secure profit", "hold the positions with breakeven"]):
             return {"type": "BREAKEVEN"}
-        if any(k in clean for k in ["close all", "close positions", "close gold", "exit all"]):
+        if any(k in clean for k in ["close all", "close positions", "close gold", "exit all", "close out this trading week"]):
             return {"type": "CLOSE_ALL"}
         return None
 

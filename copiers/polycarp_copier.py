@@ -104,7 +104,7 @@ class PolycarpSignalParser:
 class PolycarpCopier(BaseCopier):
     def __init__(self, blitz_mcp: IQBlitzMCPClient, channel_id: int = -1002551711564,
                  stake_amount: float = 2.0, max_gales: int = 2,
-                 martingale_multiplier: float = 2.2, enabled: bool = True):
+                 martingale_multiplier: float = 2.2, enabled: bool = False):
         super().__init__("PolycarpVIP", channel_id, enabled)
         self.blitz = blitz_mcp
         self.stake_amount = stake_amount

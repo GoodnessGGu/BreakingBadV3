@@ -58,54 +58,53 @@ GOLD_INSTRUMENT_ID = "mcfd.74"
 class GoldSignalParser:
     """Parses trade signals and management instructions from Gold Pips Hunter."""
 
+    REJECT_KEYWORDS = [
+        "performance", "weekly performance", "daily performance", "recap", "recaps",
+        "win rate", "pips won", "total pips", "market analysis", "giveaway",
+        "free capital", "happy sunday", "happy saturday", "be careful who you trust",
+        "scammers", "waiting for the", "session is coming", "double profit"
+    ]
+
     @staticmethod
     def parse_signal(text: str) -> Optional[Dict[str, Any]]:
-        """
-        Parses signals matching:
-        🟢 Gold Buy Now @ 4394-4390
-        SL: 4382
-        TP1: 4397
-        TP2: 4400
-        TP3: 4403
-        """
         clean = text.lower()
+        
+        # 1. Noise / non-signal filter
+        if any(k in clean for k in GoldSignalParser.REJECT_KEYWORDS):
+            return None
+
         if not any(k in clean for k in ["gold", "xau", "xauusd"]):
             return None
 
-        # Determine side
+        # 2. Determine side
         side = None
-        if "buy" in clean or "long" in clean:
+        if re.search(r'(?:^|\b)(?:gold\s+|xauusd\s+|xau\s+)?(?:buy\s*now|buy\b|long\b)', clean):
             side = "BUY"
-        elif "sell" in clean or "short" in clean:
+        elif re.search(r'(?:^|\b)(?:gold\s+|xauusd\s+|xau\s+)?(?:sell\s*now|sell\b|short\b)', clean):
             side = "SELL"
 
         if not side:
             return None
 
-        # Stop Loss
-        sl_match = re.search(r'(?:sl|stop\s*loss)[:\s]*([0-9]+(?:\.[0-9]+)?)', clean)
-        sl = float(sl_match.group(1)) if sl_match else None
+        # 3. Stop Loss / Cut Loss (mandatory)
+        sl_match = re.search(r'(?:cut\s*loss|cutloss|stop\s*loss|\bsl\b)[^\d\n\r]*([0-9]+(?:\.[0-9]+)?)', clean)
+        if not sl_match:
+            return None
+        sl = float(sl_match.group(1))
 
-        # Take Profit levels
-        tp1_match = re.search(r'(?:tp1|take\s*profit\s*1?)[:\s]*([0-9]+(?:\.[0-9]+)?)', clean)
-        tp1 = float(tp1_match.group(1)) if tp1_match else None
+        # 4. Entry Range (mandatory)
+        entry_match = re.search(r'(?:entry\s*zone|entryzone|entry|@|at)[^\d\n\r]*([0-9]+(?:\.[0-9]+)?)(?:\s*[-–—/]\s*([0-9]+(?:\.[0-9]+)?))?', clean)
+        if not entry_match:
+            return None
+        entry_min = float(entry_match.group(1))
+        entry_max = float(entry_match.group(2)) if entry_match.group(2) else entry_min
 
-        tp2_match = re.search(r'(?:tp2|take\s*profit\s*2)[:\s]*([0-9]+(?:\.[0-9]+)?)', clean)
-        tp2 = float(tp2_match.group(1)) if tp2_match else None
-
-        tp3_match = re.search(r'(?:tp3|take\s*profit\s*3)[:\s]*([0-9]+(?:\.[0-9]+)?)', clean)
-        tp3 = float(tp3_match.group(1)) if tp3_match else None
-
-        # Generic TP fallback if TP1 wasn't specified
-        if not tp1:
-            tp_gen = re.search(r'(?:tp|take\s*profit)[:\s]*([0-9]+(?:\.[0-9]+)?)', clean)
-            if tp_gen:
-                tp1 = float(tp_gen.group(1))
-
-        # Entry Range
-        entry_match = re.search(r'(?:@|at|entry)[:\s]*([0-9]+(?:\.[0-9]+)?)(?:\s*-\s*([0-9]+(?:\.[0-9]+)?))?', clean)
-        entry_min = float(entry_match.group(1)) if entry_match and entry_match.group(1) else None
-        entry_max = float(entry_match.group(2)) if entry_match and entry_match.group(2) else entry_min
+        # 5. Take Profit levels (supporting multiple emojis/lines)
+        tp_matches = re.findall(r'(?:take\s*profit|tp\s*[123]?)[^\d\n\r]*([0-9]+(?:\.[0-9]+)?)', clean)
+        tps = [float(x) for x in tp_matches] if tp_matches else []
+        tp1 = tps[0] if len(tps) > 0 else None
+        tp2 = tps[1] if len(tps) > 1 else None
+        tp3 = tps[2] if len(tps) > 2 else None
 
         return {
             "type": "NEW_SIGNAL",
@@ -115,22 +114,17 @@ class GoldSignalParser:
             "tp1": tp1,
             "tp2": tp2,
             "tp3": tp3,
-            "entry_min": entry_min,
-            "entry_max": entry_max,
+            "entry_min": min(entry_min, entry_max),
+            "entry_max": max(entry_min, entry_max),
             "raw_text": text
         }
 
     @staticmethod
     def parse_instruction(text: str) -> Optional[Dict[str, str]]:
-        """
-        Parses mid-trade updates:
-        - 'Hold the positions with breakeven' / 'Move SL to BE'
-        - 'Close all positions' / 'Close Gold'
-        """
         clean = text.lower()
-        if any(k in clean for k in ["breakeven", "break even", "move sl to entry", "sl to be"]):
+        if any(k in clean for k in ["breakeven", "break even", "move sl to entry", "sl to be", "secure profit", "hold the positions with breakeven"]):
             return {"type": "BREAKEVEN", "raw_text": text}
-        if any(k in clean for k in ["close all", "close positions", "close gold", "exit all"]):
+        if any(k in clean for k in ["close all", "close positions", "close gold", "exit all", "close out this trading week"]):
             return {"type": "CLOSE_ALL", "raw_text": text}
         return None
 

@@ -47,6 +47,7 @@ async def main():
     parser.add_argument("--lots", type=float, default=float(os.getenv("DEFAULT_LOTS", "1.0")))
     parser.add_argument("--leverage", type=int, default=int(os.getenv("DEFAULT_LEVERAGE", "100")))
     parser.add_argument("--blitz-stake", type=float, default=float(os.getenv("BLITZ_STAKE", "2.0")))
+    parser.add_argument("--enable-polycarp", action="store_true", default=os.getenv("ENABLE_POLYCARP", "false").lower() == "true")
     parser.add_argument("--ict-symbol", default=os.getenv("ICT_SYMBOL", "XAUUSD"))
     parser.add_argument("--lookback-mins", type=int, default=int(os.getenv("LOOKBACK_MINS", "10")))
     args = parser.parse_args()
@@ -102,7 +103,8 @@ async def main():
     polycarp = PolycarpCopier(
         blitz_mcp=blitz_mcp,
         channel_id=-1002551711564,
-        stake_amount=args.blitz_stake
+        stake_amount=args.blitz_stake,
+        enabled=args.enable_polycarp
     )
     polycarp.set_balance(blitz_bid, args.account)
 

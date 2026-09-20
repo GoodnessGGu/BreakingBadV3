@@ -202,17 +202,34 @@ class ICTStrategyEngine:
         profile = INSTRUMENT_PROFILES.get(symbol)
         if not profile:
             return {"buy": 0.0, "sell": 0.0, "mid": 0.0}
+
+        # 1. Try calculate_order_size with asset-clamped leverage
+        lev = min(self.leverage, 20 if symbol == "BTCUSD" else self.leverage)
         try:
             p = self.mcp.calculate_order_size(
                 asset_id=profile["asset_id"], balance_currency="USD",
-                lots=self.lots, leverage=self.leverage
+                lots=self.lots, leverage=lev
             )
-            buy = float(p.get("buy_price", 0.0))
-            sell = float(p.get("sell_price", 0.0))
-            return {"buy": buy, "sell": sell, "mid": (buy + sell) / 2}
+            if isinstance(p, dict) and "buy_price" in p and "sell_price" in p:
+                buy = float(p.get("buy_price", 0.0))
+                sell = float(p.get("sell_price", 0.0))
+                if buy > 0 and sell > 0:
+                    return {"buy": buy, "sell": sell, "mid": (buy + sell) / 2}
+        except Exception:
+            pass
+
+        # 2. Resilient fallback to latest 1-min candle price
+        try:
+            candles = self.mcp.get_candles(asset_id=profile["asset_id"], size=60, count=2)
+            if candles and len(candles) > 0:
+                last_c = candles[-1]
+                px = float(last_c.get("close", last_c.get("c", 0.0)))
+                if px > 0:
+                    return {"buy": px, "sell": px, "mid": px}
         except Exception as e:
-            logger.warning(f"[ICTEngine] Price fetch error for {symbol}: {e}")
-            return {"buy": 0.0, "sell": 0.0, "mid": 0.0}
+            logger.debug(f"[ICTEngine] Price fallback error for {symbol}: {e}")
+
+        return {"buy": 0.0, "sell": 0.0, "mid": 0.0}
 
     def fetch_recent_candles(self, symbol: str, count: int = 50) -> Optional[pd.DataFrame]:
         profile = INSTRUMENT_PROFILES.get(symbol)
@@ -370,13 +387,14 @@ class ICTStrategyEngine:
                 f"Lots  : {self.lots}"
             )
 
+            trade_lev = min(self.leverage, 20 if symbol == "BTCUSD" else self.leverage)
             res = self.mcp.place_market_order(
                 side=side.lower(),
                 balance_id=self.balance_id,
                 instrument_id=profile["instrument_id"],
                 asset_id=profile["asset_id"],
                 lots=self.lots,
-                leverage=self.leverage,
+                leverage=trade_lev,
                 stop_loss=sl,
                 take_profit=tp,
                 is_margin_isolated=True,

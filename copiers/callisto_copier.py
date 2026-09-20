@@ -94,16 +94,26 @@ class CallistoCopier(BaseCopier):
 
     def get_market_price(self) -> Dict[str, float]:
         try:
+            candles = self.mcp.get_candles(asset_id=GOLD_ASSET_ID, size=60, count=2)
+            if candles and len(candles) > 0:
+                px = float(candles[-1].get("close", 0.0))
+                if px > 0:
+                    return {"buy": px, "sell": px, "mid": px}
+        except Exception:
+            pass
+
+        try:
             p = self.mcp.calculate_order_size(
                 asset_id=GOLD_ASSET_ID, balance_currency="USD",
                 lots=self.lots, leverage=self.leverage
             )
-            buy = float(p.get("buy_price", 0.0))
-            sell = float(p.get("sell_price", 0.0))
-            return {"buy": buy, "sell": sell, "mid": (buy + sell) / 2}
-        except Exception as e:
-            logger.warning(f"[Callisto] Price fetch error: {e}")
-            return {"buy": 0.0, "sell": 0.0, "mid": 0.0}
+            if isinstance(p, dict) and "buy_price" in p:
+                buy = float(p.get("buy_price", 0.0))
+                sell = float(p.get("sell_price", 0.0))
+                return {"buy": buy, "sell": sell, "mid": (buy + sell) / 2}
+        except Exception:
+            pass
+        return {"buy": 0.0, "sell": 0.0, "mid": 0.0}
 
     def check_confirmation(self, side: str) -> Optional[Dict[str, Any]]:
         zone = self.active_zones.get(side)

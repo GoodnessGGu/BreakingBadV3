@@ -131,8 +131,8 @@ class TelegramTradingBot:
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"📡 *Signal Copiers*:\n" + "\n".join(copier_lines) + "\n\n"
             f"🤖 *Autonomous ICT Engine*:\n"
-            f"  {ict_icon} Status: `{'ON' if ict_st['enabled'] else 'OFF'}`\n"
-            f"  🎯 Instrument: `{ict_st['symbol']}` ({ict_st['name']})\n"
+            f"  {ict_icon} Master Switch: `{'ON' if ict_st['enabled'] else 'OFF'}`\n"
+            f"  🎯 Active Assets: `{', '.join(ict_st['enabled_symbols']) if ict_st['enabled_symbols'] else 'None'}`\n"
             f"  📊 Lots: `{ict_st['lots']:.2f}` | Lev: `{ict_st['leverage']}x`\n"
             f"  ⚖️ Risk/Reward: `1:{ict_st['rr_ratio']:.1f}`\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -242,18 +242,22 @@ class TelegramTradingBot:
         p_copier = self.channel_mgr.get_copier("polycarpvip")
         blitz_open_cnt = len(getattr(p_copier, "open_trades", {}))
 
-        ict_fvg = self.ict_engine.pending_fvg
-        ict_txt = f"{ict_fvg['side']} [{ict_fvg['fvg_low']:.2f} - {ict_fvg['fvg_high']:.2f}] (SL: {ict_fvg['sl']:.2f})" if ict_fvg else "None"
-        ict_trade = self.ict_engine.active_trade
-        trade_txt = f"{ict_trade['side']} @ {ict_trade['entry_price']:.2f} (SL: {ict_trade['current_sl']:.2f}, TP: {ict_trade['tp']:.2f})" if ict_trade else "None"
+        # ICT Setups & Trades across all assets
+        ict_fvgs = self.ict_engine.pending_fvgs
+        fvg_lines = [f"  • {s}: {f['side']} `[{f['fvg_low']} - {f['fvg_high']}]` (SL: {f['sl']})" for s, f in ict_fvgs.items() if f]
+        ict_fvg_txt = "\n".join(fvg_lines) if fvg_lines else "None"
+
+        ict_trades = self.ict_engine.active_trades
+        trade_lines = [f"  • {s}: {t['side']} @ `{t['entry_price']}` (SL: `{t['current_sl']}`, TP: `{t['tp']}`)" for s, t in ict_trades.items() if t]
+        ict_trade_txt = "\n".join(trade_lines) if trade_lines else "None"
 
         text = (
             f"📋 *Active Watchers, Zones & Setups*\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"📍 *Callisto Active Zones*:\n{zones_txt}\n\n"
             f"⚡ *Polycarp Blitz Trades*: `{blitz_open_cnt}` active\n\n"
-            f"🔥 *ICT Pending FVG*: `{ict_txt}`\n"
-            f"🎯 *ICT Active Position*: `{trade_txt}`\n"
+            f"🔥 *ICT Pending FVGs*:\n{ict_fvg_txt}\n\n"
+            f"🎯 *ICT Active Positions*:\n{ict_trade_txt}\n"
             f"━━━━━━━━━━━━━━━━━━━━"
         )
         await update.message.reply_text(text, parse_mode="Markdown", reply_markup=persistent_reply_keyboard())
@@ -488,12 +492,12 @@ class TelegramTradingBot:
                 parse_mode="Markdown"
             )
 
-        elif data.startswith("set_inst_"):
-            symbol = data.replace("set_inst_", "").upper()
-            self.ict_engine.set_instrument(symbol)
+        elif data.startswith("toggle_inst_") or data.startswith("set_inst_"):
+            sym_raw = data.replace("toggle_inst_", "").replace("set_inst_", "").upper()
+            self.ict_engine.toggle_symbol(sym_raw)
             ict_st = self.ict_engine.get_status()
             await query.edit_message_text(
-                f"🤖 Active instrument set to: *{ict_st['symbol']}* ({ict_st['name']})",
+                "🤖 *Autonomous Multi-Asset ICT Strategy Engine*\nToggle assets ON/OFF or adjust execution settings:",
                 reply_markup=ict_menu_keyboard(ict_st),
                 parse_mode="Markdown"
             )

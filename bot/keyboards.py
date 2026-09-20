@@ -48,29 +48,33 @@ def ict_menu_keyboard(ict_status: Dict[str, Any]) -> InlineKeyboardMarkup:
     enabled = ict_status.get("enabled", False)
     icon = "🟢" if enabled else "🔴"
     status_txt = "ON" if enabled else "OFF"
-    cur_sym = ict_status.get("symbol", "XAUUSD")
-    cur_rr = ict_status.get("rr_ratio", 2.0)
+    active_syms = set(ict_status.get("enabled_symbols", []))
+    cur_rr = ict_status.get("rr_ratio", 2.2)
     cur_lots = ict_status.get("lots", 1.0)
     cur_lev = ict_status.get("leverage", 100)
+
+    # Dynamic status icon helper
+    def s_icon(sym: str) -> str:
+        return "🟢" if sym in active_syms else "⚪"
 
     keyboard = [
         [
             InlineKeyboardButton(
-                f"{icon} ICT Engine: {status_txt}",
+                f"{icon} ICT Master Switch: {status_txt}",
                 callback_data="toggle_ict_engine"
             )
         ],
         [
-            InlineKeyboardButton(f"{'🎯 ' if cur_sym == 'XAUUSD' else ''}Gold (XAU)", callback_data="set_inst_xauusd"),
-            InlineKeyboardButton(f"{'🎯 ' if cur_sym == 'BTCUSD' else ''}Bitcoin (BTC)", callback_data="set_inst_btcusd")
+            InlineKeyboardButton(f"{s_icon('XAUUSD')} Gold (XAU)", callback_data="toggle_inst_xauusd"),
+            InlineKeyboardButton(f"{s_icon('BTCUSD')} Bitcoin (BTC)", callback_data="toggle_inst_btcusd")
         ],
         [
-            InlineKeyboardButton(f"{'🎯 ' if cur_sym == 'EURUSD' else ''}EUR/USD", callback_data="set_inst_eurusd"),
-            InlineKeyboardButton(f"{'🎯 ' if cur_sym == 'GBPUSD' else ''}GBP/USD", callback_data="set_inst_gbpusd"),
-            InlineKeyboardButton(f"{'🎯 ' if cur_sym == 'USDJPY' else ''}USD/JPY", callback_data="set_inst_usdjpy")
+            InlineKeyboardButton(f"{s_icon('EURUSD')} EUR/USD", callback_data="toggle_inst_eurusd"),
+            InlineKeyboardButton(f"{s_icon('GBPUSD')} GBP/USD", callback_data="toggle_inst_gbpusd"),
+            InlineKeyboardButton(f"{s_icon('USDJPY')} USD/JPY", callback_data="toggle_inst_usdjpy")
         ],
         [
-            InlineKeyboardButton(f"{'🎯 ' if cur_sym == 'AUDUSD' else ''}AUD/USD", callback_data="set_inst_audusd")
+            InlineKeyboardButton(f"{s_icon('AUDUSD')} AUD/USD", callback_data="toggle_inst_audusd")
         ],
         [
             InlineKeyboardButton(f"📊 Lot Size: {cur_lots:.2f}", callback_data="noop_ict_lots")
@@ -95,6 +99,7 @@ def ict_menu_keyboard(ict_status: Dict[str, Any]) -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton(f"{'✅ ' if cur_rr == 1.5 else ''}1:1.5 RR", callback_data="set_rr_1.5"),
             InlineKeyboardButton(f"{'✅ ' if cur_rr == 2.0 else ''}1:2.0 RR", callback_data="set_rr_2.0"),
+            InlineKeyboardButton(f"{'✅ ' if cur_rr == 2.2 else ''}1:2.2 RR", callback_data="set_rr_2.2"),
             InlineKeyboardButton(f"{'✅ ' if cur_rr == 3.0 else ''}1:3.0 RR", callback_data="set_rr_3.0")
         ],
         [

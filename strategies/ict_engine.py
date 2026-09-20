@@ -1,21 +1,22 @@
 """
-strategies/ict_engine.py - Multi-Instrument Autonomous ICT / SMC Strategy Engine
+strategies/ict_engine.py - Concurrent Multi-Asset Autonomous ICT / SMC Strategy Engine
 
-Trades Gold (XAUUSD) or selected Forex pairs on IQ Option Marginal CFD engine.
+Trades Gold (XAUUSD), Bitcoin (BTCUSD), and Forex pairs simultaneously on IQ Option Marginal CFD engine.
 Strategy:
-  1. 15M Candlestick Orderflow & Liquidity Sweeps.
-  2. Displacement + Fair Value Gap (FVG) creation.
-  3. Dynamic Entry Zone on FVG retest.
-  4. Auto-Breakeven at 1.0R profit.
-  5. 1:2.0 Risk-to-Reward Ratio with tight SL at the sweep extreme.
-  6. Live Google Sheets logging to "Forex_Margin_Trades".
+  1. 15M Candlestick Orderflow & Liquidity Sweeps per active asset.
+  2. Change in State of Delivery (CISD) Confirmation.
+  3. Displacement + Fair Value Gap (FVG) creation.
+  4. Dynamic Entry Zone on FVG retest.
+  5. Auto-Breakeven at 1.0R profit.
+  6. Calibrated Risk-to-Reward Ratio (1:2.0 / 1:2.2 / 1:2.5).
+  7. Live Google Sheets logging to "Forex_Margin_Trades".
 """
 
 import time
 import logging
 import asyncio
 from datetime import datetime
-from typing import Dict, Any, Optional, List, Callable
+from typing import Dict, Any, Optional, List, Set, Callable
 import pandas as pd
 from clients.forex_mcp_client import IQForexMCPClient
 from gsheet_logger import gsheet_logger
@@ -100,9 +101,9 @@ INSTRUMENT_PROFILES = {
 }
 
 class ICTStrategyEngine:
-    def __init__(self, mcp_client: IQForexMCPClient, symbol: str = "XAUUSD",
+    def __init__(self, mcp_client: IQForexMCPClient, symbol: Optional[str] = None,
                  account_type: str = "training", lots: float = 1.0,
-                 leverage: int = 100, rr_ratio: float = 2.5, enabled: bool = True):
+                 leverage: int = 100, rr_ratio: float = 2.2, enabled: bool = True):
         self.mcp = mcp_client
         self.account_type = account_type.lower()
         self.lots = lots
@@ -110,13 +111,32 @@ class ICTStrategyEngine:
         self.rr_ratio = rr_ratio
         self.is_enabled = enabled
 
+        # Multi-asset state: Defaults to Gold + Bitcoin active
+        self.enabled_symbols: Set[str] = {"XAUUSD", "BTCUSD"}
+        if symbol:
+            sym_clean = symbol.upper().replace("/", "").replace("-", "")
+            if sym_clean in INSTRUMENT_PROFILES:
+                self.enabled_symbols.add(sym_clean)
+        self.pending_fvgs: Dict[str, Optional[Dict[str, Any]]] = {}
+        self.active_trades: Dict[str, Optional[Dict[str, Any]]] = {}
+        
         self.balance_id: Optional[int] = None
-        self.active_trade: Optional[Dict[str, Any]] = None
-        self.pending_fvg: Optional[Dict[str, Any]] = None
         self.notify_cb: Optional[Callable] = None
         self.is_running = False
 
-        self.set_instrument(symbol)
+    @property
+    def pending_fvg(self) -> Optional[Dict[str, Any]]:
+        for s, f in self.pending_fvgs.items():
+            if f:
+                return f
+        return None
+
+    @property
+    def active_trade(self) -> Optional[Dict[str, Any]]:
+        for s, t in self.active_trades.items():
+            if t:
+                return t
+        return None
 
     def set_notification_callback(self, cb: Callable):
         self.notify_cb = cb
@@ -128,23 +148,30 @@ class ICTStrategyEngine:
             except Exception as e:
                 logger.warning(f"[ICTEngine] Notification error: {e}")
 
-    def set_instrument(self, symbol: str) -> bool:
+    def toggle_symbol(self, symbol: str) -> bool:
         sym = symbol.upper().replace("/", "").replace("-", "")
-        if sym in INSTRUMENT_PROFILES:
-            self.profile = INSTRUMENT_PROFILES[sym]
-            self.symbol = sym
-            self.asset_id = self.profile["asset_id"]
-            self.instrument_id = self.profile["instrument_id"]
-            self.sl_buffer = self.profile["sl_buffer"]
-            self.disp_threshold = self.profile["disp_threshold"]
-            self.min_fvg_gap = self.profile["min_fvg_gap"]
-            self.body_ratio_req = self.profile.get("body_ratio_req", 0.50)
-            self.digits = self.profile["digits"]
-            self.pending_fvg = None
-            logger.info(f"🎯 [ICTEngine] Switched instrument to {self.profile['name']} (ID: {self.asset_id})")
+        if sym == "BTC":
+            sym = "BTCUSD"
+        if sym == "GOLD" or sym == "XAU":
+            sym = "XAUUSD"
+
+        if sym not in INSTRUMENT_PROFILES:
+            logger.warning(f"⚠️ Unknown instrument: {symbol}")
+            return False
+
+        if sym in self.enabled_symbols:
+            self.enabled_symbols.remove(sym)
+            self.pending_fvgs.pop(sym, None)
+            logger.info(f"🔴 [ICTEngine] Disabled asset: {sym}")
+            return False
+        else:
+            self.enabled_symbols.add(sym)
+            logger.info(f"🟢 [ICTEngine] Enabled asset: {sym}")
             return True
-        logger.warning(f"⚠️ Unknown instrument: {symbol}")
-        return False
+
+    def set_instrument(self, symbol: str) -> bool:
+        """Helper to toggle or ensure an instrument is active."""
+        return self.toggle_symbol(symbol)
 
     def set_balance(self, balance_id: int, account_type: str = "training"):
         self.balance_id = balance_id
@@ -160,33 +187,39 @@ class ICTStrategyEngine:
 
     def enable(self):
         self.is_enabled = True
-        logger.info("🟢 [ICTEngine] Enabled")
+        logger.info("🟢 [ICTEngine] Master switch Enabled")
 
     def disable(self):
         self.is_enabled = False
-        logger.info("🔴 [ICTEngine] Disabled")
+        logger.info("🔴 [ICTEngine] Master switch Disabled")
 
     def toggle(self) -> bool:
         self.is_enabled = not self.is_enabled
         logger.info(f"🔄 [ICTEngine] Toggled -> {'ENABLED' if self.is_enabled else 'DISABLED'}")
         return self.is_enabled
 
-    def get_market_price(self) -> Dict[str, float]:
+    def get_market_price(self, symbol: str) -> Dict[str, float]:
+        profile = INSTRUMENT_PROFILES.get(symbol)
+        if not profile:
+            return {"buy": 0.0, "sell": 0.0, "mid": 0.0}
         try:
             p = self.mcp.calculate_order_size(
-                asset_id=self.asset_id, balance_currency="USD",
+                asset_id=profile["asset_id"], balance_currency="USD",
                 lots=self.lots, leverage=self.leverage
             )
             buy = float(p.get("buy_price", 0.0))
             sell = float(p.get("sell_price", 0.0))
             return {"buy": buy, "sell": sell, "mid": (buy + sell) / 2}
         except Exception as e:
-            logger.warning(f"[ICTEngine] Price fetch error: {e}")
+            logger.warning(f"[ICTEngine] Price fetch error for {symbol}: {e}")
             return {"buy": 0.0, "sell": 0.0, "mid": 0.0}
 
-    def fetch_recent_candles(self, count: int = 50) -> Optional[pd.DataFrame]:
+    def fetch_recent_candles(self, symbol: str, count: int = 50) -> Optional[pd.DataFrame]:
+        profile = INSTRUMENT_PROFILES.get(symbol)
+        if not profile:
+            return None
         try:
-            candles = self.mcp.get_candles(asset_id=self.asset_id, size=CANDLE_SIZE, count=count)
+            candles = self.mcp.get_candles(asset_id=profile["asset_id"], size=CANDLE_SIZE, count=count)
             if not candles or len(candles) < 15:
                 return None
             df = pd.DataFrame(candles)
@@ -195,12 +228,19 @@ class ICTStrategyEngine:
                 df[col] = df[col].astype(float)
             return df
         except Exception as e:
-            logger.error(f"[ICTEngine] Error fetching candles: {e}")
+            logger.error(f"[ICTEngine] Error fetching candles for {symbol}: {e}")
             return None
 
-    async def scan_for_setups(self, df: pd.DataFrame):
-        if not self.is_enabled or self.active_trade or self.pending_fvg:
+    async def scan_for_setups(self, symbol: str, df: pd.DataFrame):
+        if not self.is_enabled or self.active_trades.get(symbol) or self.pending_fvgs.get(symbol):
             return
+
+        profile = INSTRUMENT_PROFILES[symbol]
+        sl_buffer = profile["sl_buffer"]
+        disp_threshold = profile["disp_threshold"]
+        min_fvg_gap = profile["min_fvg_gap"]
+        body_ratio_req = profile.get("body_ratio_req", 0.50)
+        digits = profile["digits"]
 
         highs = df['High'].values
         lows = df['Low'].values
@@ -213,11 +253,11 @@ class ICTStrategyEngine:
         # 1. Bearish Liquidity Sweep (High swept + CISD + Bearish FVG + Solid Displacement)
         swept_h = (highs[-3] > recent_high and closes[-3] < recent_high) or \
                   (highs[-2] > recent_high and closes[-2] < recent_high)
-        has_bearish_fvg = lows[-3] > (highs[-1] + self.min_fvg_gap)
+        has_bearish_fvg = lows[-3] > (highs[-1] + min_fvg_gap)
         disp_range_down = highs[-2] - lows[-2]
         disp_body_down = abs(closes[-2] - opens[-2])
-        disp_down = closes[-2] < opens[-2] and disp_range_down > self.disp_threshold
-        body_ok_down = (disp_body_down / max(0.0001, disp_range_down)) >= self.body_ratio_req
+        disp_down = closes[-2] < opens[-2] and disp_range_down > disp_threshold
+        body_ok_down = (disp_body_down / max(0.0001, disp_range_down)) >= body_ratio_req
 
         # Explicit ICT CISD: Displacement closes below the Open of the high-forming candle
         sweep_open_h = opens[-3] if highs[-3] >= highs[-2] else opens[-2]
@@ -225,24 +265,25 @@ class ICTStrategyEngine:
 
         if swept_h and has_bearish_fvg and disp_down and body_ok_down and cisd_down:
             sweep_peak = max(highs[-3], highs[-2])
-            sl = round(sweep_peak + self.sl_buffer, self.digits)
-            fvg_h = round(lows[-3], self.digits)
-            fvg_l = round(highs[-1], self.digits)
+            sl = round(sweep_peak + sl_buffer, digits)
+            fvg_h = round(lows[-3], digits)
+            fvg_l = round(highs[-1], digits)
 
             logger.info("=" * 60)
-            logger.info(f"🔥 [ICT CISD SETUP DETECTED] {self.symbol} Bearish Sweep at {sweep_peak} | CISD Open: {sweep_open_h:.2f}!")
+            logger.info(f"🔥 [ICT CISD SETUP DETECTED] {symbol} Bearish Sweep at {sweep_peak} | CISD Open: {sweep_open_h}!")
             logger.info(f"   Bearish FVG Zone : {fvg_l} - {fvg_h} | SL: {sl}")
             logger.info("=" * 60)
 
             await self.notify(
-                f"🔥 [ICT CISD SETUP DETECTED — {self.symbol} SELL]\n"
-                f"Sweep Peak : {sweep_peak:.2f}\n"
-                f"CISD Shift : Broken below {sweep_open_h:.2f}\n"
-                f"FVG Zone   : {fvg_l:.2f} – {fvg_h:.2f}\n"
-                f"Stop Loss  : {sl:.2f}\n"
+                f"🔥 [ICT CISD SETUP DETECTED — {symbol} SELL]\n"
+                f"Sweep Peak : {sweep_peak}\n"
+                f"CISD Shift : Broken below {sweep_open_h}\n"
+                f"FVG Zone   : {fvg_l} – {fvg_h}\n"
+                f"Stop Loss  : {sl}\n"
                 f"⏳ Waiting for FVG retest..."
             )
-            self.pending_fvg = {
+            self.pending_fvgs[symbol] = {
+                "symbol": symbol,
                 "side": "SELL",
                 "fvg_high": fvg_h,
                 "fvg_low": fvg_l,
@@ -254,11 +295,11 @@ class ICTStrategyEngine:
         # 2. Bullish Liquidity Sweep (Low swept + CISD + Bullish FVG + Solid Displacement)
         swept_l = (lows[-3] < recent_low and closes[-3] > recent_low) or \
                   (lows[-2] < recent_low and closes[-2] > recent_low)
-        has_bullish_fvg = highs[-3] < (lows[-1] - self.min_fvg_gap)
+        has_bullish_fvg = highs[-3] < (lows[-1] - min_fvg_gap)
         disp_range_up = highs[-2] - lows[-2]
         disp_body_up = abs(closes[-2] - opens[-2])
-        disp_up = closes[-2] > opens[-2] and disp_range_up > self.disp_threshold
-        body_ok_up = (disp_body_up / max(0.0001, disp_range_up)) >= self.body_ratio_req
+        disp_up = closes[-2] > opens[-2] and disp_range_up > disp_threshold
+        body_ok_up = (disp_body_up / max(0.0001, disp_range_up)) >= body_ratio_req
 
         # Explicit ICT CISD: Displacement closes above the Open of the low-forming candle
         sweep_open_l = opens[-3] if lows[-3] <= lows[-2] else opens[-2]
@@ -266,24 +307,25 @@ class ICTStrategyEngine:
 
         if swept_l and has_bullish_fvg and disp_up and body_ok_up and cisd_up:
             sweep_trough = min(lows[-3], lows[-2])
-            sl = round(sweep_trough - self.sl_buffer, self.digits)
-            fvg_l = round(highs[-3], self.digits)
-            fvg_h = round(lows[-1], self.digits)
+            sl = round(sweep_trough - sl_buffer, digits)
+            fvg_l = round(highs[-3], digits)
+            fvg_h = round(lows[-1], digits)
 
             logger.info("=" * 60)
-            logger.info(f"🔥 [ICT CISD SETUP DETECTED] {self.symbol} Bullish Sweep at {sweep_trough} | CISD Open: {sweep_open_l:.2f}!")
+            logger.info(f"🔥 [ICT CISD SETUP DETECTED] {symbol} Bullish Sweep at {sweep_trough} | CISD Open: {sweep_open_l}!")
             logger.info(f"   Bullish FVG Zone : {fvg_l} - {fvg_h} | SL: {sl}")
             logger.info("=" * 60)
 
             await self.notify(
-                f"🔥 [ICT CISD SETUP DETECTED — {self.symbol} BUY]\n"
-                f"Sweep Trough: {sweep_trough:.2f}\n"
-                f"CISD Shift  : Broken above {sweep_open_l:.2f}\n"
-                f"FVG Zone    : {fvg_l:.2f} – {fvg_h:.2f}\n"
-                f"Stop Loss   : {sl:.2f}\n"
+                f"🔥 [ICT CISD SETUP DETECTED — {symbol} BUY]\n"
+                f"Sweep Trough: {sweep_trough}\n"
+                f"CISD Shift  : Broken above {sweep_open_l}\n"
+                f"FVG Zone    : {fvg_l} – {fvg_h}\n"
+                f"Stop Loss   : {sl}\n"
                 f"⏳ Waiting for FVG retest..."
             )
-            self.pending_fvg = {
+            self.pending_fvgs[symbol] = {
+                "symbol": symbol,
                 "side": "BUY",
                 "fvg_high": fvg_h,
                 "fvg_low": fvg_l,
@@ -291,32 +333,37 @@ class ICTStrategyEngine:
                 "detected_at": time.time()
             }
 
-    async def check_fvg_retest_and_enter(self, cur_prices: Dict[str, float]):
-        if not self.is_enabled or not self.pending_fvg or self.active_trade:
+    async def check_fvg_retest_and_enter(self, symbol: str, cur_prices: Dict[str, float]):
+        pending = self.pending_fvgs.get(symbol)
+        if not self.is_enabled or not pending or self.active_trades.get(symbol):
             return
 
-        mid = cur_prices["mid"]
-        side = self.pending_fvg["side"]
-        fvg_h = self.pending_fvg["fvg_high"]
-        fvg_l = self.pending_fvg["fvg_low"]
-        sl = self.pending_fvg["sl"]
+        profile = INSTRUMENT_PROFILES[symbol]
+        digits = profile["digits"]
+        min_fvg_gap = profile["min_fvg_gap"]
 
-        if time.time() - self.pending_fvg["detected_at"] > (3 * 3600):
-            logger.info(f"⏰ [ICTEngine] {self.symbol} FVG expired without retest. Resetting.")
-            self.pending_fvg = None
+        mid = cur_prices["mid"]
+        side = pending["side"]
+        fvg_h = pending["fvg_high"]
+        fvg_l = pending["fvg_low"]
+        sl = pending["sl"]
+
+        if time.time() - pending["detected_at"] > (3 * 3600):
+            logger.info(f"⏰ [ICTEngine] {symbol} FVG expired without retest. Resetting.")
+            self.pending_fvgs.pop(symbol, None)
             return
 
         in_fvg = (fvg_l <= mid <= fvg_h)
         if in_fvg:
             exec_px = cur_prices["buy"] if side == "BUY" else cur_prices["sell"]
             risk_dist = abs(exec_px - sl)
-            if risk_dist < (self.min_fvg_gap * 0.5):
+            if risk_dist < (min_fvg_gap * 0.5):
                 return
 
-            tp = round(exec_px + (risk_dist * self.rr_ratio) if side == "BUY" else exec_px - (risk_dist * self.rr_ratio), self.digits)
+            tp = round(exec_px + (risk_dist * self.rr_ratio) if side == "BUY" else exec_px - (risk_dist * self.rr_ratio), digits)
 
             await self.notify(
-                f"⚡ [ICT EXECUTION — {self.symbol} {side}]\n"
+                f"⚡ [ICT EXECUTION — {symbol} {side}]\n"
                 f"Entry : {exec_px} (FVG Retest)\n"
                 f"SL    : {sl}\n"
                 f"TP    : {tp} (1:{self.rr_ratio:.1f} RR)\n"
@@ -326,8 +373,8 @@ class ICTStrategyEngine:
             res = self.mcp.place_market_order(
                 side=side.lower(),
                 balance_id=self.balance_id,
-                instrument_id=self.instrument_id,
-                asset_id=self.asset_id,
+                instrument_id=profile["instrument_id"],
+                asset_id=profile["asset_id"],
                 lots=self.lots,
                 leverage=self.leverage,
                 stop_loss=sl,
@@ -338,11 +385,11 @@ class ICTStrategyEngine:
 
             if "order_id" in res:
                 order_id = res["order_id"]
-                logger.info(f"✅ [ICTEngine] Order filled! ID: #{order_id}")
-                self.active_trade = {
+                logger.info(f"✅ [ICTEngine] {symbol} Order filled! ID: #{order_id}")
+                self.active_trades[symbol] = {
                     "order_id": order_id,
                     "position_id": None,
-                    "symbol": self.symbol,
+                    "symbol": symbol,
                     "side": side,
                     "entry_price": exec_px,
                     "initial_sl": sl,
@@ -351,24 +398,29 @@ class ICTStrategyEngine:
                     "moved_to_be": False,
                     "opened_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 }
-                self.pending_fvg = None
-                await self.notify(f"✅ [ICTEngine] Order Filled! ID: #{order_id}")
+                self.pending_fvgs.pop(symbol, None)
+                await self.notify(f"✅ [ICTEngine] {symbol} Order Filled! ID: #{order_id}")
             else:
-                logger.error(f"❌ [ICTEngine] Order placement failed: {res}")
-                await self.notify(f"❌ [ICTEngine] Order Failed: {res.get('error', res)}")
+                logger.error(f"❌ [ICTEngine] {symbol} Order placement failed: {res}")
+                await self.notify(f"❌ [ICTEngine] {symbol} Order Failed: {res.get('error', res)}")
 
-    async def manage_active_trade(self, cur_prices: Dict[str, float]):
-        if not self.active_trade:
+    async def manage_active_trade(self, symbol: str, cur_prices: Dict[str, float]):
+        trade = self.active_trades.get(symbol)
+        if not trade:
             return
 
-        if not self.active_trade["position_id"]:
+        profile = INSTRUMENT_PROFILES[symbol]
+        digits = profile["digits"]
+        asset_id = profile["asset_id"]
+
+        if not trade["position_id"]:
             positions = self.mcp.list_positions(balance_id=self.balance_id)
             for p in positions:
-                if p.get("asset_id") == self.asset_id:
-                    self.active_trade["position_id"] = p.get("position_id") or p.get("id")
+                if p.get("asset_id") == asset_id:
+                    trade["position_id"] = p.get("position_id") or p.get("id")
                     break
 
-        pos_id = self.active_trade["position_id"]
+        pos_id = trade["position_id"]
         if not pos_id:
             return
 
@@ -376,52 +428,57 @@ class ICTStrategyEngine:
         is_still_open = any((p.get("position_id") or p.get("id")) == pos_id for p in open_positions)
 
         if not is_still_open:
-            logger.info(f"ICT Trade #{pos_id} closed! Syncing Google Sheets...")
-            await self._log_trade_closure(pos_id)
-            self.active_trade = None
+            logger.info(f"ICT {symbol} Trade #{pos_id} closed! Syncing Google Sheets...")
+            await self._log_trade_closure(symbol, pos_id)
+            self.active_trades.pop(symbol, None)
             return
 
         # Breakeven check
-        if not self.active_trade["moved_to_be"]:
+        if not trade["moved_to_be"]:
             mid = cur_prices["mid"]
-            entry = self.active_trade["entry_price"]
-            risk_dist = abs(entry - self.active_trade["initial_sl"])
-            side = self.active_trade["side"]
+            entry = trade["entry_price"]
+            risk_dist = abs(entry - trade["initial_sl"])
+            side = trade["side"]
 
             hit_1r = (mid - entry >= risk_dist) if side == "BUY" else (entry - mid >= risk_dist)
             if hit_1r:
-                be_buf = self.min_fvg_gap * 0.5
-                be_level = round(entry + be_buf if side == "BUY" else entry - be_buf, self.digits)
-                logger.info(f"🛡️ [ICT BREAKEVEN] Reached 1.0R profit! Moving SL to {be_level}")
+                be_buf = profile["min_fvg_gap"] * 0.5
+                be_level = round(entry + be_buf if side == "BUY" else entry - be_buf, digits)
+                logger.info(f"🛡️ [ICT BREAKEVEN] {symbol} Reached 1.0R profit! Moving SL to {be_level}")
                 res = self.mcp.change_position_stop_loss(position_id=pos_id, level=be_level)
                 if not res.get("error"):
-                    self.active_trade["current_sl"] = be_level
-                    self.active_trade["moved_to_be"] = True
-                    await self.notify(f"🛡️ [ICT BREAKEVEN ACTIVATED]\nPosition #{pos_id} SL shifted to {be_level}")
+                    trade["current_sl"] = be_level
+                    trade["moved_to_be"] = True
+                    await self.notify(f"🛡️ [ICT BREAKEVEN ACTIVATED — {symbol}]\nPosition #{pos_id} SL shifted to {be_level}")
 
-    async def _log_trade_closure(self, pos_id: int):
+    async def _log_trade_closure(self, symbol: str, pos_id: int):
+        trade = self.active_trades.get(symbol)
+        if not trade:
+            return
+        profile = INSTRUMENT_PROFILES[symbol]
+        digits = profile["digits"]
         try:
             history = self.mcp.get_trade_history(balance_id=self.balance_id, limit=5)
             matched = next((h for h in history if h.get("position_id") == pos_id), None)
             pnl = float(matched.get("pnl", 0.0)) if matched else 0.0
             exit_px = float(matched.get("close_price", 0.0)) if matched else 0.0
             reason = matched.get("close_reason", "closed") if matched else "closed"
-            entry_px = self.active_trade["entry_price"]
+            entry_px = trade["entry_price"]
 
             bal = self.mcp.get_training_balance() if self.account_type == "training" else self.mcp.get_real_balance()
             eq = bal.get("equity", 0.0) if bal else 0.0
 
             gsheet_logger.log_forex_margin_trade({
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "asset": f"ICT {self.symbol}",
-                "side": self.active_trade["side"],
+                "asset": f"ICT {symbol}",
+                "side": trade["side"],
                 "lots": self.lots,
                 "entry_price": entry_px,
-                "stop_loss": self.active_trade["current_sl"],
-                "take_profit": self.active_trade["tp"],
+                "stop_loss": trade["current_sl"],
+                "take_profit": trade["tp"],
                 "exit_price": exit_px,
                 "pnl": pnl,
-                "pips": round(abs(exit_px - entry_px) * (10 ** (self.digits - 1)), 1),
+                "pips": round(abs(exit_px - entry_px) * (10 ** (digits - 1)), 1),
                 "risk_reward": f"1:{self.rr_ratio:.1f} (ICT Autonomous)",
                 "exit_reason": reason,
                 "position_id": pos_id,
@@ -430,36 +487,35 @@ class ICTStrategyEngine:
 
             emoji = "🏆 WIN" if pnl > 0 else "❌ LOSS"
             await self.notify(
-                f"{emoji} [ICT TRADE CLOSED]\n"
-                f"Instrument : {self.symbol}\n"
+                f"{emoji} [ICT TRADE CLOSED — {symbol}]\n"
                 f"Position   : #{pos_id}\n"
                 f"PnL        : {'+' if pnl >= 0 else ''}${pnl:.2f}\n"
                 f"Exit Price : {exit_px}\n"
                 f"Reason     : {reason}"
             )
         except Exception as e:
-            logger.error(f"[ICTEngine] Error logging trade closure: {e}")
+            logger.error(f"[ICTEngine] Error logging trade closure for {symbol}: {e}")
 
     async def run_loop(self):
         self.is_running = True
-        logger.info(f"🚀 [ICTEngine] Started autonomous loop for {self.symbol}")
-        last_candle_scan = 0
+        logger.info(f"🚀 [ICTEngine] Started concurrent multi-asset loop: {list(self.enabled_symbols)}")
+        last_candle_scan: Dict[str, float] = {}
 
         while self.is_running:
             try:
-                if self.is_enabled:
+                if self.is_enabled and self.enabled_symbols:
                     now = time.time()
-                    prices = self.get_market_price()
+                    for sym in list(self.enabled_symbols):
+                        prices = self.get_market_price(sym)
+                        if prices["mid"] > 0:
+                            if now - last_candle_scan.get(sym, 0) > 60:
+                                df = self.fetch_recent_candles(sym, count=50)
+                                if df is not None:
+                                    await self.scan_for_setups(sym, df)
+                                last_candle_scan[sym] = now
 
-                    if prices["mid"] > 0:
-                        if now - last_candle_scan > 60:
-                            df = self.fetch_recent_candles(count=50)
-                            if df is not None:
-                                await self.scan_for_setups(df)
-                            last_candle_scan = now
-
-                        await self.check_fvg_retest_and_enter(prices)
-                        await self.manage_active_trade(prices)
+                            await self.check_fvg_retest_and_enter(sym, prices)
+                            await self.manage_active_trade(sym, prices)
 
                 await asyncio.sleep(5)
             except asyncio.CancelledError:
@@ -470,12 +526,13 @@ class ICTStrategyEngine:
 
     def get_status(self) -> Dict[str, Any]:
         return {
-            "symbol": self.symbol,
-            "name": self.profile["name"],
             "enabled": self.is_enabled,
+            "enabled_symbols": list(self.enabled_symbols),
+            "symbol": ", ".join(self.enabled_symbols) if self.enabled_symbols else "None",
+            "name": f"Multi-Asset ({len(self.enabled_symbols)} Active)",
             "lots": self.lots,
             "leverage": self.leverage,
             "rr_ratio": self.rr_ratio,
-            "pending_fvg": self.pending_fvg,
-            "active_trade": self.active_trade
+            "pending_fvgs": {k: v for k, v in self.pending_fvgs.items() if v},
+            "active_trades": {k: v for k, v in self.active_trades.items() if v}
         }

@@ -49,7 +49,7 @@ async def main():
     parser.add_argument("--blitz-stake", type=float, default=float(os.getenv("BLITZ_STAKE", "2.0")))
     parser.add_argument("--enable-polycarp", action="store_true", default=os.getenv("ENABLE_POLYCARP", "false").lower() == "true")
     parser.add_argument("--ict-symbol", default=os.getenv("ICT_SYMBOL", "XAUUSD"))
-    parser.add_argument("--lookback-mins", type=int, default=int(os.getenv("LOOKBACK_MINS", "10")))
+    parser.add_argument("--lookback-mins", type=int, default=int(os.getenv("LOOKBACK_MINS", "240")))
     args = parser.parse_args()
 
     token = os.getenv("TELEGRAM_TOKEN")

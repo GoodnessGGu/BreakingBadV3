@@ -113,28 +113,37 @@ class ChannelManager:
 
         self.is_running = True
         logger.info("🚀 ChannelManager running!")
-        try:
-            await self.client.run_until_disconnected()
-        except asyncio.CancelledError:
-            pass
+        while self.is_running:
+            try:
+                await self.client.run_until_disconnected()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"⚠️ Telethon update loop error ({e}). Reconnecting in 3s...")
+                await asyncio.sleep(3)
+                if not self.client.is_connected():
+                    try:
+                        await self.client.connect()
+                    except Exception as ce:
+                        logger.error(f"Error reconnecting Telethon: {ce}")
 
     async def _run_startup_lookback(self):
         """Fetch recent messages from each registered channel to catch recent setups."""
-        cutoff_sec = self.lookback_mins * 60
+        cutoff_sec = max(self.lookback_mins, 240) * 60  # Look back at least 4 hours for active zones
         now = time.time()
-        logger.info(f"🔍 Running startup scan on registered channels (last {self.lookback_mins} mins)...")
+        logger.info(f"🔍 Running startup scan on registered channels (last {int(cutoff_sec/60)} mins)...")
 
         for cid, copier in self.channel_to_copier.items():
             if not copier.is_enabled:
                 continue
             try:
-                msgs = await self.client.get_messages(cid, limit=25)
+                msgs = await self.client.get_messages(cid, limit=50)
                 recent_msgs = [
                     m for m in msgs
                     if m.date and (now - m.date.timestamp()) <= cutoff_sec
                 ]
                 recent_msgs.reverse() # Oldest to newest
-                logger.info(f"   [{copier.name}] Found {len(recent_msgs)} recent messages within {self.lookback_mins}m")
+                logger.info(f"   [{copier.name}] Found {len(recent_msgs)} recent messages within {int(cutoff_sec/60)}m")
                 for m in recent_msgs:
                     txt = getattr(m, 'message', None) or getattr(m, 'text', '')
                     if txt:

@@ -206,54 +206,88 @@ class CallistoCopier(BaseCopier):
         if side == "BUY":
             sl = round(zone.get("zone_low", exec_price) - self.sl_buffer, 2)
             target = zone.get("target")
-            tp = round(target, 2) if target and target > exec_price else round(exec_price + abs(exec_price - sl) * 2.0, 2)
+            macro_tp = round(target, 2) if target and target > exec_price else round(exec_price + abs(exec_price - sl) * 2.0, 2)
         else:
             sl = round(zone.get("zone_high", exec_price) + self.sl_buffer, 2)
             target = zone.get("target")
-            tp = round(target, 2) if target and target < exec_price else round(exec_price - abs(exec_price - sl) * 2.0, 2)
+            macro_tp = round(target, 2) if target and target < exec_price else round(exec_price - abs(exec_price - sl) * 2.0, 2)
 
+        orders_to_place = []
+        if self.lots >= 0.02:
+            lot1 = round(self.lots / 2, 2)
+            lot2 = round(self.lots - lot1, 2)
+            tp1 = round(exec_price + 4.50 if side == "BUY" else exec_price - 4.50, 2)
+            orders_to_place.append({
+                "tag": "TP1 Scalper (50%)",
+                "lots": lot1,
+                "sl": sl,
+                "tp": tp1,
+                "is_tp1": True
+            })
+            orders_to_place.append({
+                "tag": "Macro Runner (50%)",
+                "lots": lot2,
+                "sl": sl,
+                "tp": macro_tp,
+                "is_tp1": False
+            })
+        else:
+            orders_to_place.append({
+                "tag": "Single Order (100%)",
+                "lots": self.lots,
+                "sl": sl,
+                "tp": macro_tp,
+                "is_tp1": False
+            })
+
+        plan_desc = "\n".join([f"  • {o['tag']}: {o['lots']}L | TP: {o['tp']:.2f}" for o in orders_to_place])
         msg = (
-            f"⚡ [CallistoFx CONFIRMATION]\n"
+            f"⚡ [CallistoFx CONFIRMATION — SPLIT ENTRY]\n"
             f"Side : {side}\n"
             f"Entry: {exec_price:.2f} (TF {conf.get('tf')}s)\n"
             f"SL   : {sl:.2f}\n"
-            f"TP   : {tp:.2f}\n"
-            f"Zone : {zone.get('zone_low', 0):.2f} – {zone.get('zone_high', 0):.2f}"
+            f"Zone : {zone.get('zone_low', 0):.2f} – {zone.get('zone_high', 0):.2f}\n"
+            f"Orders:\n{plan_desc}"
         )
         await self.notify(msg)
 
-        res = self.mcp.place_market_order(
-            side=side.lower(),
-            balance_id=self.balance_id,
-            instrument_id=GOLD_INSTRUMENT,
-            asset_id=GOLD_ASSET_ID,
-            lots=self.lots,
-            leverage=self.leverage,
-            stop_loss=sl,
-            take_profit=tp,
-            is_margin_isolated=True,
-            keep_position_open=False
-        )
+        for o in orders_to_place:
+            res = self.mcp.place_market_order(
+                side=side.lower(),
+                balance_id=self.balance_id,
+                instrument_id=GOLD_INSTRUMENT,
+                asset_id=GOLD_ASSET_ID,
+                lots=o["lots"],
+                leverage=self.leverage,
+                stop_loss=o["sl"],
+                take_profit=o["tp"],
+                is_margin_isolated=True,
+                keep_position_open=False
+            )
 
-        if "order_id" in res:
-            order_id = res["order_id"]
-            logger.info(f"✅ [Callisto] Order placed! ID: #{order_id}")
-            self.open_positions[order_id] = {
-                "order_id": order_id,
-                "position_id": None,
-                "side": side,
-                "entry_price": exec_price,
-                "sl": sl,
-                "initial_sl": sl,
-                "tp": tp,
-                "moved_to_be": False,
-                "opened_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            }
-            await self.notify(f"✅ [Callisto] Trade Executed: #{order_id} {side} @ {exec_price:.2f}")
-            asyncio.create_task(self._monitor_position(order_id))
-        else:
-            logger.error(f"❌ [Callisto] Order failed: {res}")
-            await self.notify(f"❌ [Callisto] Order Failed: {res.get('error', res)}")
+            if "order_id" in res:
+                order_id = res["order_id"]
+                logger.info(f"✅ [Callisto] {o['tag']} placed! ID: #{order_id}")
+                self.open_positions[order_id] = {
+                    "order_id": order_id,
+                    "position_id": None,
+                    "tag": o["tag"],
+                    "is_tp1": o["is_tp1"],
+                    "lots": o["lots"],
+                    "side": side,
+                    "entry_price": exec_price,
+                    "sl": o["sl"],
+                    "initial_sl": o["sl"],
+                    "tp": o["tp"],
+                    "moved_to_be": False,
+                    "trailing_stage": 0,
+                    "opened_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                }
+                await self.notify(f"✅ [Callisto] {o['tag']} Executed: #{order_id} {side} {o['lots']}L @ {exec_price:.2f}")
+                asyncio.create_task(self._monitor_position(order_id))
+            else:
+                logger.error(f"❌ [Callisto] {o['tag']} order failed: {res}")
+                await self.notify(f"❌ [Callisto] {o['tag']} Order Failed: {res.get('error', res)}")
 
     async def trigger_manual_breakeven(self, reason: str = "Channel Broadcast"):
         """Shifts all active Callisto positions to Breakeven."""
@@ -278,7 +312,7 @@ class CallistoCopier(BaseCopier):
                 await self.notify(
                     f"🛡️ [Callisto BREAKEVEN ACTIVATED]\n"
                     f"Trigger: {reason}\n"
-                    f"Position: #{pos_id} ({side})\n"
+                    f"Position: #{pos_id} ({side} - {pos.get('tag', 'Order')})\n"
                     f"SL shifted to: {be_level:.2f}"
                 )
 
@@ -289,29 +323,37 @@ class CallistoCopier(BaseCopier):
         if not pos:
             return
 
-        # 1. Resolve position_id from list_positions
-        for _ in range(6):
+        # 1. Resolve position_id from list_positions (avoiding collisions across split tickets)
+        for _ in range(8):
             if pos.get("position_id"):
                 break
             try:
                 positions = self.mcp.list_positions(balance_id=self.balance_id)
+                assigned_pos_ids = {p.get("position_id") for oid, p in self.open_positions.items() if oid != order_id and p.get("position_id")}
                 for p in positions:
                     if p.get("asset_id") == GOLD_ASSET_ID:
-                        pos["position_id"] = p.get("position_id") or p.get("id")
-                        break
+                        p_id = p.get("position_id") or p.get("id")
+                        if p_id in assigned_pos_ids:
+                            continue
+                        p_tp = float(p.get("take_profit", 0) or p.get("tp", 0) or 0)
+                        if p_tp > 0 and abs(p_tp - pos["tp"]) < 0.2:
+                            pos["position_id"] = p_id
+                            break
+                        elif not pos.get("position_id"):
+                            pos["position_id"] = p_id
             except Exception as e:
                 logger.warning(f"[Callisto] Position lookup error: {e}")
             if not pos.get("position_id"):
-                await asyncio.sleep(5)
+                await asyncio.sleep(4)
 
         pos_id = pos.get("position_id")
         side = pos["side"]
         entry = pos["entry_price"]
         sl = pos["initial_sl"]
         risk_dist = abs(entry - sl)
-        pos["trailing_stage"] = 0
+        tag = pos.get("tag", "Standard")
 
-        logger.info(f"🛡️ [Callisto] Monitoring position #{pos_id or order_id} with milestone trailing & Breakeven.")
+        logger.info(f"🛡️ [Callisto] Monitoring position #{pos_id or order_id} ({tag}) with milestone trailing & Breakeven.")
 
         while order_id in self.open_positions:
             await asyncio.sleep(self.poll_interval)
@@ -327,7 +369,7 @@ class CallistoCopier(BaseCopier):
                 continue
 
             if not is_still_open:
-                logger.info(f"📊 [Callisto] Position #{pos_id or order_id} closed! Resolving settlement...")
+                logger.info(f"📊 [Callisto] Position #{pos_id or order_id} ({tag}) closed! Resolving settlement...")
                 await self._log_trade_closure(order_id)
                 self.open_positions.pop(order_id, None)
                 break
@@ -351,7 +393,7 @@ class CallistoCopier(BaseCopier):
                             logger.info(f"🛡️ [Callisto +30 Pips] Risk cut 50% on #{pos_id}! SL: {half_risk_sl}")
                             await self.notify(
                                 f"🛡️ [Callisto DEFENSE +30 PIPS]\n"
-                                f"Position #{pos_id} ({side})\n"
+                                f"Position #{pos_id} ({tag})\n"
                                 f"Risk reduced by 50% | New SL: {half_risk_sl:.2f}"
                             )
 
@@ -367,11 +409,11 @@ class CallistoCopier(BaseCopier):
                             logger.info(f"🛡️ [Callisto +50 Pips / 1R] Breakeven activated on #{pos_id}! SL: {be_level}")
                             await self.notify(
                                 f"🛡️ [Callisto BREAKEVEN +50 PIPS]\n"
-                                f"Position #{pos_id} ({side})\n"
+                                f"Position #{pos_id} ({tag})\n"
                                 f"Trade is now Risk-Free! SL shifted to: {be_level:.2f}"
                             )
 
-                    # Stage 3: +100 Pips ($10.00) -> Lock in +50 Pips profit
+                    # Stage 3: +100 Pips ($10.00) -> Lock in +50 Pips profit (Runner only)
                     if gain_pips >= 100.0 and stage < 3:
                         lock_50 = round(entry + 5.00 if side == "BUY" else entry - 5.00, 2)
                         res = self.mcp.change_position_stop_loss(position_id=pos_id, level=lock_50)
@@ -381,11 +423,11 @@ class CallistoCopier(BaseCopier):
                             logger.info(f"💰 [Callisto +100 Pips] Secured +50 Pips on #{pos_id}! SL: {lock_50}")
                             await self.notify(
                                 f"💰 [Callisto PROFIT LOCK +100 PIPS]\n"
-                                f"Position #{pos_id} ({side})\n"
+                                f"Position #{pos_id} ({tag})\n"
                                 f"Banked +50 Pips profit! New SL: {lock_50:.2f}"
                             )
 
-                    # Stage 4: +150 Pips ($15.00) -> Lock in +100 Pips profit
+                    # Stage 4: +150 Pips ($15.00) -> Lock in +100 Pips profit (Runner only)
                     if gain_pips >= 150.0 and stage < 4:
                         lock_100 = round(entry + 10.00 if side == "BUY" else entry - 10.00, 2)
                         res = self.mcp.change_position_stop_loss(position_id=pos_id, level=lock_100)
@@ -395,7 +437,7 @@ class CallistoCopier(BaseCopier):
                             logger.info(f"💰 [Callisto +150 Pips] Secured +100 Pips on #{pos_id}! SL: {lock_100}")
                             await self.notify(
                                 f"💰 [Callisto PROFIT LOCK +150 PIPS]\n"
-                                f"Position #{pos_id} ({side})\n"
+                                f"Position #{pos_id} ({tag})\n"
                                 f"Banked +100 Pips profit! New SL: {lock_100:.2f}"
                             )
 
@@ -414,7 +456,9 @@ class CallistoCopier(BaseCopier):
     async def _log_trade_closure(self, order_id: int):
         pos = self.open_positions.get(order_id, {})
         pos_id = pos.get("position_id")
+        tag = pos.get("tag", "Standard")
         side = pos.get("side", "BUY")
+        lots = pos.get("lots", self.lots)
         entry_px = pos.get("entry_price", 0.0)
         tp = pos.get("tp", 0.0)
         sl = pos.get("sl", 0.0)
@@ -439,9 +483,9 @@ class CallistoCopier(BaseCopier):
         try:
             gsheet_logger.log_forex_margin_trade({
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "asset": "Callisto Gold (XAUUSD)",
+                "asset": f"Callisto Gold ({tag})",
                 "side": side,
-                "lots": self.lots,
+                "lots": lots,
                 "entry_price": entry_px,
                 "stop_loss": sl,
                 "take_profit": tp,
@@ -458,8 +502,8 @@ class CallistoCopier(BaseCopier):
 
         emoji = "🏆 WIN" if pnl > 0 else "❌ LOSS"
         await self.notify(
-            f"{emoji} [Callisto TRADE SETTLED]\n"
-            f"Side    : {side}\n"
+            f"{emoji} [Callisto SETTLED — {tag}]\n"
+            f"Side    : {side} ({lots} Lots)\n"
             f"Entry   : {entry_px:.2f}\n"
             f"Exit    : {exit_px:.2f}\n"
             f"PnL     : ${pnl:+.2f}\n"

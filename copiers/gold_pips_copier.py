@@ -225,39 +225,170 @@ class GoldPipsCopier(BaseCopier):
                 "side": side,
                 "entry_price": exec_price,
                 "sl": sl,
+                "initial_sl": sl,
                 "tp": tp,
+                "moved_to_be": False,
                 "opened_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             }
-            await self.notify(f"✅ [Gold Pips] Order Filled! ID: #{order_id}")
+            await self.notify(f"✅ [Gold Pips] Order Filled: #{order_id} {side} @ {exec_price:.2f}")
+            asyncio.create_task(self._monitor_position(order_id))
         else:
             logger.error(f"❌ [GoldPips] Order failed: {res}")
             await self.notify(f"❌ [Gold Pips] Order Failed: {res.get('error', res)}")
 
+    async def _monitor_position(self, order_id: int):
+        """Monitors active Gold Pips trade and logs settlement."""
+        await asyncio.sleep(5)
+        pos = self.open_positions.get(order_id)
+        if not pos:
+            return
+
+        resolved = False
+        for _ in range(8):
+            if pos.get("position_id"):
+                resolved = True
+                break
+            try:
+                positions = self.mcp.list_positions(balance_id=self.balance_id)
+                assigned_pos_ids = {p.get("position_id") for oid, p in self.open_positions.items() if oid != order_id and p.get("position_id")}
+                for p in positions:
+                    if p.get("asset_id") == GOLD_ASSET_ID:
+                        p_id = p.get("position_id") or p.get("id")
+                        if p_id in assigned_pos_ids:
+                            continue
+                        pos["position_id"] = p_id
+                        resolved = True
+                        break
+            except Exception as e:
+                logger.warning(f"[GoldPips] Position lookup error: {e}")
+            if not pos.get("position_id"):
+                await asyncio.sleep(4)
+
+        if not resolved or not pos.get("position_id"):
+            logger.warning(f"⚠️ [GoldPips] Order #{order_id} failed to map to active position. Pruning.")
+            self.open_positions.pop(order_id, None)
+            return
+
+        pos_id = pos["position_id"]
+        logger.info(f"🛡️ [GoldPips] Monitoring position #{pos_id} for settlement.")
+
+        while order_id in self.open_positions:
+            await asyncio.sleep(15)
+            try:
+                open_positions = self.mcp.list_positions(balance_id=self.balance_id)
+                is_still_open = any((p.get("position_id") or p.get("id")) == pos_id for p in open_positions)
+            except Exception as e:
+                logger.warning(f"[GoldPips] Error listing positions: {e}")
+                continue
+
+            if not is_still_open:
+                logger.info(f"📊 [GoldPips] Position #{pos_id} closed! Resolving settlement...")
+                await self._log_trade_closure(order_id)
+                self.open_positions.pop(order_id, None)
+                break
+
+    async def _log_trade_closure(self, order_id: int):
+        pos = self.open_positions.get(order_id, {})
+        pos_id = pos.get("position_id")
+        side = pos.get("side", "BUY")
+        entry_px = pos.get("entry_price", 0.0)
+        tp = pos.get("tp", 0.0)
+        sl = pos.get("sl", 0.0)
+
+        pnl, exit_px, reason = 0.0, 0.0, "closed"
+        try:
+            history = self.mcp.get_trade_history(balance_id=self.balance_id, limit=10)
+            matched = next((h for h in history if (pos_id and h.get("position_id") == pos_id) or h.get("asset_id") == GOLD_ASSET_ID), None)
+            if matched:
+                pnl = float(matched.get("pnl", 0.0))
+                exit_px = float(matched.get("close_price", 0.0))
+                reason = matched.get("close_reason", "closed")
+        except Exception as e:
+            logger.warning(f"[GoldPips] History lookup error: {e}")
+
+        bal = self.mcp.get_training_balance() if self.account_type == "training" else self.mcp.get_real_balance()
+        eq = bal.get("equity", 0.0) if bal else 0.0
+
+        try:
+            gsheet_logger.log_forex_margin_trade({
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "asset": "Gold Pips Hunter (XAUUSD)",
+                "side": side,
+                "lots": self.lots,
+                "entry_price": entry_px,
+                "stop_loss": sl,
+                "take_profit": tp,
+                "exit_price": exit_px,
+                "pnl": pnl,
+                "pips": round(abs(exit_px - entry_px) * 10, 1) if exit_px else 0.0,
+                "risk_reward": f"Target {self.tp_target}",
+                "exit_reason": reason,
+                "position_id": pos_id or order_id,
+                "balance_equity": eq
+            })
+        except Exception as e:
+            logger.warning(f"[GoldPips] GSheet log error: {e}")
+
+        emoji = "🏆 WIN" if pnl > 0 else "❌ LOSS"
+        await self.notify(
+            f"{emoji} [Gold Pips SETTLED]\n"
+            f"Side    : {side} ({self.lots} Lots)\n"
+            f"Entry   : {entry_px:.2f}\n"
+            f"Exit    : {exit_px:.2f}\n"
+            f"PnL     : ${pnl:+.2f}\n"
+            f"Reason  : {reason}"
+        )
+
     async def apply_breakeven(self):
-        logger.info("🛡️ [GoldPips] Breakeven instruction received!")
-        positions = self.mcp.list_positions(balance_id=self.balance_id)
+        if not self.open_positions:
+            logger.debug("[GoldPips] No active Gold Pips positions open to apply Breakeven. Ignoring.")
+            return
+
+        prices = self.get_market_price()
+        mid = prices.get("mid", 0.0)
         count = 0
-        for p in positions:
-            if p.get("asset_id") == GOLD_ASSET_ID:
-                pos_id = p.get("position_id") or p.get("id")
-                open_quote = float(p.get("open_quote", 0.0))
-                if pos_id and open_quote > 0:
-                    self.mcp.change_position_stop_loss(position_id=pos_id, level=open_quote)
-                    count += 1
-        await self.notify(f"🛡️ [Gold Pips] Breakeven applied to {count} open Gold position(s).")
+
+        for order_id, pos in list(self.open_positions.items()):
+            pos_id = pos.get("position_id")
+            if not pos_id or pos.get("moved_to_be"):
+                continue
+
+            side = pos["side"]
+            entry = pos["entry_price"]
+
+            # Prevent premature stopout if currently in drawdown
+            if mid > 0:
+                if side == "BUY" and mid < (entry - 0.50):
+                    logger.warning(f"⚠️ [GoldPips] Position #{pos_id} is below entry ({mid:.2f} < {entry:.2f}). Skipping premature BE.")
+                    continue
+                elif side == "SELL" and mid > (entry + 0.50):
+                    logger.warning(f"⚠️ [GoldPips] Position #{pos_id} is above entry ({mid:.2f} > {entry:.2f}). Skipping premature BE.")
+                    continue
+
+            be_buf = 0.30
+            be_level = round(entry + be_buf if side == "BUY" else entry - be_buf, 2)
+            res = self.mcp.change_position_stop_loss(position_id=pos_id, level=be_level)
+            if not res.get("error"):
+                pos["sl"] = be_level
+                pos["moved_to_be"] = True
+                count += 1
+                await self.notify(f"🛡️ [Gold Pips BREAKEVEN]\nPosition: #{pos_id} ({side})\nSL shifted to: {be_level:.2f}")
 
     async def close_all_positions(self):
-        logger.info("🛑 [GoldPips] Close All instruction received!")
-        positions = self.mcp.list_positions(balance_id=self.balance_id)
+        if not self.open_positions:
+            logger.debug("[GoldPips] No active Gold Pips positions open to close.")
+            return
+
         count = 0
-        for p in positions:
-            if p.get("asset_id") == GOLD_ASSET_ID:
-                pos_id = p.get("position_id") or p.get("id")
-                if pos_id:
-                    self.mcp.close_position(position_id=pos_id)
+        for order_id, pos in list(self.open_positions.items()):
+            pos_id = pos.get("position_id")
+            if pos_id:
+                res = self.mcp.close_position(position_id=pos_id)
+                if not res.get("error"):
                     count += 1
         self.open_positions.clear()
-        await self.notify(f"🛑 [Gold Pips] Closed all {count} open Gold position(s).")
+        if count > 0:
+            await self.notify(f"🛑 [Gold Pips] Closed {count} active Gold Pips position(s).")
 
     def get_status(self) -> Dict[str, Any]:
         return {

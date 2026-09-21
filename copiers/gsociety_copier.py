@@ -251,6 +251,13 @@ class GSocietyCopier(BaseCopier):
 
     async def trigger_manual_breakeven(self, reason: str = "Channel Broadcast"):
         """Shifts all active G Society positions to Breakeven."""
+        if not self.open_positions:
+            logger.debug("[GSociety] No active G Society positions open to apply Breakeven. Ignoring.")
+            return
+
+        prices = self.get_market_price()
+        mid = prices.get("mid", 0.0)
+
         for order_id, pos in list(self.open_positions.items()):
             pos_id = pos.get("position_id")
             if not pos_id:
@@ -260,6 +267,16 @@ class GSocietyCopier(BaseCopier):
 
             side = pos["side"]
             entry = pos["entry_price"]
+
+            # Prevent premature stopout if currently in drawdown
+            if mid > 0:
+                if side == "BUY" and mid < (entry - 0.50):
+                    logger.warning(f"⚠️ [GSociety] Position #{pos_id} is below entry ({mid:.2f} < {entry:.2f}). Skipping premature BE.")
+                    continue
+                elif side == "SELL" and mid > (entry + 0.50):
+                    logger.warning(f"⚠️ [GSociety] Position #{pos_id} is above entry ({mid:.2f} > {entry:.2f}). Skipping premature BE.")
+                    continue
+
             be_buf = 0.30
             be_level = round(entry + be_buf if side == "BUY" else entry - be_buf, 2)
 
@@ -283,8 +300,10 @@ class GSocietyCopier(BaseCopier):
         if not pos:
             return
 
+        resolved = False
         for _ in range(8):
             if pos.get("position_id"):
+                resolved = True
                 break
             try:
                 positions = self.mcp.list_positions(balance_id=self.balance_id)
@@ -297,13 +316,20 @@ class GSocietyCopier(BaseCopier):
                         p_tp = float(p.get("take_profit", 0) or p.get("tp", 0) or 0)
                         if p_tp > 0 and abs(p_tp - pos["tp"]) < 0.2:
                             pos["position_id"] = p_id
+                            resolved = True
                             break
                         elif not pos.get("position_id"):
                             pos["position_id"] = p_id
+                            resolved = True
             except Exception as e:
                 logger.warning(f"[GSociety] Position lookup error: {e}")
             if not pos.get("position_id"):
                 await asyncio.sleep(4)
+
+        if not resolved or not pos.get("position_id"):
+            logger.warning(f"⚠️ [GSociety] Order #{order_id} failed to map to an active position. Pruning from tracking.")
+            self.open_positions.pop(order_id, None)
+            return
 
         pos_id = pos.get("position_id")
         side = pos["side"]

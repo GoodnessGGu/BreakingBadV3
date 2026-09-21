@@ -23,15 +23,18 @@ class CallistoZoneParser:
     @staticmethod
     def is_zone_message(text: str) -> bool:
         u = text.upper()
-        return "BUY ZONE" in u or "SELL ZONE" in u
+        return any(kw in u for kw in ["BUY ZONE", "SELL ZONE", "BREAK EVEN", "BREAKEVEN", "SECURE PROFIT"])
 
     @staticmethod
     def parse_all(text: str) -> List[Dict[str, Any]]:
         upper   = text.upper()
         results = []
         for inv in ("BUY", "SELL"):
-            if inv + " ZONE INVALIDATED" in upper:
+            if f"{inv} ZONE INVALIDATED" in upper or f"{inv} ZONE CANCELLED" in upper:
                 results.append({"type": "INVALIDATE", "side": inv})
+
+        if any(kw in upper for kw in ["BREAK EVEN", "BREAKEVEN", "SET STOPS TO BREAK", "MOVE SL TO ENTRY", "MOVE STOPS TO BE", "SECURE PROFIT", "SECURE MORE PROFIT"]):
+            results.append({"type": "BREAKEVEN"})
 
         for m in re.finditer(
             r"(?:NEW\s+)?(BUY|SELL)\s+ZONE[:\s]+([0-9]+(?:\.[0-9]+)?)\s*[-\u2013]\s*([0-9]+(?:\.[0-9]+)?)",
@@ -252,8 +255,35 @@ class CallistoCopier(BaseCopier):
             logger.error(f"❌ [Callisto] Order failed: {res}")
             await self.notify(f"❌ [Callisto] Order Failed: {res.get('error', res)}")
 
+    async def trigger_manual_breakeven(self, reason: str = "Channel Broadcast"):
+        """Shifts all active Callisto positions to Breakeven."""
+        for order_id, pos in list(self.open_positions.items()):
+            pos_id = pos.get("position_id")
+            if not pos_id:
+                continue
+            if pos.get("moved_to_be"):
+                continue
+
+            side = pos["side"]
+            entry = pos["entry_price"]
+            be_buf = 0.30
+            be_level = round(entry + be_buf if side == "BUY" else entry - be_buf, 2)
+
+            logger.info(f"🛡️ [Callisto BREAKEVEN] ({reason}) Moving SL to {be_level} for #{pos_id}")
+            res = self.mcp.change_position_stop_loss(position_id=pos_id, level=be_level)
+            if not res.get("error"):
+                pos["sl"] = be_level
+                pos["moved_to_be"] = True
+                pos["trailing_stage"] = max(pos.get("trailing_stage", 0), 2)
+                await self.notify(
+                    f"🛡️ [Callisto BREAKEVEN ACTIVATED]\n"
+                    f"Trigger: {reason}\n"
+                    f"Position: #{pos_id} ({side})\n"
+                    f"SL shifted to: {be_level:.2f}"
+                )
+
     async def _monitor_position(self, order_id: int):
-        """Monitors active Callisto trade for 1.0R Breakeven and logs settlement when closed."""
+        """Monitors active Callisto trade with pip milestone scaling, breakeven, and profit trailing."""
         await asyncio.sleep(5)
         pos = self.open_positions.get(order_id)
         if not pos:
@@ -279,8 +309,9 @@ class CallistoCopier(BaseCopier):
         entry = pos["entry_price"]
         sl = pos["initial_sl"]
         risk_dist = abs(entry - sl)
+        pos["trailing_stage"] = 0
 
-        logger.info(f"🛡️ [Callisto] Monitoring position #{pos_id or order_id} for Breakeven & Settlement.")
+        logger.info(f"🛡️ [Callisto] Monitoring position #{pos_id or order_id} with milestone trailing & Breakeven.")
 
         while order_id in self.open_positions:
             await asyncio.sleep(self.poll_interval)
@@ -301,25 +332,84 @@ class CallistoCopier(BaseCopier):
                 self.open_positions.pop(order_id, None)
                 break
 
-            # 1.0R Breakeven shift
-            if not pos.get("moved_to_be") and pos_id:
+            # Multi-tier Milestone Trailing and Breakeven
+            if pos_id:
                 prices = self.get_market_price()
                 mid = prices["mid"]
                 if mid > 0:
-                    hit_1r = (mid - entry >= risk_dist) if side == "BUY" else (entry - mid >= risk_dist)
-                    if hit_1r:
-                        be_buf = 0.25
+                    gain = (mid - entry) if side == "BUY" else (entry - mid)
+                    gain_pips = gain * 10.0
+                    stage = pos.get("trailing_stage", 0)
+
+                    # Stage 1: +30 Pips ($3.00) -> Cut risk by 50%
+                    if gain_pips >= 30.0 and stage < 1:
+                        half_risk_sl = round(entry - (risk_dist * 0.5) if side == "BUY" else entry + (risk_dist * 0.5), 2)
+                        res = self.mcp.change_position_stop_loss(position_id=pos_id, level=half_risk_sl)
+                        if not res.get("error"):
+                            pos["sl"] = half_risk_sl
+                            pos["trailing_stage"] = 1
+                            logger.info(f"🛡️ [Callisto +30 Pips] Risk cut 50% on #{pos_id}! SL: {half_risk_sl}")
+                            await self.notify(
+                                f"🛡️ [Callisto DEFENSE +30 PIPS]\n"
+                                f"Position #{pos_id} ({side})\n"
+                                f"Risk reduced by 50% | New SL: {half_risk_sl:.2f}"
+                            )
+
+                    # Stage 2: +50 Pips ($5.00) or 1.0R -> Move to Breakeven (+0.30 buffer)
+                    if (gain_pips >= 50.0 or gain >= risk_dist) and stage < 2:
+                        be_buf = 0.30
                         be_level = round(entry + be_buf if side == "BUY" else entry - be_buf, 2)
-                        logger.info(f"🛡️ [Callisto BREAKEVEN] 1.0R reached on #{pos_id}! Moving SL to {be_level}")
                         res = self.mcp.change_position_stop_loss(position_id=pos_id, level=be_level)
                         if not res.get("error"):
                             pos["sl"] = be_level
                             pos["moved_to_be"] = True
+                            pos["trailing_stage"] = 2
+                            logger.info(f"🛡️ [Callisto +50 Pips / 1R] Breakeven activated on #{pos_id}! SL: {be_level}")
                             await self.notify(
-                                f"🛡️ [Callisto BREAKEVEN ACTIVATED]\n"
-                                f"Position: #{pos_id} ({side})\n"
-                                f"SL shifted to: {be_level:.2f}"
+                                f"🛡️ [Callisto BREAKEVEN +50 PIPS]\n"
+                                f"Position #{pos_id} ({side})\n"
+                                f"Trade is now Risk-Free! SL shifted to: {be_level:.2f}"
                             )
+
+                    # Stage 3: +100 Pips ($10.00) -> Lock in +50 Pips profit
+                    if gain_pips >= 100.0 and stage < 3:
+                        lock_50 = round(entry + 5.00 if side == "BUY" else entry - 5.00, 2)
+                        res = self.mcp.change_position_stop_loss(position_id=pos_id, level=lock_50)
+                        if not res.get("error"):
+                            pos["sl"] = lock_50
+                            pos["trailing_stage"] = 3
+                            logger.info(f"💰 [Callisto +100 Pips] Secured +50 Pips on #{pos_id}! SL: {lock_50}")
+                            await self.notify(
+                                f"💰 [Callisto PROFIT LOCK +100 PIPS]\n"
+                                f"Position #{pos_id} ({side})\n"
+                                f"Banked +50 Pips profit! New SL: {lock_50:.2f}"
+                            )
+
+                    # Stage 4: +150 Pips ($15.00) -> Lock in +100 Pips profit
+                    if gain_pips >= 150.0 and stage < 4:
+                        lock_100 = round(entry + 10.00 if side == "BUY" else entry - 10.00, 2)
+                        res = self.mcp.change_position_stop_loss(position_id=pos_id, level=lock_100)
+                        if not res.get("error"):
+                            pos["sl"] = lock_100
+                            pos["trailing_stage"] = 4
+                            logger.info(f"💰 [Callisto +150 Pips] Secured +100 Pips on #{pos_id}! SL: {lock_100}")
+                            await self.notify(
+                                f"💰 [Callisto PROFIT LOCK +150 PIPS]\n"
+                                f"Position #{pos_id} ({side})\n"
+                                f"Banked +100 Pips profit! New SL: {lock_100:.2f}"
+                            )
+
+                    # Stage 5: +200+ Pips ($20.00+) -> Dynamic 60 Pip Trailing Stop
+                    if gain_pips >= 200.0:
+                        trail_sl = round(mid - 6.00 if side == "BUY" else mid + 6.00, 2)
+                        current_sl = pos.get("sl", sl)
+                        should_update = (trail_sl > current_sl + 0.80) if side == "BUY" else (trail_sl < current_sl - 0.80)
+                        if should_update:
+                            res = self.mcp.change_position_stop_loss(position_id=pos_id, level=trail_sl)
+                            if not res.get("error"):
+                                pos["sl"] = trail_sl
+                                pos["trailing_stage"] = 5
+                                logger.info(f"🎯 [Callisto Trailing Stop] Trailing SL updated to {trail_sl:.2f} on #{pos_id}")
 
     async def _log_trade_closure(self, order_id: int):
         pos = self.open_positions.get(order_id, {})
@@ -393,6 +483,9 @@ class CallistoCopier(BaseCopier):
             if itype == "INVALIDATE":
                 self.invalidate_zone(side)
                 await self.notify(f"🚫 [Callisto] {side} ZONE INVALIDATED by channel.")
+            elif itype == "BREAKEVEN":
+                logger.info("📢 [Callisto] Received BREAKEVEN / SECURE PROFIT broadcast from channel!")
+                await self.trigger_manual_breakeven(reason="Channel Broadcast")
             elif itype == "ZONE":
                 zone_data = {
                     "side": side,

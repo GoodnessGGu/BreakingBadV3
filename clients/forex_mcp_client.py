@@ -385,10 +385,22 @@ class IQForexMCPClient:
         """
         Place an immediate market order on IQ Option Marginal Forex engine.
         """
+        # Dynamically resolve active instrument_id if get_instruments returns active contracts
+        active_inst_id = instrument_id
+        try:
+            inst_data = self.get_instruments(asset_id)
+            if inst_data and isinstance(inst_data, dict) and "instruments" in inst_data:
+                for inst in inst_data["instruments"]:
+                    if isinstance(inst, dict) and inst.get("id"):
+                        active_inst_id = inst["id"]
+                        break
+        except Exception:
+            pass
+
         args = {
             "side": side.lower(),
             "balance_id": balance_id,
-            "instrument_id": instrument_id,
+            "instrument_id": active_inst_id,
             "asset_id": asset_id,
             "lots": lots,
             "leverage": leverage,
@@ -400,7 +412,7 @@ class IQForexMCPClient:
         if take_profit is not None and take_profit > 0:
             args["take_profit"] = round(float(take_profit), 5)
 
-        logger.info(f"🚀 [MCP Forex] Placing {side.upper()} order: Asset={asset_id} ({instrument_id}), Lots={lots}, Lev={leverage}x, SL={stop_loss}, TP={take_profit}")
+        logger.info(f"🚀 [MCP Forex] Placing {side.upper()} order: Asset={asset_id} ({active_inst_id}), Lots={lots}, Lev={leverage}x, SL={stop_loss}, TP={take_profit}")
         return self.call_tool("place_market_order", args)
 
     def change_position_stop_loss(self, position_id: int, level: float) -> Dict[str, Any]:

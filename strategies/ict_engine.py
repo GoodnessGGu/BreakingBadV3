@@ -47,7 +47,7 @@ INSTRUMENT_PROFILES = {
         "disp_threshold": 160.0,
         "min_fvg_gap": 20.0,
         "body_ratio_req": 0.50,
-        "default_lots": 1.0,
+        "default_lots": 0.01,
         "digits": 2
     },
     "EURUSD": {
@@ -377,14 +377,15 @@ class ICTStrategyEngine:
             if risk_dist < (min_fvg_gap * 0.5):
                 return
 
-            tp = round(exec_px + (risk_dist * self.rr_ratio) if side == "BUY" else exec_px - (risk_dist * self.rr_ratio), digits)
+            trade_lots = profile.get("default_lots", self.lots) if symbol == "BTCUSD" else self.lots
+            trade_lots = max(0.01, round(float(trade_lots), 4))
 
             await self.notify(
                 f"⚡ [ICT EXECUTION — {symbol} {side}]\n"
                 f"Entry : {exec_px} (FVG Retest)\n"
                 f"SL    : {sl}\n"
                 f"TP    : {tp} (1:{self.rr_ratio:.1f} RR)\n"
-                f"Lots  : {self.lots}"
+                f"Lots  : {trade_lots}"
             )
 
             trade_lev = min(self.leverage, 20 if symbol == "BTCUSD" else self.leverage)
@@ -393,7 +394,7 @@ class ICTStrategyEngine:
                 balance_id=self.balance_id,
                 instrument_id=profile["instrument_id"],
                 asset_id=profile["asset_id"],
-                lots=self.lots,
+                lots=trade_lots,
                 leverage=trade_lev,
                 stop_loss=sl,
                 take_profit=tp,

@@ -386,8 +386,19 @@ class CallistoCopier(BaseCopier):
         side = pos["side"]
         entry = pos["entry_price"]
         sl = pos["initial_sl"]
+        tp = pos.get("tp")
         risk_dist = abs(entry - sl)
         tag = pos.get("tag", "Standard")
+
+        # Firmly attach SL and TP if not already bound by broker
+        if pos_id:
+            try:
+                if sl and sl > 0:
+                    self.mcp.change_position_stop_loss(position_id=pos_id, level=sl)
+                if tp and tp > 0:
+                    self.mcp.change_position_take_profit(position_id=pos_id, level=tp)
+            except Exception as e:
+                logger.warning(f"[Callisto] Notice setting post-fill SL/TP on #{pos_id}: {e}")
 
         logger.info(f"🛡️ [Callisto] Monitoring position #{pos_id or order_id} ({tag}) with milestone trailing & Breakeven.")
 

@@ -413,7 +413,15 @@ class IQForexMCPClient:
             args["take_profit"] = round(float(take_profit), 5)
 
         logger.info(f"🚀 [MCP Forex] Placing {side.upper()} order: Asset={asset_id} ({active_inst_id}), Lots={lots}, Lev={leverage}x, SL={stop_loss}, TP={take_profit}")
-        return self.call_tool("place_market_order", args)
+        res = self.call_tool("place_market_order", args)
+        if ("error" in res or res.get("isError")) and ("stop_loss" in args or "take_profit" in args):
+            err_str = str(res.get("error", res))
+            if "not_filled" in err_str or "stop_levels" in err_str:
+                logger.warning(f"⚠️ [MCP Forex] Market order fill failed due to SL/TP constraints ({err_str}). Retrying immediately without initial SL/TP for guaranteed market fill...")
+                clean_args = {k: v for k, v in args.items() if k not in ("stop_loss", "take_profit")}
+                retry_res = self.call_tool("place_market_order", clean_args)
+                return retry_res
+        return res
 
     def change_position_stop_loss(self, position_id: int, level: float) -> Dict[str, Any]:
         """

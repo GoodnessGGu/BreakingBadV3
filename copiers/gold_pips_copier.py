@@ -270,6 +270,19 @@ class GoldPipsCopier(BaseCopier):
             return
 
         pos_id = pos["position_id"]
+        sl = pos.get("sl")
+        tp = pos.get("tp")
+
+        # Firmly attach SL and TP if not already bound by broker
+        if pos_id:
+            try:
+                if sl and sl > 0:
+                    self.mcp.change_position_stop_loss(position_id=pos_id, level=sl)
+                if tp and tp > 0:
+                    self.mcp.change_position_take_profit(position_id=pos_id, level=tp)
+            except Exception as e:
+                logger.warning(f"[GoldPips] Notice setting post-fill SL/TP on #{pos_id}: {e}")
+
         logger.info(f"🛡️ [GoldPips] Monitoring position #{pos_id} for settlement.")
 
         while order_id in self.open_positions:

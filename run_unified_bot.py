@@ -31,6 +31,7 @@ from clients.blitz_mcp_client import IQBlitzMCPClient
 from copiers.callisto_copier import CallistoCopier
 from copiers.gold_pips_copier import GoldPipsCopier
 from copiers.gsociety_copier import GSocietyCopier
+from copiers.kingmahn_copier import KingmahnCopier
 from copiers.polycarp_copier import PolycarpCopier
 from copiers.channel_manager import ChannelManager
 from strategies.ict_engine import ICTStrategyEngine
@@ -108,6 +109,13 @@ async def main():
     )
     gsociety.set_balance(fx_bid, args.account)
 
+    kingmahn = KingmahnCopier(
+        mcp_client=forex_mcp,
+        lots=args.lots,
+        leverage=args.leverage
+    )
+    kingmahn.set_balance(fx_bid, args.account)
+
     polycarp = PolycarpCopier(
         blitz_mcp=blitz_mcp,
         channel_id=-1002551711564,
@@ -124,6 +132,7 @@ async def main():
     channel_mgr.register_copier(callisto)
     channel_mgr.register_copier(gold_pips)
     channel_mgr.register_copier(gsociety)
+    channel_mgr.register_copier(kingmahn)
     channel_mgr.register_copier(polycarp)
 
     # 5. Create ICT Strategy Engine

@@ -29,9 +29,22 @@ class CallistoZoneParser:
     def parse_all(text: str) -> List[Dict[str, Any]]:
         upper   = text.upper()
         results = []
+
+        # 1. Explicit or Completed Zone Invalidation
         for inv in ("BUY", "SELL"):
-            if f"{inv} ZONE INVALIDATED" in upper or f"{inv} ZONE CANCELLED" in upper:
+            if f"{inv} ZONE INVALIDATED" in upper or f"{inv} ZONE CANCELLED" in upper or f"{inv} ZONE EXPIRED" in upper:
                 results.append({"type": "INVALIDATE", "side": inv})
+            elif f"{inv} ZONE UPDATE" in upper and any(k in upper for k in ["TP 4 SMACKED", "TP4 SMACKED", "PRINTED INSTANTLY", "TP4 HIT", "190PIPS", "190 PIPS", "TP 4 HIT"]):
+                results.append({"type": "INVALIDATE", "side": inv})
+
+        # Generic full-target victory broadcasts retire active zones
+        if any(k in upper for k in ["BANG TP4 HIT", "TP4 HIT", "TP 4 SMACKED", "TP4 SMACKED", "ALL TP HIT", "PRINTED INSTANTLY"]):
+            if "BUY" in upper and not any(r.get("side") == "BUY" for r in results):
+                results.append({"type": "INVALIDATE", "side": "BUY"})
+            elif "SELL" in upper and not any(r.get("side") == "SELL" for r in results):
+                results.append({"type": "INVALIDATE", "side": "SELL"})
+            elif not results:
+                results.append({"type": "INVALIDATE_ALL"})
 
         if any(kw in upper for kw in ["BREAK EVEN", "BREAKEVEN", "SET STOPS TO BREAK", "MOVE SL TO ENTRY", "MOVE STOPS TO BE", "SECURE PROFIT", "SECURE MORE PROFIT"]):
             results.append({"type": "BREAKEVEN"})
@@ -586,7 +599,11 @@ class CallistoCopier(BaseCopier):
             side  = item.get("side")
             if itype == "INVALIDATE":
                 self.invalidate_zone(side)
-                await self.notify(f"🚫 [Callisto] {side} ZONE INVALIDATED by channel.")
+                await self.notify(f"🚫 [Callisto] {side} ZONE RETIRED / CONSUMED (Target Completed).")
+            elif itype == "INVALIDATE_ALL":
+                for s in list(self.active_zones.keys()):
+                    self.invalidate_zone(s)
+                await self.notify("🚫 [Callisto] Active ZONES RETIRED / CONSUMED (Full Target Hit).")
             elif itype == "BREAKEVEN":
                 logger.info("📢 [Callisto] Received BREAKEVEN / SECURE PROFIT broadcast from channel!")
                 await self.trigger_manual_breakeven(reason="Channel Broadcast")

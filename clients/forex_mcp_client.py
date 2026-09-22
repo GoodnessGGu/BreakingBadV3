@@ -397,9 +397,19 @@ class IQForexMCPClient:
         except Exception:
             pass
 
+        # Dynamically resolve balance_id if not provided
+        active_bal_id = balance_id
+        if not active_bal_id:
+            try:
+                bal = self.get_training_balance() or self.get_real_balance()
+                if bal and bal.get("balance_id"):
+                    active_bal_id = bal["balance_id"]
+            except Exception:
+                pass
+
         args = {
             "side": side.lower(),
-            "balance_id": balance_id,
+            "balance_id": active_bal_id,
             "instrument_id": active_inst_id,
             "asset_id": asset_id,
             "lots": lots,

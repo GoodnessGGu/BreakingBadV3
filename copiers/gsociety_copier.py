@@ -136,7 +136,7 @@ class GSocietyCopier(BaseCopier):
         try:
             p = self.mcp.calculate_order_size(
                 asset_id=GOLD_ASSET_ID, balance_currency="USD",
-                lots=self.lots, leverage=self.leverage
+                lots=max(1.0, self.lots), leverage=self.leverage
             )
             if isinstance(p, dict) and "buy_price" in p:
                 buy = float(p.get("buy_price", 0.0))

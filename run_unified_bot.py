@@ -151,6 +151,10 @@ async def main():
     )
     tg_bot.account_type = args.account
 
+    # Eagerly wire notification callbacks before starting event loops
+    channel_mgr.set_notification_callback(tg_bot.broadcast_alert)
+    ict_engine.set_notification_callback(tg_bot.broadcast_alert)
+
     # 7. Start Concurrent Execution
     logger.info("=" * 65)
     logger.info("🟢 ALL MODULES INITIALIZED — STARTING MASTER EVENT LOOP")

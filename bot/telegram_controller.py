@@ -92,16 +92,26 @@ class TelegramTradingBot:
         return self.blitz_stake
 
     async def broadcast_alert(self, text: str):
-        """Send high-priority notification to the admin on Telegram."""
-        if not self.app:
-            return
+        """Send high-priority notification to the admin on Telegram with direct HTTP fallback."""
+        if self.app and getattr(self.app, "bot", None):
+            try:
+                await self.app.bot.send_message(
+                    chat_id=self.admin_id,
+                    text=text
+                )
+                return
+            except Exception as e:
+                logger.warning(f"Error sending broadcast via app.bot: {e}")
+
+        # Resilient fallback via direct Telegram HTTP API
         try:
-            await self.app.bot.send_message(
-                chat_id=self.admin_id,
-                text=text
-            )
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                await client.post(
+                    f"https://api.telegram.org/bot{self.token}/sendMessage",
+                    json={"chat_id": self.admin_id, "text": text}
+                )
         except Exception as e:
-            logger.warning(f"Error sending broadcast alert: {e}")
+            logger.error(f"Failed to send direct Telegram broadcast alert: {e}")
 
     def build_status_text(self) -> str:
         # Fetch balances

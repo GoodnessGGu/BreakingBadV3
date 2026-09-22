@@ -8,7 +8,7 @@ import re
 import time
 import logging
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
 from copiers.base_copier import BaseCopier
 from clients.forex_mcp_client import IQForexMCPClient

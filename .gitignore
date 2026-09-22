@@ -13,6 +13,10 @@ trades.db*
 live_trade_feedback.csv
 service_account.json
 *.session*
+login_state.json
+new_session_string.txt
+telegram_qr_login.png
+scratch_*.py
 my_telegram_channels.json
 tele_auth_state.json
 logs.*.csv

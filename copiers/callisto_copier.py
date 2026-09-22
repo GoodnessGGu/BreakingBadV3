@@ -213,7 +213,16 @@ class CallistoCopier(BaseCopier):
             macro_tp = round(target, 2) if target and target < exec_price else round(exec_price - abs(exec_price - sl) * 2.0, 2)
 
         orders_to_place = []
-        if self.lots >= 0.02:
+        # Respect broker min_quantity (1.0 for Gold CFD on IQ Option)
+        min_qty = 1.0
+        try:
+            inst = self.mcp.get_instruments(GOLD_ASSET_ID)
+            if inst and isinstance(inst, dict) and "instruments" in inst and len(inst["instruments"]) > 0:
+                min_qty = float(inst["instruments"][0].get("min_quantity", 1.0))
+        except Exception:
+            min_qty = 1.0
+
+        if self.lots >= (min_qty * 2.0):
             lot1 = round(self.lots / 2, 2)
             lot2 = round(self.lots - lot1, 2)
             tp1 = round(exec_price + 4.50 if side == "BUY" else exec_price - 4.50, 2)
@@ -232,9 +241,10 @@ class CallistoCopier(BaseCopier):
                 "is_tp1": False
             })
         else:
+            trade_lots = max(min_qty, self.lots)
             orders_to_place.append({
-                "tag": "Single Order (100%)",
-                "lots": self.lots,
+                "tag": "Standard Position (100%)",
+                "lots": trade_lots,
                 "sl": sl,
                 "tp": macro_tp,
                 "is_tp1": False

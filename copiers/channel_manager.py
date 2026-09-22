@@ -106,8 +106,9 @@ class ChannelManager:
                     return
 
                 msg_id = getattr(event.message, 'id', int(time.time()))
+                msg_date = getattr(event.message, 'date', None)
                 logger.info(f"📨 [{copier.name}] New message (#{msg_id}): {msg_text[:60]}...")
-                await copier.handle_message(msg_text, msg_id, event)
+                await copier.handle_message(msg_text, msg_id, event, msg_date)
             except Exception as e:
                 logger.error(f"Error handling channel event: {e}")
 
@@ -147,7 +148,7 @@ class ChannelManager:
                 for m in recent_msgs:
                     txt = getattr(m, 'message', None) or getattr(m, 'text', '')
                     if txt:
-                        await copier.handle_message(txt, m.id, None)
+                        await copier.handle_message(txt, m.id, None, m.date)
             except Exception as e:
                 logger.warning(f"Startup lookback warning for {copier.name} ({cid}): {e}")
 

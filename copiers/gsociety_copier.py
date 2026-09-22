@@ -155,6 +155,19 @@ class GSocietyCopier(BaseCopier):
             logger.error("❌ [GSociety] Could not fetch market price.")
             return
 
+        # Check for conflicting opposite position on Gold
+        try:
+            positions = self.mcp.list_positions(balance_id=self.balance_id)
+            opp_side = "short" if side == "BUY" else "long"
+            opp_pos = next((p for p in positions if p.get("asset_id") == GOLD_ASSET_ID and p.get("type", "").lower() == opp_side), None)
+            if opp_pos:
+                pos_id = opp_pos.get("position_id") or opp_pos.get("id")
+                logger.warning(f"⚠️ [GSociety] Skipped {side} — An active {opp_side.upper()} position (#{pos_id}) already exists on Gold.")
+                await self.notify(f"⚠️ [G Society] Skipped {side} — Opposing {opp_side.upper()} position #{pos_id} already active on Gold.")
+                return
+        except Exception as e:
+            logger.warning(f"[GSociety] Error checking open positions: {e}")
+
         # Slippage check against entry range if provided
         emin = sig.get("entry_min")
         emax = sig.get("entry_max")
@@ -514,21 +527,33 @@ class GSocietyCopier(BaseCopier):
             f"Reason  : {reason}"
         )
 
-    async def handle_message(self, text: str, message_id: int, event: Any = None):
+    async def handle_message(self, text: str, message_id: int, event: Any = None, msg_date: Any = None):
         if not self.is_enabled:
             return
         if message_id in self.processed_msg_ids:
             return
         self.processed_msg_ids.add(message_id)
 
-        # 1. Check for Breakeven instructions
+        # 1. Check message freshness for instant market execution
+        if msg_date:
+            try:
+                now_utc = datetime.now(timezone.utc)
+                msg_utc = msg_date if msg_date.tzinfo else msg_date.replace(tzinfo=timezone.utc)
+                age_sec = (now_utc - msg_utc).total_seconds()
+                if age_sec > 180:
+                    logger.info(f"⏰ [GSociety] Skipped historical signal #{message_id} ({int(age_sec)}s old during lookback)")
+                    return
+            except Exception as e:
+                logger.warning(f"[GSociety] Error checking message date: {e}")
+
+        # 2. Check for Breakeven instructions
         inst = GSocietyParser.parse_instruction(text)
         if inst and inst["type"] == "BREAKEVEN":
             logger.info("📢 [GSociety] Received Secure Profit / Breakeven command from channel!")
             await self.trigger_manual_breakeven(reason="Channel Broadcast")
             return
 
-        # 2. Check for trade signal
+        # 3. Check for trade signal
         sig = GSocietyParser.parse_signal(text)
         if sig and sig.get("type") == "SIGNAL":
             logger.info(f"🎯 [GSociety] New signal parsed: {sig['side']} | SL: {sig['sl']} | TP1: {sig['tp1']} | TP2: {sig['tp2']}")

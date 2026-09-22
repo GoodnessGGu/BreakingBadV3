@@ -203,6 +203,19 @@ class CallistoCopier(BaseCopier):
         zone = self.active_zones.get(side, {})
         exec_price = prices["buy"] if side == "BUY" else prices["sell"]
 
+        # Check for conflicting opposite position on Gold
+        try:
+            positions = self.mcp.list_positions(balance_id=self.balance_id)
+            opp_side = "short" if side == "BUY" else "long"
+            opp_pos = next((p for p in positions if p.get("asset_id") == GOLD_ASSET_ID and p.get("type", "").lower() == opp_side), None)
+            if opp_pos:
+                pos_id = opp_pos.get("position_id") or opp_pos.get("id")
+                logger.warning(f"⚠️ [Callisto] Skipped {side} — An active {opp_side.upper()} position (#{pos_id}) already exists on Gold.")
+                await self.notify(f"⚠️ [Callisto] Skipped {side} — Opposing {opp_side.upper()} position #{pos_id} already active on Gold.")
+                return
+        except Exception as e:
+            logger.warning(f"[Callisto] Error checking open positions: {e}")
+
         if side == "BUY":
             sl = round(zone.get("zone_low", exec_price) - self.sl_buffer, 2)
             target = zone.get("target")
@@ -557,7 +570,7 @@ class CallistoCopier(BaseCopier):
             f"Reason  : {reason}"
         )
 
-    async def handle_message(self, text: str, message_id: int, event: Any = None):
+    async def handle_message(self, text: str, message_id: int, event: Any = None, msg_date: Any = None):
         if not self.is_enabled:
             return
         if message_id in self.processed_msg_ids:

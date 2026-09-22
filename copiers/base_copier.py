@@ -39,7 +39,7 @@ class BaseCopier(abc.ABC):
         return self.is_enabled
 
     @abc.abstractmethod
-    async def handle_message(self, text: str, message_id: int, event: Any = None):
+    async def handle_message(self, text: str, message_id: int, event: Any = None, msg_date: Any = None):
         """Process incoming message from the channel."""
         pass
 

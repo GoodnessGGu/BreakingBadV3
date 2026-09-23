@@ -262,6 +262,23 @@ class PolycarpCopier(BaseCopier):
             is_win = (res_str == "win" or profit > 0)
             pnl = profit
 
+            try:
+                gsheet_logger.log_trade({
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "asset": pair,
+                    "direction": direction.upper(),
+                    "amount": stake,
+                    "expiry": exp_secs,
+                    "result": "WIN" if is_win else "LOSS",
+                    "profit": pnl if is_win else -stake,
+                    "gale_level": gale_level,
+                    "signal_source": "Polycarp VIP",
+                    "entry_price": trade.get("open_price", trade.get("entry_price", 0.0)),
+                    "close": trade.get("close_price", 0.0)
+                }, worksheet_name="Polycarp_Trades")
+            except Exception as ge:
+                logger.warning(f"[Polycarp] GSheet log error: {ge}")
+
             gale_label = f" (Gale {gale_level})" if gale_level > 0 else ""
 
             if is_win:

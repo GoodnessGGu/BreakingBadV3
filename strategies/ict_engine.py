@@ -379,6 +379,7 @@ class ICTStrategyEngine:
 
             trade_lots = profile.get("default_lots", self.lots) if symbol == "BTCUSD" else self.lots
             trade_lots = max(0.01, round(float(trade_lots), 4))
+            tp = round(exec_px + (risk_dist * self.rr_ratio) if side == "BUY" else exec_px - (risk_dist * self.rr_ratio), digits)
 
             await self.notify(
                 f"⚡ [ICT EXECUTION — {symbol} {side}]\n"

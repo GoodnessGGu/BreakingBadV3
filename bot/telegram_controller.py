@@ -254,7 +254,7 @@ class TelegramTradingBot:
                 zones_lines = [f"  • {s}: `{z['zone_low']:.2f} – {z['zone_high']:.2f}` (Target: {z.get('target', 'N/A')})" for s, z in zones.items()]
                 zones_txt = "\n".join(zones_lines)
             else:
-                zones_txt = "  _No active zones currently watching._"
+                zones_txt = "  • No active zones currently watching."
 
             # 2. Polycarp Blitz Trades
             p_copier = self.channel_mgr.get_copier("polycarpvip")
@@ -263,7 +263,7 @@ class TelegramTradingBot:
                 b_lines = [f"  • #{pid}: {t.get('pair', 'OTC')} {str(t.get('direction', '')).upper()} (${t.get('amount', 2.0)})" for pid, t in blitz_trades.items()]
                 blitz_txt = "\n".join(b_lines)
             else:
-                blitz_txt = "  _No active Blitz option trades._"
+                blitz_txt = "  • No active Blitz option trades."
 
             # 3. ICT Pending FVGs
             ict_fvgs = getattr(self.ict_engine, "pending_fvgs", {})
@@ -271,7 +271,7 @@ class TelegramTradingBot:
             if active_fvgs:
                 fvg_txt = "\n".join(active_fvgs)
             else:
-                fvg_txt = "  _No pending FVG retests waiting._"
+                fvg_txt = "  • No pending FVG retests waiting."
 
             # 4. ICT Active Positions
             ict_trades = getattr(self.ict_engine, "active_trades", {})
@@ -279,7 +279,7 @@ class TelegramTradingBot:
             if active_pos:
                 ict_trade_txt = "\n".join(active_pos)
             else:
-                ict_trade_txt = "  _No active ICT positions currently running._"
+                ict_trade_txt = "  • No active ICT positions currently running."
 
             # 5. Open CFD Positions on IQ Option
             bid = self.get_active_balance_id()
@@ -294,7 +294,7 @@ class TelegramTradingBot:
                 cfd_lines = [f"  • #{p.get('position_id') or p.get('id')}: Asset #{p.get('asset_id')} {str(p.get('side', '')).upper()} | PnL: `${float(p.get('pnl', 0.0)):.2f}`" for p in open_cfd]
                 cfd_txt = "\n".join(cfd_lines)
             else:
-                cfd_txt = "  _No open Marginal CFD positions on broker._"
+                cfd_txt = "  • No open Marginal CFD positions on broker."
 
             text = (
                 f"📋 *Active Watchers, Zones & Live Setups*\n"
@@ -311,13 +311,17 @@ class TelegramTradingBot:
             return text
         except Exception as e:
             logger.error(f"[ActiveSetups] Error building view: {e}")
-            return f"📋 *Active Watchers & Setups*\n\n_Error loading active setups: {e}_"
+            return f"📋 *Active Watchers & Setups*\n\nError loading active setups: {e}"
 
     async def cmd_active_trades(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.is_admin(update.effective_user.id):
             return
         text = self.build_active_setups_view()
-        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=persistent_reply_keyboard())
+        try:
+            await update.message.reply_text(text, parse_mode="Markdown", reply_markup=persistent_reply_keyboard())
+        except Exception:
+            await update.message.reply_text(text, reply_markup=persistent_reply_keyboard())
+
     def get_active_balance_id(self) -> Optional[int]:
         if self.ict_engine.balance_id:
             return self.ict_engine.balance_id
@@ -338,6 +342,7 @@ class TelegramTradingBot:
             for t in raw_blitz:
                 pos_id = t.get("position_id") or t.get("id", "N/A")
                 asset = t.get("asset_name") or t.get("active") or f"Asset {t.get('asset_id', '')}"
+                asset = str(asset).replace("_", " ")
                 res_str = str(t.get("result", "")).lower()
                 profit = float(t.get("profit", 0.0))
                 stake = float(t.get("amount") or t.get("invest") or 0.0)
@@ -386,12 +391,13 @@ class TelegramTradingBot:
                             asset_name = sym
                             break
 
+                asset_name = str(asset_name).replace("_", " ")
                 side = str(t.get("side", "BUY")).upper()
                 lots = float(t.get("lots") or t.get("count") or 1.0)
                 open_px = float(t.get("open_price", 0.0))
                 close_px = float(t.get("close_price", 0.0))
                 pnl = float(t.get("pnl") or t.get("profit") or 0.0)
-                reason = str(t.get("close_reason", "closed"))
+                reason = str(t.get("close_reason", "closed")).replace("_", " ").title()
 
                 ts_raw = t.get("close_time") or t.get("open_time")
                 if isinstance(ts_raw, (int, float)):
@@ -466,7 +472,7 @@ class TelegramTradingBot:
                     p_sign = "+" if t["pnl"] >= 0 else ""
                     body += f"  {icon} `{t['time']}` *{t['asset']}* {t['direction']} ➔ `{p_sign}${t['pnl']:.2f}`\n"
             else:
-                body += "  _No recent Blitz trades found._\n"
+                body += "  • No recent Blitz trades found.\n"
             body += "\n"
 
         # Section 2: CFD Copiers (Callisto / Gold Pips)
@@ -487,7 +493,7 @@ class TelegramTradingBot:
                     p_sign = "+" if t["pnl"] >= 0 else ""
                     body += f"  {icon} `{t['time']}` *{t['asset']}* {t['side']} ➔ `{p_sign}${t['pnl']:.2f}` ({t['reason']})\n"
             else:
-                body += "  _No recent CFD copier trades found._\n"
+                body += "  • No recent CFD copier trades found.\n"
             body += "\n"
 
         # Section 3: Autonomous ICT Engine
@@ -508,7 +514,7 @@ class TelegramTradingBot:
                     p_sign = "+" if t["pnl"] >= 0 else ""
                     body += f"  {icon} `{t['time']}` *{t['asset']}* {t['side']} ➔ `{p_sign}${t['pnl']:.2f}`\n"
             else:
-                body += "  _No recent ICT autonomous trades found._\n"
+                body += "  • No recent ICT autonomous trades found.\n"
 
         return header + body
 
@@ -519,11 +525,18 @@ class TelegramTradingBot:
         if context.args and context.args[0].lower() in ["blitz", "cfd", "ict", "all"]:
             cat = context.args[0].lower()
         msg = self.build_history_view(cat)
-        await update.message.reply_text(
-            msg,
-            parse_mode="Markdown",
-            reply_markup=history_menu_keyboard(cat)
-        )
+        try:
+            await update.message.reply_text(
+                msg,
+                parse_mode="Markdown",
+                reply_markup=history_menu_keyboard(cat)
+            )
+        except Exception as e:
+            logger.warning(f"Markdown error sending history: {e}. Retrying without markdown.")
+            await update.message.reply_text(
+                msg,
+                reply_markup=history_menu_keyboard(cat)
+            )
 
     async def cmd_account(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.is_admin(update.effective_user.id):
@@ -764,11 +777,18 @@ class TelegramTradingBot:
         elif data.startswith("history_cat_"):
             cat = data.replace("history_cat_", "")
             txt = self.build_history_view(cat)
-            await query.edit_message_text(
-                txt,
-                reply_markup=history_menu_keyboard(cat),
-                parse_mode="Markdown"
-            )
+            try:
+                await query.edit_message_text(
+                    txt,
+                    reply_markup=history_menu_keyboard(cat),
+                    parse_mode="Markdown"
+                )
+            except Exception as e:
+                logger.warning(f"Markdown error in history button callback: {e}. Retrying without markdown.")
+                await query.edit_message_text(
+                    txt,
+                    reply_markup=history_menu_keyboard(cat)
+                )
 
         # ICT Engine Menu
         elif data == "btn_ict_menu":

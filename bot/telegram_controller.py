@@ -1055,6 +1055,19 @@ class TelegramTradingBot:
         await self.app.updater.start_polling(drop_pending_updates=True)
         self.is_running = True
         logger.info("🤖 Telegram Bot UI active & listening for user commands!")
+        
+        # Send startup notification to Admin
+        try:
+            startup_text = (
+                "🚀 *BreakingBad V3 Ecosystem Online!*\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                + self.build_status_text()
+            )
+            await self.broadcast_alert(startup_text)
+            logger.info("📢 [Controller] Startup message dispatched to Admin.")
+        except Exception as e:
+            logger.warning(f"Failed to broadcast startup alert: {e}")
+
         asyncio.create_task(self.session_notifier.run_loop())
         asyncio.create_task(self.news_engine.run_loop())
         try:

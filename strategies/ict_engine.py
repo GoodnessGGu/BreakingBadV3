@@ -111,8 +111,8 @@ class ICTStrategyEngine:
         self.rr_ratio = rr_ratio
         self.is_enabled = enabled
 
-        # Multi-asset state: Defaults to Gold + Bitcoin active
-        self.enabled_symbols: Set[str] = {"XAUUSD", "BTCUSD"}
+        # Multi-asset state: Defaults to Gold (XAUUSD) active
+        self.enabled_symbols: Set[str] = {"XAUUSD"}
         if symbol:
             sym_clean = symbol.upper().replace("/", "").replace("-", "")
             if sym_clean in INSTRUMENT_PROFILES:
@@ -422,7 +422,17 @@ class ICTStrategyEngine:
                 await self.notify(f"✅ [ICTEngine] {symbol} Order Filled! ID: #{order_id}")
             else:
                 logger.error(f"❌ [ICTEngine] {symbol} Order placement failed: {res}")
-                await self.notify(f"❌ [ICTEngine] {symbol} Order Failed: {res.get('error', res)}")
+                # Clear pending FVG to avoid infinite error loops on the same setup
+                self.pending_fvgs.pop(symbol, None)
+                err_dict = res.get('error', {})
+                err_msg = err_dict.get('message', str(err_dict)) if isinstance(err_dict, dict) else str(res)
+                if "not_available" in err_msg.lower():
+                    logger.warning(f"⚠️ [ICTEngine] Instrument {symbol} is not tradeable on broker. Disabling {symbol}.")
+                    if symbol != "XAUUSD":
+                        self.enabled_symbols.discard(symbol)
+                    await self.notify(f"⚠️ [ICTEngine] {symbol} is currently unavailable on IQ Option Marginal CFD. Disabled {symbol}.")
+                else:
+                    await self.notify(f"❌ [ICTEngine] {symbol} Order Failed: {err_msg}")
 
     async def manage_active_trade(self, symbol: str, cur_prices: Dict[str, float]):
         trade = self.active_trades.get(symbol)

@@ -27,6 +27,7 @@ if sys.platform == "win32":
 load_dotenv()
 
 from clients.forex_mcp_client import IQForexMCPClient
+import re
 from clients.blitz_mcp_client import IQBlitzMCPClient
 from copiers.callisto_copier import CallistoCopier
 from copiers.gold_pips_copier import GoldPipsCopier
@@ -37,10 +38,35 @@ from copiers.channel_manager import ChannelManager
 from strategies.ict_engine import ICTStrategyEngine
 from bot.telegram_controller import TelegramTradingBot
 
+class SensitiveTokenFilter(logging.Filter):
+    """Redacts Telegram bot tokens and bearer credentials from all log outputs."""
+    def filter(self, record):
+        if isinstance(record.msg, str):
+            record.msg = re.sub(r'bot\d+:[A-Za-z0-9_-]+', 'bot[REDACTED_TOKEN]', record.msg)
+            record.msg = re.sub(r'(Bearer\s+)[A-Za-z0-9_\-\.]{20,}', r'\1[REDACTED_TOKEN]', record.msg)
+        if record.args:
+            if isinstance(record.args, dict):
+                record.args = {k: (re.sub(r'bot\d+:[A-Za-z0-9_-]+', 'bot[REDACTED_TOKEN]', v) if isinstance(v, str) else v) for k, v in record.args.items()}
+            elif isinstance(record.args, tuple):
+                record.args = tuple(re.sub(r'bot\d+:[A-Za-z0-9_-]+', 'bot[REDACTED_TOKEN]', str(a)) if isinstance(a, str) else a for a in record.args)
+        return True
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
+
+# Silence third-party HTTP libraries that log outgoing URLs containing bot tokens
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("telegram").setLevel(logging.WARNING)
+logging.getLogger("telegram.ext").setLevel(logging.WARNING)
+
+# Attach redaction filter to all active log handlers
+for handler in logging.root.handlers:
+    handler.addFilter(SensitiveTokenFilter())
+
 logger = logging.getLogger("MasterLauncher")
 
 async def main():

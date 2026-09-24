@@ -54,6 +54,16 @@ def history_menu_keyboard(category: str = "all") -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(keyboard)
 
+def active_setups_keyboard(is_live: bool = True) -> InlineKeyboardMarkup:
+    status_txt = "🟢 Live (Auto 4s)" if is_live else "⚪ Static"
+    keyboard = [
+        [
+            InlineKeyboardButton(f"🔄 {status_txt}", callback_data="btn_active_trades_refresh"),
+            InlineKeyboardButton("🔙 Main Menu", callback_data="btn_main_menu")
+        ]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
 def channels_menu_keyboard(copiers_status: List[Dict[str, Any]]) -> InlineKeyboardMarkup:
     keyboard = []
     for c in copiers_status:

@@ -29,7 +29,7 @@ from clients.blitz_mcp_client import IQBlitzMCPClient
 from bot.keyboards import (
     main_menu_keyboard, channels_menu_keyboard,
     ict_menu_keyboard, settings_menu_keyboard, close_all_confirm_keyboard,
-    persistent_reply_keyboard, history_menu_keyboard
+    persistent_reply_keyboard, history_menu_keyboard, active_setups_keyboard
 )
 from bot.session_notifier import MarketSessionNotifier
 from bot.news_engine import EconomicNewsEngine
@@ -55,6 +55,7 @@ class TelegramTradingBot:
         self.blitz_stake = float(blitz_stake)
         self.is_paused = False
         self.app: Optional[Application] = None
+        self._active_refresh_task: Optional[asyncio.Task] = None
 
     def is_admin(self, user_id: int) -> bool:
         return int(user_id) == self.admin_id
@@ -245,82 +246,232 @@ class TelegramTradingBot:
             parse_mode="Markdown"
         )
 
+    def get_live_price(self, symbol_or_id: Any) -> float:
+        """Helper to dynamically fetch real-time market mid price for any asset or symbol."""
+        try:
+            sym = str(symbol_or_id).upper().replace("/", "").replace("-", "")
+            if sym in INSTRUMENT_PROFILES:
+                p = self.ict_engine.get_market_price(sym)
+                if p and p.get("mid", 0) > 0:
+                    return float(p["mid"])
+            if sym in ["74", "GOLD", "XAU", "XAUUSD"]:
+                p = self.ict_engine.get_market_price("XAUUSD")
+                if p and p.get("mid", 0) > 0:
+                    return float(p["mid"])
+            if sym in ["816", "BTC", "BTCUSD"]:
+                p = self.ict_engine.get_market_price("BTCUSD")
+                if p and p.get("mid", 0) > 0:
+                    return float(p["mid"])
+        except Exception:
+            pass
+        return 0.0
+
+    def resolve_asset_name(self, asset_id: Any) -> str:
+        """Helper to resolve ticker symbol from asset ID."""
+        try:
+            aid = int(asset_id)
+            if aid == 74:
+                return "Gold (XAUUSD)"
+            elif aid == 816:
+                return "Bitcoin (BTCUSD)"
+            for sym, prof in INSTRUMENT_PROFILES.items():
+                if prof.get("asset_id") == aid:
+                    return f"{sym}"
+            return f"Asset #{aid}"
+        except Exception:
+            return str(asset_id)
+
     def build_active_setups_view(self) -> str:
         try:
-            # 1. Callisto Zones
-            c_copier = self.channel_mgr.get_copier("callistofx")
-            zones = getattr(c_copier, "active_zones", {}) if c_copier else {}
-            if zones:
-                zones_lines = [f"  • {s}: `{z['zone_low']:.2f} – {z['zone_high']:.2f}` (Target: {z.get('target', 'N/A')})" for s, z in zones.items()]
-                zones_txt = "\n".join(zones_lines)
-            else:
-                zones_txt = "  • No active zones currently watching."
+            now_str = datetime.now().strftime("%H:%M:%S")
 
-            # 2. Polycarp Blitz Trades
-            p_copier = self.channel_mgr.get_copier("polycarpvip")
-            blitz_trades = getattr(p_copier, "open_trades", {}) if p_copier else {}
-            if blitz_trades:
-                b_lines = [f"  • #{pid}: {t.get('pair', 'OTC')} {str(t.get('direction', '')).upper()} (${t.get('amount', 2.0)})" for pid, t in blitz_trades.items()]
-                blitz_txt = "\n".join(b_lines)
-            else:
-                blitz_txt = "  • No active Blitz option trades."
-
-            # 3. ICT Pending FVGs
-            ict_fvgs = getattr(self.ict_engine, "pending_fvgs", {})
-            active_fvgs = [f"  • {s}: {f['side']} `[{f['fvg_low']} – {f['fvg_high']}]` (SL: `{f['sl']}`)" for s, f in ict_fvgs.items() if f]
-            if active_fvgs:
-                fvg_txt = "\n".join(active_fvgs)
-            else:
-                fvg_txt = "  • No pending FVG retests waiting."
-
-            # 4. ICT Active Positions
-            ict_trades = getattr(self.ict_engine, "active_trades", {})
-            active_pos = [f"  • {s}: {t['side']} @ `{t['entry_price']}` (SL: `{t['current_sl']}`, TP: `{t['tp']}`)" for s, t in ict_trades.items() if t]
-            if active_pos:
-                ict_trade_txt = "\n".join(active_pos)
-            else:
-                ict_trade_txt = "  • No active ICT positions currently running."
-
-            # 5. Open CFD Positions on IQ Option
+            # 1. Open Marginal CFD Positions on IQ Option Broker
             bid = self.get_active_balance_id()
             open_cfd = []
             if bid:
                 try:
                     open_cfd = self.forex_mcp.list_positions(balance_id=bid) or []
-                except Exception:
-                    pass
-            
+                except Exception as e:
+                    logger.debug(f"[ActiveSetups] Error listing broker positions: {e}")
+
             if open_cfd:
-                cfd_lines = [f"  • #{p.get('position_id') or p.get('id')}: Asset #{p.get('asset_id')} {str(p.get('side', '')).upper()} | PnL: `${float(p.get('pnl', 0.0)):.2f}`" for p in open_cfd]
+                cfd_lines = []
+                for p in open_cfd:
+                    pos_id = p.get("position_id") or p.get("id", "N/A")
+                    asset_id = p.get("asset_id")
+                    sym = self.resolve_asset_name(asset_id)
+                    side = str(p.get("side") or p.get("type", "BUY")).upper()
+                    if side == "LONG": side = "BUY"
+                    if side == "SHORT": side = "SELL"
+                    lots = float(p.get("lots") or p.get("count") or 1.0)
+                    open_px = float(p.get("open_price") or p.get("open_quote", 0.0))
+
+                    # Live Current Price
+                    cur_px = float(p.get("current_price") or p.get("close_price") or p.get("price", 0.0))
+                    if cur_px <= 0:
+                        cur_px = self.get_live_price(sym)
+
+                    pnl = float(p.get("pnl") or p.get("profit") or p.get("isolated_pnl_net", 0.0))
+                    pnl_sign = "+" if pnl >= 0 else ""
+                    sl = p.get("stop_loss", "None")
+                    tp = p.get("take_profit", "None")
+
+                    price_str = f" ➔ Live: `${cur_px:.2f}`" if cur_px > 0 else ""
+                    cfd_lines.append(
+                        f"  • *{sym}* `{side}` ({lots:.2f} Lots)\n"
+                        f"    Entry: `${open_px:.2f}`{price_str}\n"
+                        f"    PnL: `{pnl_sign}${pnl:.2f}` | SL: `{sl}` | TP: `{tp}` [#{pos_id}]"
+                    )
                 cfd_txt = "\n".join(cfd_lines)
             else:
                 cfd_txt = "  • No open Marginal CFD positions on broker."
 
+            # 2. ICT Active Autonomous Positions
+            ict_trades = getattr(self.ict_engine, "active_trades", {})
+            active_pos = []
+            for s, t in ict_trades.items():
+                if not t:
+                    continue
+                live_p = self.get_live_price(s)
+                open_p = float(t.get("entry_price", 0.0))
+                pnl_str = ""
+                if live_p > 0 and open_p > 0:
+                    diff = (live_p - open_p) if t["side"] == "BUY" else (open_p - live_p)
+                    pnl_sign = "+" if diff >= 0 else ""
+                    pnl_str = f" | PnL: `{pnl_sign}${diff * float(t.get('lots', 1.0)):.2f}`"
+                p_str = f" ➔ Live: `${live_p:.2f}`" if live_p > 0 else ""
+                active_pos.append(
+                    f"  • *{s}* `{t['side']}`\n"
+                    f"    Entry: `${open_p:.2f}`{p_str}{pnl_str}\n"
+                    f"    SL: `${t['current_sl']}` | TP: `${t['tp']}`"
+                )
+            if active_pos:
+                ict_trade_txt = "\n".join(active_pos)
+            else:
+                ict_trade_txt = "  • No active ICT positions currently running."
+
+            # 3. ICT Pending FVGs
+            ict_fvgs = getattr(self.ict_engine, "pending_fvgs", {})
+            active_fvgs = []
+            for s, f in ict_fvgs.items():
+                if not f:
+                    continue
+                live_p = self.get_live_price(s)
+                p_str = f" | Live: `${live_p:.2f}`" if live_p > 0 else ""
+                dist_str = f" (Dist: `${abs(live_p - f['fvg_low']):.2f}`)" if live_p > 0 else ""
+                active_fvgs.append(f"  • *{s}* `{f['side']}` `[{f['fvg_low']} – {f['fvg_high']}]`{p_str}{dist_str} (SL: `{f['sl']}`)")
+            if active_fvgs:
+                fvg_txt = "\n".join(active_fvgs)
+            else:
+                fvg_txt = "  • No pending FVG retests waiting."
+
+            # 4. Callisto Active Zones
+            c_copier = self.channel_mgr.get_copier("callistofx")
+            zones = getattr(c_copier, "active_zones", {}) if c_copier else {}
+            if zones:
+                zones_lines = []
+                for s, z in zones.items():
+                    live_p = self.get_live_price(s)
+                    p_str = f" | Live: `${live_p:.2f}`" if live_p > 0 else ""
+                    zones_lines.append(f"  • *{s}*: `{z['zone_low']:.2f} – {z['zone_high']:.2f}`{p_str} (Target: `{z.get('target', 'N/A')}`)")
+                zones_txt = "\n".join(zones_lines)
+            else:
+                zones_txt = "  • No active zones currently watching."
+
+            # 5. Polycarp Blitz Trades
+            p_copier = self.channel_mgr.get_copier("polycarpvip")
+            blitz_trades = getattr(p_copier, "open_trades", {}) if p_copier else {}
+            if blitz_trades:
+                b_lines = []
+                for pid, t in blitz_trades.items():
+                    pair = t.get("pair", "OTC")
+                    side = str(t.get("direction", "CALL")).upper()
+                    amt = t.get("amount", 2.0)
+                    op_px = t.get("open_price")
+                    px_str = f" @ `{op_px}`" if op_px else ""
+                    b_lines.append(f"  • *{pair}* `{side}`{px_str} (`${amt:.2f}`) [Pos #{pid}]")
+                blitz_txt = "\n".join(b_lines)
+            else:
+                blitz_txt = "  • No active Blitz option trades."
+
             text = (
-                f"📋 *Active Watchers, Zones & Live Setups*\n"
+                f"📋 *Active Watchers, Zones & Live Setups* 🔴\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"👤 *Account*: `{self.account_type.upper()}`\n"
+                f"👤 *Account*: `{self.account_type.upper()}` | 🕒 `{now_str}`\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"📍 *Callisto Active Zones*:\n{zones_txt}\n\n"
-                f"⚡ *Polycarp Blitz Trades*:\n{blitz_txt}\n\n"
+                f"💼 *Open Broker CFD Positions*:\n{cfd_txt}\n\n"
+                f"🎯 *ICT Autonomous Setups*:\n{ict_trade_txt}\n\n"
                 f"🔥 *ICT Pending FVGs*:\n{fvg_txt}\n\n"
-                f"🎯 *ICT Active Setups*:\n{ict_trade_txt}\n\n"
-                f"💼 *Open Broker CFD Positions*:\n{cfd_txt}\n"
-                f"━━━━━━━━━━━━━━━━━━━━"
+                f"📍 *Callisto Active Zones*:\n{zones_txt}\n\n"
+                f"⚡ *Polycarp Blitz Trades*:\n{blitz_txt}\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"📡 _Live streaming price & PnL updates every 4s..._"
             )
             return text
         except Exception as e:
             logger.error(f"[ActiveSetups] Error building view: {e}")
             return f"📋 *Active Watchers & Setups*\n\nError loading active setups: {e}"
 
+    def start_active_view_refresh_task(self, chat_id: int, message_id: int):
+        """Starts or replaces an in-place background live refresh task for active setups."""
+        self.stop_active_view_refresh_task()
+        self._active_refresh_task = asyncio.create_task(self._live_refresh_loop(chat_id, message_id))
+
+    def stop_active_view_refresh_task(self):
+        """Safely stops any background live refresh task."""
+        if self._active_refresh_task and not self._active_refresh_task.done():
+            self._active_refresh_task.cancel()
+            self._active_refresh_task = None
+
+    async def _live_refresh_loop(self, chat_id: int, message_id: int):
+        """Auto-refreshes the Active Setups message every 4 seconds in-place."""
+        last_text = ""
+        # Stream live updates for up to 45 ticks (3 minutes) before letting user manually refresh
+        for _ in range(45):
+            try:
+                await asyncio.sleep(4)
+                new_text = self.build_active_setups_view()
+                if new_text != last_text and self.app and getattr(self.app, "bot", None):
+                    last_text = new_text
+                    try:
+                        await self.app.bot.edit_message_text(
+                            chat_id=chat_id,
+                            message_id=message_id,
+                            text=new_text,
+                            parse_mode="Markdown",
+                            reply_markup=active_setups_keyboard(is_live=True)
+                        )
+                    except Exception as e:
+                        err_s = str(e)
+                        if "Message is not modified" in err_s:
+                            pass
+                        elif "Message to edit not found" in err_s or "bot was blocked" in err_s or "Chat not found" in err_s:
+                            break
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.debug(f"[ActiveSetups] Live refresh tick error: {e}")
+                await asyncio.sleep(4)
+
     async def cmd_active_trades(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.is_admin(update.effective_user.id):
             return
         text = self.build_active_setups_view()
         try:
-            await update.message.reply_text(text, parse_mode="Markdown", reply_markup=persistent_reply_keyboard())
+            sent_msg = await update.message.reply_text(
+                text,
+                parse_mode="Markdown",
+                reply_markup=active_setups_keyboard(is_live=True)
+            )
+            if sent_msg:
+                self.start_active_view_refresh_task(update.effective_chat.id, sent_msg.message_id)
         except Exception:
-            await update.message.reply_text(text, reply_markup=persistent_reply_keyboard())
+            sent_msg = await update.message.reply_text(
+                text,
+                reply_markup=active_setups_keyboard(is_live=True)
+            )
+            if sent_msg:
+                self.start_active_view_refresh_task(update.effective_chat.id, sent_msg.message_id)
 
     def get_active_balance_id(self) -> Optional[int]:
         if self.ict_engine.balance_id:
@@ -742,6 +893,9 @@ class TelegramTradingBot:
 
         data = query.data
 
+        if not data.startswith("btn_active_trades"):
+            self.stop_active_view_refresh_task()
+
         if data.startswith("noop"):
             return
 
@@ -984,9 +1138,20 @@ class TelegramTradingBot:
                 parse_mode="Markdown"
             )
 
-        elif data == "btn_active_trades":
+        elif data in ["btn_active_trades", "btn_active_trades_refresh"]:
             text = self.build_active_setups_view()
-            await query.edit_message_text(text=text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
+            try:
+                await query.edit_message_text(
+                    text=text,
+                    reply_markup=active_setups_keyboard(is_live=True),
+                    parse_mode="Markdown"
+                )
+            except Exception:
+                await query.edit_message_text(
+                    text=text,
+                    reply_markup=active_setups_keyboard(is_live=True)
+                )
+            self.start_active_view_refresh_task(query.message.chat_id, query.message.message_id)
 
         elif data == "btn_sessions":
             text = self.session_notifier.get_session_dashboard()
@@ -1098,6 +1263,7 @@ class TelegramTradingBot:
 
     async def stop(self):
         self.is_running = False
+        self.stop_active_view_refresh_task()
         self.session_notifier.stop()
         self.news_engine.stop()
         try:

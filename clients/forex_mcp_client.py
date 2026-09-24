@@ -27,7 +27,7 @@ from dotenv import load_dotenv
 logger = logging.getLogger("IQForexMCP")
 
 class IQForexMCPClient:
-    def __init__(self, token: Optional[str] = None, base_url: str = "https://marginal-forex.mcp.iqoption.com"):
+    def __init__(self, token: Optional[str] = None, base_url: str = "https://marginal-cfd.mcp.iqoption.com"):
         load_dotenv()
         self.token = token or os.getenv("IQ_AI_TOKEN") or os.getenv("IQ_MCP_TOKEN")
         self.base_url = base_url.rstrip("/")

@@ -543,7 +543,7 @@ class KingmahnCopier(BaseCopier):
                 now_utc = datetime.now(timezone.utc)
                 msg_utc = msg_date if msg_date.tzinfo else msg_date.replace(tzinfo=timezone.utc)
                 age_sec = (now_utc - msg_utc).total_seconds()
-                if age_sec > 180:
+                if age_sec > 300:
                     logger.info(f"⏰ [KingmahnTribe] Skipped historical signal #{message_id} ({int(age_sec)}s old during lookback)")
                     return
             except Exception as e:

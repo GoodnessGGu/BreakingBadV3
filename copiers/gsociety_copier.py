@@ -540,7 +540,7 @@ class GSocietyCopier(BaseCopier):
                 now_utc = datetime.now(timezone.utc)
                 msg_utc = msg_date if msg_date.tzinfo else msg_date.replace(tzinfo=timezone.utc)
                 age_sec = (now_utc - msg_utc).total_seconds()
-                if age_sec > 180:
+                if age_sec > 300:
                     logger.info(f"⏰ [GSociety] Skipped historical signal #{message_id} ({int(age_sec)}s old during lookback)")
                     return
             except Exception as e:
@@ -558,6 +558,8 @@ class GSocietyCopier(BaseCopier):
         if sig and sig.get("type") == "SIGNAL":
             logger.info(f"🎯 [GSociety] New signal parsed: {sig['side']} | SL: {sig['sl']} | TP1: {sig['tp1']} | TP2: {sig['tp2']}")
             await self.execute_signal(sig)
+        else:
+            logger.debug(f"ℹ️ [GSociety] Message #{message_id} did not match trade signal syntax.")
 
     def get_status(self) -> Dict[str, Any]:
         return {

@@ -15,11 +15,13 @@ Strategy:
 import time
 import logging
 import asyncio
+import inspect
 from datetime import datetime
 from typing import Dict, Any, Optional, List, Set, Callable
 import pandas as pd
 from clients.forex_mcp_client import IQForexMCPClient
 from gsheet_logger import gsheet_logger
+from utils.chart_generator import generate_ict_setup_chart
 
 logger = logging.getLogger("ICTEngine")
 
@@ -122,6 +124,7 @@ class ICTStrategyEngine:
         
         self.balance_id: Optional[int] = None
         self.notify_cb: Optional[Callable] = None
+        self.notify_photo_cb: Optional[Callable] = None
         self.is_running = False
 
     @property
@@ -141,12 +144,28 @@ class ICTStrategyEngine:
     def set_notification_callback(self, cb: Callable):
         self.notify_cb = cb
 
+    def set_photo_notification_callback(self, cb: Callable):
+        self.notify_photo_cb = cb
+
     async def notify(self, message: str):
         if self.notify_cb:
             try:
-                await self.notify_cb(message)
+                res = self.notify_cb(message)
+                if inspect.isawaitable(res):
+                    await res
             except Exception as e:
                 logger.warning(f"[ICTEngine] Notification error: {e}")
+
+    async def notify_photo(self, photo_bytes: Optional[bytes], caption: str = ""):
+        if photo_bytes and self.notify_photo_cb:
+            try:
+                res = self.notify_photo_cb(photo_bytes, caption)
+                if inspect.isawaitable(res):
+                    await res
+                return
+            except Exception as e:
+                logger.error(f"[ICTEngine] Photo notification error: {e}")
+        await self.notify(caption)
 
     def toggle_symbol(self, symbol: str) -> bool:
         sym = symbol.upper().replace("/", "").replace("-", "")
@@ -285,20 +304,38 @@ class ICTStrategyEngine:
             sl = round(sweep_peak + sl_buffer, digits)
             fvg_h = round(lows[-3], digits)
             fvg_l = round(highs[-1], digits)
+            risk_dist = abs(sl - fvg_h)
+            tp = round(fvg_h - (risk_dist * self.rr_ratio), digits)
 
             logger.info("=" * 60)
             logger.info(f"🔥 [ICT CISD SETUP DETECTED] {symbol} Bearish Sweep at {sweep_peak} | CISD Open: {sweep_open_h}!")
-            logger.info(f"   Bearish FVG Zone : {fvg_l} - {fvg_h} | SL: {sl}")
+            logger.info(f"   Bearish FVG Zone : {fvg_l} - {fvg_h} | SL: {sl} | TP: {tp}")
             logger.info("=" * 60)
 
-            await self.notify(
+            chart_bytes = generate_ict_setup_chart(
+                df=df,
+                symbol=symbol,
+                side="SELL",
+                sweep_level=sweep_peak,
+                cisd_level=sweep_open_h,
+                fvg_low=fvg_l,
+                fvg_high=fvg_h,
+                sl=sl,
+                tp=tp,
+                timeframe="15M" if CANDLE_SIZE == 900 else "M1"
+            )
+
+            caption = (
                 f"🔥 [ICT CISD SETUP DETECTED — {symbol} SELL]\n"
                 f"Sweep Peak : {sweep_peak}\n"
                 f"CISD Shift : Broken below {sweep_open_h}\n"
                 f"FVG Zone   : {fvg_l} – {fvg_h}\n"
                 f"Stop Loss  : {sl}\n"
+                f"Target TP  : {tp} (1:{self.rr_ratio:.1f} RR)\n"
                 f"⏳ Waiting for FVG retest..."
             )
+            await self.notify_photo(chart_bytes, caption)
+
             self.pending_fvgs[symbol] = {
                 "symbol": symbol,
                 "side": "SELL",
@@ -327,20 +364,38 @@ class ICTStrategyEngine:
             sl = round(sweep_trough - sl_buffer, digits)
             fvg_l = round(highs[-3], digits)
             fvg_h = round(lows[-1], digits)
+            risk_dist = abs(fvg_l - sl)
+            tp = round(fvg_l + (risk_dist * self.rr_ratio), digits)
 
             logger.info("=" * 60)
             logger.info(f"🔥 [ICT CISD SETUP DETECTED] {symbol} Bullish Sweep at {sweep_trough} | CISD Open: {sweep_open_l}!")
-            logger.info(f"   Bullish FVG Zone : {fvg_l} - {fvg_h} | SL: {sl}")
+            logger.info(f"   Bullish FVG Zone : {fvg_l} - {fvg_h} | SL: {sl} | TP: {tp}")
             logger.info("=" * 60)
 
-            await self.notify(
+            chart_bytes = generate_ict_setup_chart(
+                df=df,
+                symbol=symbol,
+                side="BUY",
+                sweep_level=sweep_trough,
+                cisd_level=sweep_open_l,
+                fvg_low=fvg_l,
+                fvg_high=fvg_h,
+                sl=sl,
+                tp=tp,
+                timeframe="15M" if CANDLE_SIZE == 900 else "M1"
+            )
+
+            caption = (
                 f"🔥 [ICT CISD SETUP DETECTED — {symbol} BUY]\n"
                 f"Sweep Trough: {sweep_trough}\n"
                 f"CISD Shift  : Broken above {sweep_open_l}\n"
                 f"FVG Zone    : {fvg_l} – {fvg_h}\n"
                 f"Stop Loss   : {sl}\n"
+                f"Target TP   : {tp} (1:{self.rr_ratio:.1f} RR)\n"
                 f"⏳ Waiting for FVG retest..."
             )
+            await self.notify_photo(chart_bytes, caption)
+
             self.pending_fvgs[symbol] = {
                 "symbol": symbol,
                 "side": "BUY",

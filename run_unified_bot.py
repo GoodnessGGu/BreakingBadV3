@@ -189,6 +189,7 @@ async def main():
     # Eagerly wire notification callbacks before starting event loops
     channel_mgr.set_notification_callback(tg_bot.broadcast_alert)
     ict_engine.set_notification_callback(tg_bot.broadcast_alert)
+    ict_engine.set_photo_notification_callback(tg_bot.broadcast_photo)
 
     # 7. Start Concurrent Execution
     logger.info("=" * 65)

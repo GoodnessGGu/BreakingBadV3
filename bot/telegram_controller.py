@@ -56,6 +56,8 @@ class TelegramTradingBot:
         self.is_paused = False
         self.app: Optional[Application] = None
         self._active_refresh_task: Optional[asyncio.Task] = None
+        if hasattr(self.ict_engine, "set_photo_notification_callback"):
+            self.ict_engine.set_photo_notification_callback(self.broadcast_photo)
 
     def is_admin(self, user_id: int) -> bool:
         return int(user_id) == self.admin_id
@@ -113,6 +115,38 @@ class TelegramTradingBot:
                 )
         except Exception as e:
             logger.error(f"Failed to send direct Telegram broadcast alert: {e}")
+
+    async def broadcast_photo(self, photo_bytes: bytes, caption: str = ""):
+        """Send high-priority chart/image notification to the admin on Telegram."""
+        if not photo_bytes:
+            await self.broadcast_alert(caption)
+            return
+
+        if self.app and getattr(self.app, "bot", None):
+            try:
+                await self.app.bot.send_photo(
+                    chat_id=self.admin_id,
+                    photo=photo_bytes,
+                    caption=caption
+                )
+                return
+            except Exception as e:
+                logger.warning(f"Error sending broadcast photo via app.bot: {e}")
+
+        # Resilient fallback via direct Telegram HTTP API multipart upload
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                files = {"photo": ("chart.png", photo_bytes, "image/png")}
+                data = {"chat_id": str(self.admin_id), "caption": caption}
+                await client.post(
+                    f"https://api.telegram.org/bot{self.token}/sendPhoto",
+                    data=data,
+                    files=files
+                )
+        except Exception as e:
+            logger.error(f"Failed to send direct Telegram photo broadcast: {e}")
+            # Fallback to text alert if image upload failed
+            await self.broadcast_alert(caption)
 
     def build_status_text(self) -> str:
         # Fetch balances

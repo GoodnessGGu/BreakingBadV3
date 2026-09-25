@@ -339,9 +339,11 @@ class TelegramTradingBot:
                     diff = (live_p - open_p) if t["side"] == "BUY" else (open_p - live_p)
                     pnl_sign = "+" if diff >= 0 else ""
                     pnl_str = f" | PnL: `{pnl_sign}${diff * float(t.get('lots', 1.0)):.2f}`"
+                stage = t.get("trailing_stage", 0)
+                stage_str = f" `(Stage {stage})`" if stage > 0 else ""
                 p_str = f" ➔ Live: `${live_p:.2f}`" if live_p > 0 else ""
                 active_pos.append(
-                    f"  • *{s}* `{t['side']}`\n"
+                    f"  • *{s}* `{t['side']}`{stage_str}\n"
                     f"    Entry: `${open_p:.2f}`{p_str}{pnl_str}\n"
                     f"    SL: `${t['current_sl']}` | TP: `${t['tp']}`"
                 )

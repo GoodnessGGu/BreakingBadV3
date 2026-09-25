@@ -415,7 +415,9 @@ class ICTStrategyEngine:
                     "initial_sl": sl,
                     "current_sl": sl,
                     "tp": tp,
+                    "lots": trade_lots,
                     "moved_to_be": False,
+                    "trailing_stage": 0,
                     "opened_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 }
                 self.pending_fvgs.pop(symbol, None)
@@ -463,23 +465,96 @@ class ICTStrategyEngine:
             self.active_trades.pop(symbol, None)
             return
 
-        # Breakeven check
-        if not trade["moved_to_be"]:
-            mid = cur_prices["mid"]
-            entry = trade["entry_price"]
-            risk_dist = abs(entry - trade["initial_sl"])
-            side = trade["side"]
+        # Multi-stage R-Multiple Trailing Logic
+        mid = cur_prices.get("mid", 0.0)
+        if mid <= 0:
+            return
 
-            hit_1r = (mid - entry >= risk_dist) if side == "BUY" else (entry - mid >= risk_dist)
-            if hit_1r:
-                be_buf = profile["min_fvg_gap"] * 0.5
-                be_level = round(entry + be_buf if side == "BUY" else entry - be_buf, digits)
-                logger.info(f"🛡️ [ICT BREAKEVEN] {symbol} Reached 1.0R profit! Moving SL to {be_level}")
-                res = self.mcp.change_position_stop_loss(position_id=pos_id, level=be_level)
+        entry = trade["entry_price"]
+        initial_sl = trade["initial_sl"]
+        risk_dist = abs(entry - initial_sl)
+        if risk_dist <= 0:
+            return
+
+        side = trade["side"]
+        gain = (mid - entry) if side == "BUY" else (entry - mid)
+        r_mult = gain / risk_dist
+        stage = trade.get("trailing_stage", 0)
+
+        # Stage 1: +0.5R -> Cut initial risk by 50%
+        if r_mult >= 0.5 and stage < 1:
+            half_risk_sl = round(entry - (risk_dist * 0.5) if side == "BUY" else entry + (risk_dist * 0.5), digits)
+            res = self.mcp.change_position_stop_loss(position_id=pos_id, level=half_risk_sl)
+            if not res.get("error"):
+                trade["current_sl"] = half_risk_sl
+                trade["trailing_stage"] = 1
+                logger.info(f"🛡️ [ICT +0.5R] Risk cut 50% on {symbol} #{pos_id}! SL: {half_risk_sl}")
+                await self.notify(
+                    f"🛡️ [ICT RISK DEFENSE +0.5R — {symbol}]\n"
+                    f"Position #{pos_id} ({side})\n"
+                    f"Risk reduced by 50% | New SL: {half_risk_sl:.{digits}f}"
+                )
+
+        # Stage 2: +1.0R -> Move to Breakeven (+ buffer)
+        if r_mult >= 1.0 and stage < 2:
+            be_buf = profile["min_fvg_gap"] * 0.5
+            be_level = round(entry + be_buf if side == "BUY" else entry - be_buf, digits)
+            res = self.mcp.change_position_stop_loss(position_id=pos_id, level=be_level)
+            if not res.get("error"):
+                trade["current_sl"] = be_level
+                trade["moved_to_be"] = True
+                trade["trailing_stage"] = 2
+                logger.info(f"🛡️ [ICT +1.0R] Breakeven activated on {symbol} #{pos_id}! SL: {be_level}")
+                await self.notify(
+                    f"🛡️ [ICT BREAKEVEN +1.0R — {symbol}]\n"
+                    f"Position #{pos_id} ({side})\n"
+                    f"Trade is now Risk-Free! SL shifted to: {be_level:.{digits}f}"
+                )
+
+        # Stage 3: +1.5R -> Lock in +0.75R guaranteed profit
+        if r_mult >= 1.5 and stage < 3:
+            lock_075_level = round(entry + (risk_dist * 0.75) if side == "BUY" else entry - (risk_dist * 0.75), digits)
+            res = self.mcp.change_position_stop_loss(position_id=pos_id, level=lock_075_level)
+            if not res.get("error"):
+                trade["current_sl"] = lock_075_level
+                trade["trailing_stage"] = 3
+                logger.info(f"💰 [ICT +1.5R] Locked +0.75R profit on {symbol} #{pos_id}! SL: {lock_075_level}")
+                await self.notify(
+                    f"💰 [ICT PROFIT LOCK +1.5R — {symbol}]\n"
+                    f"Position #{pos_id} ({side})\n"
+                    f"Banked +0.75R profit! New SL: {lock_075_level:.{digits}f}"
+                )
+
+        # Stage 4: +2.0R -> Lock in +1.25R guaranteed profit
+        if r_mult >= 2.0 and stage < 4:
+            lock_125_level = round(entry + (risk_dist * 1.25) if side == "BUY" else entry - (risk_dist * 1.25), digits)
+            res = self.mcp.change_position_stop_loss(position_id=pos_id, level=lock_125_level)
+            if not res.get("error"):
+                trade["current_sl"] = lock_125_level
+                trade["trailing_stage"] = 4
+                logger.info(f"💰 [ICT +2.0R] Locked +1.25R profit on {symbol} #{pos_id}! SL: {lock_125_level}")
+                await self.notify(
+                    f"💰 [ICT PROFIT LOCK +2.0R — {symbol}]\n"
+                    f"Position #{pos_id} ({side})\n"
+                    f"Banked +1.25R profit! New SL: {lock_125_level:.{digits}f}"
+                )
+
+        # Stage 5: +2.5R+ -> Dynamic Trailing Stop (Ratchets 0.75R behind market price)
+        if r_mult >= 2.5:
+            trail_sl = round(mid - (risk_dist * 0.75) if side == "BUY" else mid + (risk_dist * 0.75), digits)
+            current_sl = trade.get("current_sl", initial_sl)
+            should_update = (side == "BUY" and trail_sl > current_sl + (profile["min_fvg_gap"] * 0.2)) or \
+                            (side == "SELL" and trail_sl < current_sl - (profile["min_fvg_gap"] * 0.2))
+            if should_update:
+                res = self.mcp.change_position_stop_loss(position_id=pos_id, level=trail_sl)
                 if not res.get("error"):
-                    trade["current_sl"] = be_level
-                    trade["moved_to_be"] = True
-                    await self.notify(f"🛡️ [ICT BREAKEVEN ACTIVATED — {symbol}]\nPosition #{pos_id} SL shifted to {be_level}")
+                    trade["current_sl"] = trail_sl
+                    logger.info(f"🚀 [ICT Trailing 0.75R] Ratchet SL on {symbol} #{pos_id}! SL: {trail_sl}")
+                    await self.notify(
+                        f"🚀 [ICT DYNAMIC TRAILING — {symbol}]\n"
+                        f"Position #{pos_id} ({side})\n"
+                        f"SL ratcheted to: {trail_sl:.{digits}f} (Price: {mid:.{digits}f})"
+                    )
 
     async def _log_trade_closure(self, symbol: str, pos_id: int):
         trade = self.active_trades.get(symbol)

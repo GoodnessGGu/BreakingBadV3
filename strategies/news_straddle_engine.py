@@ -42,9 +42,9 @@ class NewsStraddleEngine:
         # Straddle Parameters (Optimized for Gold CFD)
         self.buffer_distance: float = 1.50       # $1.50 above high / below low
         self.sl_distance: float = 3.00           # $3.00 initial Stop Loss
-        self.tp_distance: float = 6.00           # $6.00 initial Take Profit (1:2 RR)
+        self.tp_distance: float = 15.00          # $15.00 Take Profit (1:5 RR for high-impact NFP expansions)
         self.be_trigger_distance: float = 2.00   # Move to BE once in +$2.00 profit
-        self.trail_offset: float = 1.50          # Trail $1.50 behind peak price once in BE
+        self.trail_offset: float = 2.00          # Trail $2.00 behind peak price once past $4.00 profit
 
         # State tracking
         self.active_straddle: Optional[Dict[str, Any]] = None
@@ -335,8 +335,8 @@ class NewsStraddleEngine:
                                 f"• Trade is now Risk-Free! SL shifted to: `{be_level:.2f}`"
                             )
 
-                    # 2. Dynamic Trailing ($1.50 behind peak price once past $3.50 gain)
-                    if gain >= 3.50 and trade["moved_to_be"]:
+                    # 2. Dynamic Trailing ($2.00 behind peak price once past $4.00 gain)
+                    if gain >= 4.00 and trade["moved_to_be"]:
                         trail_sl = round(mid - self.trail_offset if side == "BUY" else mid + self.trail_offset, 2)
                         cur_sl = trade.get("current_sl", 0.0)
                         should_update = (trail_sl > cur_sl + 0.60) if side == "BUY" else (trail_sl < cur_sl - 0.60)

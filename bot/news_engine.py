@@ -172,16 +172,13 @@ class EconomicNewsEngine:
             event_lines = "\n\n".join(lines)
 
         card = (
-            f"📰 ━━━━━━━━━━━━━━━━━━━ 📰\n"
-            f"   📊 **GLOBAL ECONOMIC CALENDAR**\n"
-            f"📰 ━━━━━━━━━━━━━━━━━━━ 📰\n\n"
+            f"📰 **Global Economic Calendar**\n\n"
             f"🕒 **Current Time**: `{now_str}`\n\n"
             f"🚨 **Key Scheduled Releases**:\n"
             f"{event_lines}\n\n"
             f"💡 **Trading Advisory**:\n"
             f"• 🔴 **Red Folder releases** (CPI, NFP, FOMC) cause severe spread widening (20¢–$3.00 on Gold).\n"
-            f"• Bot will broadcast 15-minute advance warnings before high-impact events.\n"
-            f"📰 ━━━━━━━━━━━━━━━━━━━ 📰"
+            f"• Bot will broadcast 15-minute advance warnings before high-impact events."
         )
         return card
 
@@ -235,13 +232,11 @@ class EconomicNewsEngine:
                 time_str = f"{dt.strftime('%H:%M UTC')} ({local_h:02d}:{dt.minute:02d} WAT)"
                 impacted = ", ".join(ASSET_IMPACT_MAP.get(e["country"], ["All Pairs"]))
 
-                impact_title = "💥 HIGH-IMPACT NEWS IN 15 MINUTES!" if e["impact"] == "High" else "⚠️ MEDIUM-IMPACT NEWS IN 15 MINUTES"
+                impact_badge = "HIGH IMPACT" if e["impact"] == "High" else "MEDIUM IMPACT"
                 badge = "🔴 CRITICAL / HIGH VOLATILITY" if e["impact"] == "High" else "🟠 MEDIUM VOLATILITY"
 
                 msg = (
-                    f"🚨 ━━━━━━━━━━━━━━━━━━━━ 🚨\n"
-                    f"   {impact_title}\n"
-                    f"🚨 ━━━━━━━━━━━━━━━━━━━━ 🚨\n\n"
+                    f"🚨 **[{impact_badge}] {e['country']} — {e['title']} in 15m**\n\n"
                     f"📅 **Event**: {e['flag']} **{e['country']} — {e['title']}**\n"
                     f"⏰ **Release Time**: `{time_str}` (In **15 mins**)\n"
                     f"🔥 **Impact Rating**: {badge}\n\n"
@@ -250,8 +245,7 @@ class EconomicNewsEngine:
                     f"🛡 **Risk Advisory**:\n"
                     f"• Spreads and slippage will spike during the release.\n"
                     f"• Secure existing winning trades by locking Breakeven.\n"
-                    f"• Avoid placing new market orders immediately inside the release candle.\n"
-                    f"🚨 ━━━━━━━━━━━━━━━━━━━━ 🚨"
+                    f"• Avoid placing new market orders immediately inside the release candle."
                 )
                 logger.info(f"📢 [NewsEngine] Sending 15m advance warning for: {e['title']}")
                 await self.notify(msg)
@@ -261,14 +255,11 @@ class EconomicNewsEngine:
             if -1.0 <= diff_mins <= 2.0 and alert_now_key not in self.triggered_alerts:
                 self.triggered_alerts.add(alert_now_key)
                 msg = (
-                    f"⚡ ━━━━━━━━━━━━━━━━━━━━ ⚡\n"
-                    f"   📢 **ECONOMIC NEWS RELEASED NOW!**\n"
-                    f"⚡ ━━━━━━━━━━━━━━━━━━━━ ⚡\n\n"
+                    f"⚡ **[NEWS RELEASED] {e['country']} — {e['title']}**\n\n"
                     f"📅 **Event**: {e['flag']} **{e['country']} — {e['title']}**\n"
                     f"🔥 **Impact**: {e['impact'].upper()}\n"
                     f"📊 **Expected**: `{e['forecast']}` | **Prior**: `{e['previous']}`\n\n"
-                    f"🌊 Expect immediate volatility and liquidity expansion across markets.\n"
-                    f"⚡ ━━━━━━━━━━━━━━━━━━━━ ⚡"
+                    f"🌊 Expect immediate volatility and liquidity expansion across markets."
                 )
                 logger.info(f"📢 [NewsEngine] Sending release flash for: {e['title']}")
                 await self.notify(msg)

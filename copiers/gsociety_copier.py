@@ -223,13 +223,12 @@ class GSocietyCopier(BaseCopier):
             })
 
         range_desc = f"{emin:.2f} – {emax:.2f}" if emin and emax else f"~{exec_price:.2f}"
-        plan_desc = "\n".join([f"  • {o['tag']}: {o['lots']}L | TP: {o['tp']:.2f}" for o in orders_to_place])
+        plan_desc = "\n".join([f"  • {o['tag']}: `{o['lots']}`L | TP: `{o['tp']:.2f}`" for o in orders_to_place])
         msg = (
-            f"⚡ [G Society SIGNAL — SPLIT ENTRY]\n"
-            f"Side : {side}\n"
-            f"Entry: {exec_price:.2f} (Range: {range_desc})\n"
-            f"SL   : {sl:.2f}\n"
-            f"Orders:\n{plan_desc}"
+            f"⚡ **[G SOCIETY SIGNAL] {side} @ ~{exec_price:.2f}**\n\n"
+            f"• Entry : `{exec_price:.2f}` (Range: `{range_desc}`)\n"
+            f"• SL    : `{sl:.2f}`\n"
+            f"• Orders:\n{plan_desc}"
         )
         await self.notify(msg)
 
@@ -265,11 +264,11 @@ class GSocietyCopier(BaseCopier):
                     "trailing_stage": 0,
                     "opened_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 }
-                await self.notify(f"✅ [GSociety] {o['tag']} Live: #{order_id} {side} {o['lots']}L @ {exec_price:.2f}")
+                await self.notify(f"✅ **[G SOCIETY EXECUTED] #{order_id} {side} {o['lots']}L @ {exec_price:.2f}**")
                 asyncio.create_task(self._monitor_position(order_id))
             else:
                 logger.error(f"❌ [GSociety] {o['tag']} failed: {res}")
-                await self.notify(f"❌ [GSociety] {o['tag']} Order Failed: {res.get('error', res)}")
+                await self.notify(f"❌ **[G SOCIETY FAILED] {o['tag']}**: {res.get('error', res)}")
 
     async def trigger_manual_breakeven(self, reason: str = "Channel Broadcast"):
         """Shifts all active G Society positions to Breakeven."""
@@ -309,10 +308,9 @@ class GSocietyCopier(BaseCopier):
                 pos["moved_to_be"] = True
                 pos["trailing_stage"] = max(pos.get("trailing_stage", 0), 2)
                 await self.notify(
-                    f"🛡️ [GSociety BREAKEVEN ACTIVATED]\n"
-                    f"Trigger: {reason}\n"
-                    f"Position: #{pos_id} ({side} - {pos.get('tag', 'Order')})\n"
-                    f"SL shifted to: {be_level:.2f}"
+                    f"🛡️ **[G SOCIETY BREAKEVEN] #{pos_id} ({side})**\n\n"
+                    f"• Trigger: {reason}\n"
+                    f"• Trade is now Risk-Free! SL shifted to: `{be_level:.2f}`"
                 )
 
     async def _monitor_position(self, order_id: int):
@@ -409,9 +407,8 @@ class GSocietyCopier(BaseCopier):
                             pos["trailing_stage"] = 1
                             logger.info(f"🛡️ [GSociety +30 Pips] Risk cut 50% on #{pos_id}! SL: {half_risk_sl}")
                             await self.notify(
-                                f"🛡️ [GSociety DEFENSE +30 PIPS]\n"
-                                f"Position #{pos_id} ({tag})\n"
-                                f"Risk reduced by 50% | New SL: {half_risk_sl:.2f}"
+                                f"🛡️ **[G SOCIETY DEFENSE +30 PIPS] #{pos_id} ({tag})**\n\n"
+                                f"• Risk reduced by 50% | New SL: `{half_risk_sl:.2f}`"
                             )
 
                     # Stage 2: +50 Pips ($5.00) or 1.0R -> Move to Breakeven (+0.30 buffer)
@@ -425,9 +422,8 @@ class GSocietyCopier(BaseCopier):
                             pos["trailing_stage"] = 2
                             logger.info(f"🛡️ [GSociety +50 Pips / 1R] Breakeven activated on #{pos_id}! SL: {be_level}")
                             await self.notify(
-                                f"🛡️ [GSociety BREAKEVEN +50 PIPS]\n"
-                                f"Position #{pos_id} ({tag})\n"
-                                f"Trade is now Risk-Free! SL shifted to: {be_level:.2f}"
+                                f"🛡️ **[G SOCIETY BREAKEVEN +50 PIPS] #{pos_id} ({tag})**\n\n"
+                                f"• Trade is now Risk-Free! SL shifted to: `{be_level:.2f}`"
                             )
 
                     # Stage 3: +100 Pips ($10.00) -> Lock in +50 Pips profit
@@ -439,9 +435,8 @@ class GSocietyCopier(BaseCopier):
                             pos["trailing_stage"] = 3
                             logger.info(f"💰 [GSociety +100 Pips] Secured +50 Pips on #{pos_id}! SL: {lock_50}")
                             await self.notify(
-                                f"💰 [GSociety PROFIT LOCK +100 PIPS]\n"
-                                f"Position #{pos_id} ({tag})\n"
-                                f"Banked +50 Pips profit! New SL: {lock_50:.2f}"
+                                f"🔒 **[G SOCIETY PROFIT LOCK +100 PIPS] #{pos_id} ({tag})**\n\n"
+                                f"• Secured +50 Pips profit! New SL: `{lock_50:.2f}`"
                             )
 
                     # Stage 4: +150 Pips ($15.00) -> Lock in +100 Pips profit
@@ -453,9 +448,8 @@ class GSocietyCopier(BaseCopier):
                             pos["trailing_stage"] = 4
                             logger.info(f"💰 [GSociety +150 Pips] Secured +100 Pips on #{pos_id}! SL: {lock_100}")
                             await self.notify(
-                                f"💰 [GSociety PROFIT LOCK +150 PIPS]\n"
-                                f"Position #{pos_id} ({tag})\n"
-                                f"Banked +100 Pips profit! New SL: {lock_100:.2f}"
+                                f"🔒 **[G SOCIETY PROFIT LOCK +150 PIPS] #{pos_id} ({tag})**\n\n"
+                                f"• Secured +100 Pips profit! New SL: `{lock_100:.2f}`"
                             )
 
                     # Stage 5: +200+ Pips ($20.00+) -> Dynamic 60 Pip Trailing Stop
@@ -517,14 +511,21 @@ class GSocietyCopier(BaseCopier):
         except Exception as e:
             logger.warning(f"[GSociety] GSheet log error: {e}")
 
-        emoji = "🏆 WIN" if pnl > 0 else "❌ LOSS"
+        pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
+        if pnl > 0:
+            header_line = f"🏆 **[G SOCIETY WON] {tag} {pnl_str}**"
+        elif pnl == 0:
+            header_line = f"🛡️ **[G SOCIETY BREAKEVEN] {tag} $0.00**"
+        else:
+            header_line = f"❌ **[G SOCIETY CLOSED] {tag} {pnl_str}**"
+
         await self.notify(
-            f"{emoji} [GSociety SETTLED — {tag}]\n"
-            f"Side    : {side} ({lots} Lots)\n"
-            f"Entry   : {entry_px:.2f}\n"
-            f"Exit    : {exit_px:.2f}\n"
-            f"PnL     : ${pnl:+.2f}\n"
-            f"Reason  : {reason}"
+            f"{header_line}\n\n"
+            f"• Side    : `{side}` (`{lots}` Lots)\n"
+            f"• Entry   : `{entry_px:.2f}`\n"
+            f"• Exit    : `{exit_px:.2f}`\n"
+            f"• Net PnL : `{pnl_str}`\n"
+            f"• Reason  : `{reason}`"
         )
 
     async def handle_message(self, text: str, message_id: int, event: Any = None, msg_date: Any = None):

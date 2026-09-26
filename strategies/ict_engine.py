@@ -340,13 +340,13 @@ class ICTStrategyEngine:
             )
 
             caption = (
-                f"🔥 [ICT CISD SETUP DETECTED — {symbol} SELL]\n"
-                f"Sweep Peak : {sweep_peak}\n"
-                f"CISD Shift : Broken below {sweep_open_h}\n"
-                f"FVG Zone   : {fvg_l} – {fvg_h}\n"
-                f"Stop Loss  : {sl}\n"
-                f"Target TP  : {tp} (1:{self.rr_ratio:.1f} RR)\n"
-                f"⏳ Waiting for FVG retest..."
+                f"🔥 **[ICT SETUP DETECTED] {symbol} SELL**\n\n"
+                f"• Sweep Peak : `{sweep_peak}`\n"
+                f"• CISD Shift : Broken below `{sweep_open_h}`\n"
+                f"• FVG Zone   : `{fvg_l}` – `{fvg_h}`\n"
+                f"• Stop Loss  : `{sl}`\n"
+                f"• Target TP  : `{tp}` (1:{self.rr_ratio:.1f} RR)\n"
+                f"⏳ _Waiting for FVG retest..._"
             )
             await self.notify_photo(chart_bytes, caption)
 
@@ -400,13 +400,13 @@ class ICTStrategyEngine:
             )
 
             caption = (
-                f"🔥 [ICT CISD SETUP DETECTED — {symbol} BUY]\n"
-                f"Sweep Trough: {sweep_trough}\n"
-                f"CISD Shift  : Broken above {sweep_open_l}\n"
-                f"FVG Zone    : {fvg_l} – {fvg_h}\n"
-                f"Stop Loss   : {sl}\n"
-                f"Target TP   : {tp} (1:{self.rr_ratio:.1f} RR)\n"
-                f"⏳ Waiting for FVG retest..."
+                f"🔥 **[ICT SETUP DETECTED] {symbol} BUY**\n\n"
+                f"• Sweep Trough: `{sweep_trough}`\n"
+                f"• CISD Shift  : Broken above `{sweep_open_l}`\n"
+                f"• FVG Zone    : `{fvg_l}` – `{fvg_h}`\n"
+                f"• Stop Loss   : `{sl}`\n"
+                f"• Target TP   : `{tp}` (1:{self.rr_ratio:.1f} RR)\n"
+                f"⏳ _Waiting for FVG retest..._"
             )
             await self.notify_photo(chart_bytes, caption)
 
@@ -451,11 +451,11 @@ class ICTStrategyEngine:
             tp = round(exec_px + (risk_dist * self.rr_ratio) if side == "BUY" else exec_px - (risk_dist * self.rr_ratio), digits)
 
             await self.notify(
-                f"⚡ [ICT EXECUTION — {symbol} {side}]\n"
-                f"Entry : {exec_px} (FVG Retest)\n"
-                f"SL    : {sl}\n"
-                f"TP    : {tp} (1:{self.rr_ratio:.1f} RR)\n"
-                f"Lots  : {trade_lots}"
+                f"⚡ **[ICT EXECUTION] {symbol} {side} @ {exec_px}**\n\n"
+                f"• Entry : `{exec_px}` (FVG Retest)\n"
+                f"• SL    : `{sl}`\n"
+                f"• TP    : `{tp}` (1:{self.rr_ratio:.1f} RR)\n"
+                f"• Lots  : `{trade_lots}`"
             )
 
             trade_lev = min(self.leverage, 20 if symbol == "BTCUSD" else self.leverage)
@@ -490,7 +490,7 @@ class ICTStrategyEngine:
                     "opened_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 }
                 self.pending_fvgs.pop(symbol, None)
-                await self.notify(f"✅ [ICTEngine] {symbol} Order Filled! ID: #{order_id}")
+                await self.notify(f"✅ **[ICT ORDER FILLED] #{order_id} {symbol} {side}**")
             else:
                 logger.error(f"❌ [ICTEngine] {symbol} Order placement failed: {res}")
                 # Clear pending FVG to avoid infinite error loops on the same setup
@@ -501,9 +501,9 @@ class ICTStrategyEngine:
                     logger.warning(f"⚠️ [ICTEngine] Instrument {symbol} is not tradeable on broker. Disabling {symbol}.")
                     if symbol != "XAUUSD":
                         self.enabled_symbols.discard(symbol)
-                    await self.notify(f"⚠️ [ICTEngine] {symbol} is currently unavailable on IQ Option Marginal CFD. Disabled {symbol}.")
+                    await self.notify(f"⚠️ **[ICT ALERT] {symbol} Unavailable** (Disabled).")
                 else:
-                    await self.notify(f"❌ [ICTEngine] {symbol} Order Failed: {err_msg}")
+                    await self.notify(f"❌ **[ICT ORDER FAILED] {symbol}**: {err_msg}")
 
     async def manage_active_trade(self, symbol: str, cur_prices: Dict[str, float]):
         trade = self.active_trades.get(symbol)
@@ -559,9 +559,9 @@ class ICTStrategyEngine:
                 trade["trailing_stage"] = 1
                 logger.info(f"🛡️ [ICT +0.5R] Risk cut 50% on {symbol} #{pos_id}! SL: {half_risk_sl}")
                 await self.notify(
-                    f"🛡️ [ICT RISK DEFENSE +0.5R — {symbol}]\n"
-                    f"Position #{pos_id} ({side})\n"
-                    f"Risk reduced by 50% | New SL: {half_risk_sl:.{digits}f}"
+                    f"🛡️ **[ICT RISK DEFENSE +0.5R] {symbol} #{pos_id}**\n\n"
+                    f"• Side: `{side}`\n"
+                    f"• Risk reduced by 50% | New SL: `{half_risk_sl:.{digits}f}`"
                 )
 
         # Stage 2: +1.0R -> Move to Breakeven (+ buffer)
@@ -575,9 +575,9 @@ class ICTStrategyEngine:
                 trade["trailing_stage"] = 2
                 logger.info(f"🛡️ [ICT +1.0R] Breakeven activated on {symbol} #{pos_id}! SL: {be_level}")
                 await self.notify(
-                    f"🛡️ [ICT BREAKEVEN +1.0R — {symbol}]\n"
-                    f"Position #{pos_id} ({side})\n"
-                    f"Trade is now Risk-Free! SL shifted to: {be_level:.{digits}f}"
+                    f"🛡️ **[ICT BREAKEVEN +1.0R] {symbol} #{pos_id}**\n\n"
+                    f"• Side: `{side}`\n"
+                    f"• Trade is now Risk-Free! SL shifted to: `{be_level:.{digits}f}`"
                 )
 
         # Stage 3: +1.5R -> Lock in +0.75R guaranteed profit
@@ -589,9 +589,9 @@ class ICTStrategyEngine:
                 trade["trailing_stage"] = 3
                 logger.info(f"💰 [ICT +1.5R] Locked +0.75R profit on {symbol} #{pos_id}! SL: {lock_075_level}")
                 await self.notify(
-                    f"💰 [ICT PROFIT LOCK +1.5R — {symbol}]\n"
-                    f"Position #{pos_id} ({side})\n"
-                    f"Banked +0.75R profit! New SL: {lock_075_level:.{digits}f}"
+                    f"🔒 **[ICT PROFIT LOCK +1.5R] {symbol} #{pos_id}**\n\n"
+                    f"• Side: `{side}`\n"
+                    f"• Secured +0.75R profit! New SL: `{lock_075_level:.{digits}f}`"
                 )
 
         # Stage 4: +2.0R -> Lock in +1.25R guaranteed profit
@@ -603,9 +603,9 @@ class ICTStrategyEngine:
                 trade["trailing_stage"] = 4
                 logger.info(f"💰 [ICT +2.0R] Locked +1.25R profit on {symbol} #{pos_id}! SL: {lock_125_level}")
                 await self.notify(
-                    f"💰 [ICT PROFIT LOCK +2.0R — {symbol}]\n"
-                    f"Position #{pos_id} ({side})\n"
-                    f"Banked +1.25R profit! New SL: {lock_125_level:.{digits}f}"
+                    f"🔒 **[ICT PROFIT LOCK +2.0R] {symbol} #{pos_id}**\n\n"
+                    f"• Side: `{side}`\n"
+                    f"• Secured +1.25R profit! New SL: `{lock_125_level:.{digits}f}`"
                 )
 
         # Stage 5: +2.5R+ -> Dynamic Trailing Stop (Ratchets 0.75R behind market price)
@@ -620,9 +620,8 @@ class ICTStrategyEngine:
                     trade["current_sl"] = trail_sl
                     logger.info(f"🚀 [ICT Trailing 0.75R] Ratchet SL on {symbol} #{pos_id}! SL: {trail_sl}")
                     await self.notify(
-                        f"🚀 [ICT DYNAMIC TRAILING — {symbol}]\n"
-                        f"Position #{pos_id} ({side})\n"
-                        f"SL ratcheted to: {trail_sl:.{digits}f} (Price: {mid:.{digits}f})"
+                        f"📈 **[ICT DYNAMIC TRAILING] {symbol} #{pos_id}**\n\n"
+                        f"• SL ratcheted to: `{trail_sl:.{digits}f}` (Market: `{mid:.{digits}f}`)"
                     )
 
     async def _log_trade_closure(self, symbol: str, pos_id: int):
@@ -659,13 +658,20 @@ class ICTStrategyEngine:
                 "balance_equity": eq
             })
 
-            emoji = "🏆 WIN" if pnl > 0 else "❌ LOSS"
+            pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
+            if pnl > 0:
+                header_line = f"🏆 **[ICT TRADE WON] {symbol} {pnl_str}**"
+            elif pnl == 0:
+                header_line = f"🛡️ **[ICT TRADE BREAKEVEN] {symbol} $0.00**"
+            else:
+                header_line = f"❌ **[ICT TRADE CLOSED] {symbol} {pnl_str}**"
+
             await self.notify(
-                f"{emoji} [ICT TRADE CLOSED — {symbol}]\n"
-                f"Position   : #{pos_id}\n"
-                f"PnL        : {'+' if pnl >= 0 else ''}${pnl:.2f}\n"
-                f"Exit Price : {exit_px}\n"
-                f"Reason     : {reason}"
+                f"{header_line}\n\n"
+                f"• Position   : `#{pos_id}` ({trade['side']})\n"
+                f"• Entry/Exit : `{entry_px}` ➔ `{exit_px}`\n"
+                f"• Net PnL    : `{pnl_str}`\n"
+                f"• Reason     : `{reason}`"
             )
         except Exception as e:
             logger.error(f"[ICTEngine] Error logging trade closure for {symbol}: {e}")

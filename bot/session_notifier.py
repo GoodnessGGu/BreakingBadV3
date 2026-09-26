@@ -94,9 +94,7 @@ class MarketSessionNotifier:
         sessions_str = "\n".join([f"  • ⚡ `{s}`" for s in status["active_sessions"]]) if status["active_sessions"] else "  _No active major sessions (Off-Hours / Weekend)_"
 
         card = (
-            f"🌐 ━━━━━━━━━━━━━━━━━━━ 🌐\n"
-            f"      📊 **GLOBAL MARKET SESSIONS**\n"
-            f"🌐 ━━━━━━━━━━━━━━━━━━━ 🌐\n\n"
+            f"🌐 **Global Market Sessions & Timetable**\n\n"
             f"🕒 **Current Time**: `{utc_str}` (`{local_str}`)\n\n"
             f"🏛 **Asset Market Status**:\n"
             f"  • 💱 **Forex Pairs**: {fx_tag}\n"
@@ -110,8 +108,7 @@ class MarketSessionNotifier:
             f"  • 🇺🇸 `13:00` — New York Overlap Open\n"
             f"  • 🔔 `14:30` — NYSE Wall Street Open\n"
             f"  • 🇬🇧 `17:00` — London Session Close\n"
-            f"  • 🏁 `22:00` — New York / Week Close\n"
-            f"🌐 ━━━━━━━━━━━━━━━━━━━ 🌐"
+            f"  • 🏁 `22:00` — New York / Week Close"
         )
         return card
 
@@ -137,133 +134,106 @@ class MarketSessionNotifier:
         # 1. Sunday 22:00 UTC (23:00 UTC+1) -> Forex Week Open & Sydney Open
         if weekday == 6 and hour == 22 and minute == 0:
             msg = (
-                f"🌏 ━━━━━━━━━━━━━━━━━━━━ 🌏\n"
-                f"   🚀 **FOREX MARKET OPEN — NEW WEEK**\n"
-                f"🌏 ━━━━━━━━━━━━━━━━━━━━ 🌏\n\n"
+                f"🚀 **Forex Market Open — New Trading Week**\n\n"
                 f"📅 **Welcome to the Trading Week!**\n"
                 f"⏰ **Time**: `22:00 UTC` (`23:00 WAT / UTC+1`)\n\n"
                 f"📈 **Active Market**: Sydney & Wellington 🇦🇺 🇳🇿\n"
                 f"💱 **Assets**: All standard Forex pairs (`EURUSD`, `GBPUSD`, `USDJPY`, etc.) are now **LIVE**.\n\n"
                 f"💡 **Pro Tip**: Initial 30–60 mins can have wider spreads as broker liquidity connects. Manage risk carefully!\n"
-                f"🤖 **Bot Status**: Copiers and engines are actively scanning.\n"
-                f"🌏 ━━━━━━━━━━━━━━━━━━━━ 🌏"
+                f"🤖 **Bot Status**: Copiers and engines are actively scanning."
             )
             await trigger_event("forex_week_open", msg)
 
         # 2. Sunday 23:00 UTC (00:00 UTC+1 Monday) -> Gold (XAUUSD) Market Open
         if (weekday == 6 and hour == 23 and minute == 0) or (weekday == 0 and hour == 0 and minute == 0):
             msg = (
-                f"🥇 ━━━━━━━━━━━━━━━━━━━━ 🥇\n"
-                f"   ✨ **GOLD (XAU/USD) MARKET IS NOW OPEN!**\n"
-                f"🥇 ━━━━━━━━━━━━━━━━━━━━ 🥇\n\n"
+                f"✨ **Gold (XAU/USD) Market Is Now Open!**\n\n"
                 f"⏰ **Time**: `23:00 UTC` (`00:00 Midnight UTC+1`)\n"
                 f"👑 **Asset**: Spot Gold (`XAUUSD` / Marginal CFD #74)\n\n"
                 f"🎯 **Trading Engines Activated**:\n"
                 f"  • 🤖 **ICT Autonomous SMC Engine** (Scanning 15M Sweeps & FVGs)\n"
                 f"  • 📡 **Gold Pips Hunter Signal Copier** (Listening for live setups)\n"
                 f"  • 📊 **CallistoFx Zone Watcher**\n\n"
-                f"💰 Let's have a profitable and disciplined week!\n"
-                f"🥇 ━━━━━━━━━━━━━━━━━━━━ 🥇"
+                f"💰 Let's have a profitable and disciplined week!"
             )
             await trigger_event("gold_week_open", msg)
 
         # 3. Tokyo / Asian Session Open (Daily Mon-Fri at 00:00 UTC / 01:00 UTC+1)
         if weekday in [0, 1, 2, 3, 4] and hour == 0 and minute == 0:
             msg = (
-                f"🗾 ━━━━━━━━━━━━━━━━━━━━ 🗾\n"
-                f"   🏯 **TOKYO / ASIAN SESSION OPEN**\n"
-                f"🗾 ━━━━━━━━━━━━━━━━━━━━ 🗾\n\n"
+                f"🏯 **Tokyo / Asian Session Open (00:00 UTC)**\n\n"
                 f"⏰ **Time**: `00:00 UTC` (`01:00 WAT / UTC+1`)\n"
                 f"🌏 **Markets**: Tokyo 🇯🇵, Singapore 🇸🇬, Hong Kong 🇭🇰\n\n"
                 f"🔍 **Key Asset Focus**:\n"
                 f"  • `USD/JPY`, `AUD/USD`, `NZD/USD`, `AUD/JPY`\n"
                 f"  • `XAU/USD` (Asian Range Formation)\n\n"
-                f"📊 **ICT Insight**: The Asian session typically defines the initial liquidity range. Look out for range extremes for London sweeps!\n"
-                f"🗾 ━━━━━━━━━━━━━━━━━━━━ 🗾"
+                f"📊 **ICT Insight**: The Asian session typically defines the initial liquidity range. Look out for range extremes for London sweeps!"
             )
             await trigger_event(f"tokyo_open_{weekday}", msg)
 
         # 4. Frankfurt / European Pre-Market (Daily Mon-Fri at 06:00 UTC / 07:00 UTC+1)
         if weekday in [0, 1, 2, 3, 4] and hour == 6 and minute == 0:
             msg = (
-                f"🇩🇪 ━━━━━━━━━━━━━━━━━━━━ 🇩🇪\n"
-                f"   🏛 **FRANKFURT / EUROPEAN PRE-MARKET**\n"
-                f"🇩🇪 ━━━━━━━━━━━━━━━━━━━━ 🇩🇪\n\n"
+                f"🏛 **Frankfurt European Pre-Market (06:00 UTC)**\n\n"
                 f"⏰ **Time**: `06:00 UTC` (`07:00 WAT / UTC+1`)\n"
                 f"🇪🇺 **Markets**: Frankfurt 🇩🇪, Zurich 🇨🇭, Paris 🇫🇷\n\n"
-                f"⚡ **Early Volatility**: European desks opening; preparation for London session momentum.\n"
-                f"🇩🇪 ━━━━━━━━━━━━━━━━━━━━ 🇩🇪"
+                f"⚡ **Early Volatility**: European desks opening; preparation for London session momentum."
             )
             await trigger_event(f"frankfurt_open_{weekday}", msg)
 
         # 5. London Session Open (Daily Mon-Fri at 07:00 UTC / 08:00 UTC+1)
         if weekday in [0, 1, 2, 3, 4] and hour == 7 and minute == 0:
             msg = (
-                f"🇬🇧 ━━━━━━━━━━━━━━━━━━━━ 🇬🇧\n"
-                f"   ⚡ **LONDON SESSION OPEN (KILLZONE)**\n"
-                f"🇬🇧 ━━━━━━━━━━━━━━━━━━━━ 🇬🇧\n\n"
+                f"⚡ **London Session Open — Killzone (07:00 UTC)**\n\n"
                 f"⏰ **Time**: `07:00 UTC` (`08:00 WAT / UTC+1`)\n"
                 f"🏙 **Market**: London Financial Centre 🇬🇧\n\n"
                 f"🔥 **High Liquidity Window**:\n"
                 f"  • Major volume in `EUR/USD`, `GBP/USD`, `XAU/USD`\n"
                 f"  • High probability of the classic **ICT Judas Swing** (sweeping Asian highs/lows before expansion)\n\n"
-                f"🎯 **Bot**: Auto-monitoring order flows and displacement.\n"
-                f"🇬🇧 ━━━━━━━━━━━━━━━━━━━━ 🇬🇧"
+                f"🎯 **Bot**: Auto-monitoring order flows and displacement."
             )
             await trigger_event(f"london_open_{weekday}", msg)
 
         # 6. New York Pre-Market / Overlap (Daily Mon-Fri at 12:00 UTC / 13:00 UTC+1)
         if weekday in [0, 1, 2, 3, 4] and hour == 12 and minute == 0:
             msg = (
-                f"🇺🇸 ━━━━━━━━━━━━━━━━━━━━ 🇺🇸\n"
-                f"   🗽 **NEW YORK SESSION PRE-MARKET & OVERLAP**\n"
-                f"🇺🇸 ━━━━━━━━━━━━━━━━━━━━ 🇺🇸\n\n"
+                f"🗽 **New York Session Pre-Market & Overlap (12:00 UTC)**\n\n"
                 f"⏰ **Time**: `12:00 UTC` (`13:00 WAT / UTC+1`)\n"
                 f"💥 **London + New York Overlap**: The highest volume and liquidity trading window of the 24-hour cycle.\n\n"
-                f"📊 **Focus Assets**: `XAU/USD`, `EUR/USD`, `GBP/USD`, `BTC/USD`\n"
-                f"🇺🇸 ━━━━━━━━━━━━━━━━━━━━ 🇺🇸"
+                f"📊 **Focus Assets**: `XAU/USD`, `EUR/USD`, `GBP/USD`, `BTC/USD`"
             )
             await trigger_event(f"ny_overlap_{weekday}", msg)
 
         # 7. NYSE Wall Street Open (Daily Mon-Fri at 13:30 UTC / 14:30 UTC+1)
         if weekday in [0, 1, 2, 3, 4] and hour == 13 and minute == 30:
             msg = (
-                f"🔔 ━━━━━━━━━━━━━━━━━━━━ 🔔\n"
-                f"   🏛 **WALL STREET / NYSE EQUITY BELL**\n"
-                f"🔔 ━━━━━━━━━━━━━━━━━━━━ 🔔\n\n"
+                f"🔔 **Wall Street / NYSE Equity Open (13:30 UTC)**\n\n"
                 f"⏰ **Time**: `13:30 UTC` (`14:30 WAT / UTC+1`)\n"
                 f"🇺🇸 **Market**: New York Stock Exchange & US Institutional Desks\n\n"
                 f"⚡ **Maximum Volatility**: High-impact US news releases, heavy Gold momentum, rapid FVG formations.\n"
-                f"🛡 Ensure strict stop-loss protection is active!\n"
-                f"🔔 ━━━━━━━━━━━━━━━━━━━━ 🔔"
+                f"🛡 Ensure strict stop-loss protection is active!"
             )
             await trigger_event(f"nyse_open_{weekday}", msg)
 
         # 8. London Session Close (Daily Mon-Fri at 16:00 UTC / 17:00 UTC+1)
         if weekday in [0, 1, 2, 3, 4] and hour == 16 and minute == 0:
             msg = (
-                f"🇬🇧 ━━━━━━━━━━━━━━━━━━━━ 🇬🇧\n"
-                f"   🏁 **LONDON SESSION CLOSE (LONDON FIX)**\n"
-                f"🇬🇧 ━━━━━━━━━━━━━━━━━━━━ 🇬🇧\n\n"
+                f"🏁 **London Session Close — London Fix (16:00 UTC)**\n\n"
                 f"⏰ **Time**: `16:00 UTC` (`17:00 WAT / UTC+1`)\n"
-                f"📉 **Note**: European liquidity exits; market moves into late New York consolidation.\n"
-                f"🇬🇧 ━━━━━━━━━━━━━━━━━━━━ 🇬🇧"
+                f"📉 **Note**: European liquidity exits; market moves into late New York consolidation."
             )
             await trigger_event(f"london_close_{weekday}", msg)
 
         # 9. Friday Market Close (Friday at 21:00 UTC / 22:00 UTC+1)
         if weekday == 4 and hour == 21 and minute == 0:
             msg = (
-                f"🛑 ━━━━━━━━━━━━━━━━━━━━ 🛑\n"
-                f"   🌴 **WEEKEND MARKET CLOSE**\n"
-                f"🛑 ━━━━━━━━━━━━━━━━━━━━ 🛑\n\n"
+                f"🌴 **Weekend Market Close (Markets Offline)**\n\n"
                 f"⏰ **Time**: `21:00 UTC` (`22:00 WAT / UTC+1`)\n\n"
                 f"🔒 **Status**:\n"
                 f"  • Forex & Gold markets are now **CLOSED** for the weekend.\n"
                 f"  • Crypto (`BTC/USD`) remains **OPEN 24/7**.\n"
                 f"  • IQ Option OTC Blitz assets remain active.\n\n"
-                f"🎉 Great job this week! Have a restful weekend and recharge for Sunday open.\n"
-                f"🛑 ━━━━━━━━━━━━━━━━━━━━ 🛑"
+                f"🎉 Great job this week! Have a restful weekend and recharge for Sunday open."
             )
             await trigger_event("weekend_close", msg)
 

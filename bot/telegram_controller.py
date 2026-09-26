@@ -160,7 +160,7 @@ class TelegramTradingBot:
         copier_lines = []
         for c in self.channel_mgr.list_copiers():
             icon = "🟢" if c["enabled"] else "🔴"
-            copier_lines.append(f"  {icon} {c['name']}: `{'ON' if c['enabled'] else 'OFF'}`")
+            copier_lines.append(f"  • {icon} {c['name']}: `{'ON' if c['enabled'] else 'OFF'}`")
 
         # ICT Engine
         ict_st = self.ict_engine.get_status()
@@ -168,23 +168,19 @@ class TelegramTradingBot:
         pause_tag = " [PAUSED]" if self.is_paused else ""
 
         text = (
-            f"👑 *BreakingBad V3 — Trading Control Center*{pause_tag}\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"👑 *BreakingBad V3 — Trading Control Center*{pause_tag}\n\n"
             f"👤 *Account Mode*: `{self.account_type.upper()}`\n"
             f"💵 *Forex/CFD Equity*: `${fx_eq:.2f}`\n"
-            f"⚡ *Blitz Options Balance*: `${blitz_amt:.2f}`\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"⚡ *Blitz Options Balance*: `${blitz_amt:.2f}`\n\n"
             f"⚙️ *Risk & Order Sizing*:\n"
-            f"  📊 Forex / Gold Lots: `{self.lots:.2f}` | Lev: `{self.leverage}x`\n"
-            f"  ⚡ Blitz Base Stake: `${self.blitz_stake:.2f}` *(2-Step Martingale)*\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"  • 📊 Forex / Gold Lots: `{self.lots:.2f}` | Lev: `{self.leverage}x`\n"
+            f"  • ⚡ Blitz Base Stake: `${self.blitz_stake:.2f}` *(2-Step Martingale)*\n\n"
             f"📡 *Signal Copiers*:\n" + "\n".join(copier_lines) + "\n\n"
             f"🤖 *Autonomous ICT Engine*:\n"
-            f"  {ict_icon} Master Switch: `{'ON' if ict_st['enabled'] else 'OFF'}`\n"
-            f"  🎯 Active Assets: `{', '.join(ict_st['enabled_symbols']) if ict_st['enabled_symbols'] else 'None'}`\n"
-            f"  📊 Lots: `{ict_st['lots']:.2f}` | Lev: `{ict_st['leverage']}x`\n"
-            f"  ⚖️ Risk/Reward: `1:{ict_st['rr_ratio']:.1f}`\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"  • {ict_icon} Master Switch: `{'ON' if ict_st['enabled'] else 'OFF'}`\n"
+            f"  • 🎯 Active Assets: `{', '.join(ict_st['enabled_symbols']) if ict_st['enabled_symbols'] else 'None'}`\n"
+            f"  • 📊 Lots: `{ict_st['lots']:.2f}` | Lev: `{ict_st['leverage']}x`\n"
+            f"  • ⚖️ Risk/Reward: `1:{ict_st['rr_ratio']:.1f}`\n\n"
             f"🕒 Time: `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`"
         )
         return text
@@ -229,15 +225,13 @@ class TelegramTradingBot:
 
         mode_lbl = "🟡 PRACTICE (Training)" if self.account_type == "training" else "🔴 REAL MONEY (Regular)"
         msg = (
-            f"💰 *Trading Account Balances*\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"💰 *Trading Account Balances*\n\n"
             f"💼 *Mode*: {mode_lbl}\n\n"
             f"📈 *Forex / CFD Account*:\n"
             f"  • Equity: `${fx_eq:,.2f}`\n"
             f"  • Available: `${fx_avail:,.2f}`\n\n"
             f"⚡ *Blitz Options Account*:\n"
-            f"  • Balance: `${blitz_amt:,.2f}`\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"  • Balance: `${blitz_amt:,.2f}`\n\n"
             f"💡 Adjust sizing via ⚙️ Risk & Sizing or `/account <real/demo>`."
         )
         await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=persistent_reply_keyboard())
@@ -437,16 +431,13 @@ class TelegramTradingBot:
                 blitz_txt = "  • No active Blitz option trades."
 
             text = (
-                f"📋 *Active Watchers, Zones & Live Setups* 🔴\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"👤 *Account*: `{self.account_type.upper()}` | 🕒 `{now_str}`\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"📋 *Active Watchers, Zones & Live Setups* 🔴\n\n"
+                f"👤 *Account*: `{self.account_type.upper()}` | 🕒 `{now_str}`\n\n"
                 f"💼 *Open Broker CFD Positions*:\n{cfd_txt}\n\n"
                 f"🎯 *ICT Autonomous Setups*:\n{ict_trade_txt}\n\n"
                 f"🔥 *ICT Pending FVGs*:\n{fvg_txt}\n\n"
                 f"📍 *Callisto Active Zones*:\n{zones_txt}\n\n"
-                f"⚡ *Polycarp Blitz Trades*:\n{blitz_txt}\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"⚡ *Polycarp Blitz Trades*:\n{blitz_txt}\n\n"
                 f"📡 _Live streaming price & PnL updates every 4s..._"
             )
             return text
@@ -636,13 +627,11 @@ class TelegramTradingBot:
 
         # Build output message
         header = (
-            f"📜 *Trading Execution & PnL History*\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"📜 *Trading Execution & PnL History*\n\n"
             f"👤 *Account Mode*: `{self.account_type.upper()}`\n"
             f"{pnl_icon} *Total Realized PnL*: `{pnl_sign}${total_pnl:.2f}`\n"
             f"🎯 *Overall Win Rate*: `{overall_wr:.1f}%` ({total_wins}W - {total_losses}L)\n"
-            f"📊 *Total Closed Trades*: `{all_count}`\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📊 *Total Closed Trades*: `{all_count}`\n\n"
         )
 
         body = ""
@@ -1286,8 +1275,7 @@ class TelegramTradingBot:
         # Send startup notification to Admin
         try:
             startup_text = (
-                "🚀 *BreakingBad V3 Ecosystem Online!*\n"
-                "━━━━━━━━━━━━━━━━━━━━\n"
+                "🚀 *BreakingBad V3 Ecosystem Online!*\n\n"
                 + self.build_status_text()
             )
             await self.broadcast_alert(startup_text)

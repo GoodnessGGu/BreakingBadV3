@@ -192,6 +192,25 @@ def settings_menu_keyboard(account_type: str, lots: float, leverage: int, blitz_
     ]
     return InlineKeyboardMarkup(keyboard)
 
+def news_menu_keyboard(is_straddle_enabled: bool = False, is_shield_enabled: bool = True) -> InlineKeyboardMarkup:
+    straddle_icon = "🟢" if is_straddle_enabled else "🔴"
+    straddle_txt = "ON" if is_straddle_enabled else "OFF"
+    shield_icon = "🟢" if is_shield_enabled else "🔴"
+    shield_txt = "ON" if is_shield_enabled else "OFF"
+    keyboard = [
+        [
+            InlineKeyboardButton(f"{straddle_icon} ⚡ NFP/News Straddle Engine: {straddle_txt}", callback_data="toggle_news_straddle")
+        ],
+        [
+            InlineKeyboardButton(f"{shield_icon} 🛡️ News Freeze Shield: {shield_txt}", callback_data="toggle_news_shield"),
+            InlineKeyboardButton("🔄 Refresh Calendar", callback_data="btn_news_refresh")
+        ],
+        [
+            InlineKeyboardButton("🔙 Back to Main Menu", callback_data="btn_main_menu")
+        ]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
 def close_all_confirm_keyboard() -> InlineKeyboardMarkup:
     keyboard = [
         [
@@ -202,3 +221,4 @@ def close_all_confirm_keyboard() -> InlineKeyboardMarkup:
         ]
     ]
     return InlineKeyboardMarkup(keyboard)
+

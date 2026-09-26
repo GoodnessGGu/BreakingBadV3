@@ -36,6 +36,7 @@ from copiers.kingmahn_copier import KingmahnCopier
 from copiers.polycarp_copier import PolycarpCopier
 from copiers.channel_manager import ChannelManager
 from strategies.ict_engine import ICTStrategyEngine
+from strategies.news_straddle_engine import NewsStraddleEngine
 from bot.telegram_controller import TelegramTradingBot
 
 class SensitiveTokenFilter(logging.Filter):
@@ -185,6 +186,8 @@ async def main():
         blitz_stake=args.blitz_stake
     )
     tg_bot.account_type = args.account
+    if tg_bot.straddle_engine:
+        tg_bot.straddle_engine.set_balance(fx_bid, args.account)
 
     # Eagerly wire notification callbacks before starting event loops
     channel_mgr.set_notification_callback(tg_bot.broadcast_alert)

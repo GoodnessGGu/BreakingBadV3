@@ -29,17 +29,20 @@ from clients.blitz_mcp_client import IQBlitzMCPClient
 from bot.keyboards import (
     main_menu_keyboard, channels_menu_keyboard,
     ict_menu_keyboard, settings_menu_keyboard, close_all_confirm_keyboard,
-    persistent_reply_keyboard, history_menu_keyboard, active_setups_keyboard
+    persistent_reply_keyboard, history_menu_keyboard, active_setups_keyboard,
+    news_menu_keyboard
 )
 from bot.session_notifier import MarketSessionNotifier
 from bot.news_engine import EconomicNewsEngine
+from strategies.news_straddle_engine import NewsStraddleEngine
 
 logger = logging.getLogger("TelegramController")
 
 class TelegramTradingBot:
     def __init__(self, token: str, admin_id: int, channel_mgr: ChannelManager,
                  ict_engine: ICTStrategyEngine, forex_mcp: IQForexMCPClient, blitz_mcp: IQBlitzMCPClient,
-                 lots: float = 1.0, leverage: int = 100, blitz_stake: float = 2.0):
+                 lots: float = 1.0, leverage: int = 100, blitz_stake: float = 2.0,
+                 straddle_engine: Optional[NewsStraddleEngine] = None):
         self.token = token
         self.admin_id = int(admin_id)
         self.channel_mgr = channel_mgr
@@ -48,6 +51,15 @@ class TelegramTradingBot:
         self.blitz_mcp = blitz_mcp
         self.session_notifier = MarketSessionNotifier(broadcast_func=self.broadcast_alert)
         self.news_engine = EconomicNewsEngine(broadcast_func=self.broadcast_alert)
+
+        # High-Impact News Straddle Spike Engine
+        self.straddle_engine = straddle_engine or NewsStraddleEngine(
+            forex_mcp=self.forex_mcp,
+            news_engine=self.news_engine,
+            lots=lots,
+            leverage=leverage
+        )
+        self.straddle_engine.set_notification_callback(self.broadcast_alert)
 
         self.account_type = "training"
         self.lots = float(lots)
@@ -63,10 +75,12 @@ class TelegramTradingBot:
         return int(user_id) == self.admin_id
 
     def update_forex_lots(self, lots: float) -> float:
-        """Update lot size for ICT Engine and Forex/CFD copiers."""
+        """Update lot size for ICT Engine, Straddle Engine, and Forex/CFD copiers."""
         clean_lots = max(0.01, round(float(lots), 2))
         self.lots = clean_lots
         self.ict_engine.set_lots(clean_lots)
+        if self.straddle_engine:
+            self.straddle_engine.set_lots(clean_lots)
         for c in self.channel_mgr.copiers.values():
             if hasattr(c, "set_lots"):
                 c.set_lots(clean_lots)
@@ -74,10 +88,12 @@ class TelegramTradingBot:
         return self.lots
 
     def update_forex_leverage(self, leverage: int) -> int:
-        """Update leverage for ICT Engine and Forex/CFD copiers."""
+        """Update leverage for ICT Engine, Straddle Engine, and Forex/CFD copiers."""
         clean_lev = int(leverage)
         self.leverage = clean_lev
         self.ict_engine.set_leverage(clean_lev)
+        if self.straddle_engine:
+            self.straddle_engine.set_leverage(clean_lev)
         for c in self.channel_mgr.copiers.values():
             if hasattr(c, "set_leverage"):
                 c.set_leverage(clean_lev)
@@ -167,6 +183,11 @@ class TelegramTradingBot:
         ict_icon = "🟢" if ict_st["enabled"] else "🔴"
         pause_tag = " [PAUSED]" if self.is_paused else ""
 
+        # News Straddle Engine
+        straddle_st = self.straddle_engine.get_status() if self.straddle_engine else {"enabled": False, "is_armed": False}
+        straddle_icon = "🟢" if straddle_st.get("enabled") else "🔴"
+        straddle_arm_icon = " ⚡ [ARMED - Watching Spike]" if straddle_st.get("is_armed") else ""
+
         text = (
             f"👑 *BreakingBad V3 — Trading Control Center*{pause_tag}\n\n"
             f"👤 *Account Mode*: `{self.account_type.upper()}`\n"
@@ -181,6 +202,9 @@ class TelegramTradingBot:
             f"  • 🎯 Active Assets: `{', '.join(ict_st['enabled_symbols']) if ict_st['enabled_symbols'] else 'None'}`\n"
             f"  • 📊 Lots: `{ict_st['lots']:.2f}` | Lev: `{ict_st['leverage']}x`\n"
             f"  • ⚖️ Risk/Reward: `1:{ict_st['rr_ratio']:.1f}`\n\n"
+            f"⚡ *News Straddle Spike Engine*:\n"
+            f"  • {straddle_icon} Status: `{'ON' if straddle_st.get('enabled') else 'OFF'}`{straddle_arm_icon}\n"
+            f"  • 🎯 Asset: `XAUUSD (Gold)` | Lots: `{self.straddle_engine.lots if self.straddle_engine else self.lots:.2f}`\n\n"
             f"🕒 Time: `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`"
         )
         return text
@@ -744,6 +768,8 @@ class TelegramTradingBot:
         if bal_fx:
             bid = bal_fx["balance_id"]
             self.ict_engine.set_balance(bid, target)
+            if self.straddle_engine:
+                self.straddle_engine.set_balance(bid, target)
             for c in self.channel_mgr.copiers.values():
                 if hasattr(c, "set_balance"):
                     c.set_balance(bid, target)
@@ -772,6 +798,7 @@ class TelegramTradingBot:
             "• `/status` - Complete bot and account status\n"
             "• `/balance` - View Forex and Blitz balances\n"
             "• `/news` or `/calendar` - High-impact economic news & CPI/NFP calendar\n"
+            "• `/straddle` - Experimental NFP/News Breakout Spike Engine\n"
             "• `/sessions` - View live global market hours & active sessions\n"
             "• `/ict` - Autonomous Gold ICT engine controls\n"
             "• `/channels` - Toggle signal copier channels\n"
@@ -800,7 +827,49 @@ class TelegramTradingBot:
         # Ensure fresh calendar data
         await self.news_engine.fetch_calendar()
         text = self.news_engine.get_news_dashboard()
-        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=persistent_reply_keyboard())
+        st_enabled = self.straddle_engine.is_enabled if self.straddle_engine else False
+        await update.message.reply_text(
+            text,
+            parse_mode="Markdown",
+            reply_markup=news_menu_keyboard(st_enabled, self.news_engine.is_shield_enabled)
+        )
+
+    async def cmd_straddle(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.is_admin(update.effective_user.id):
+            return
+        if not self.straddle_engine:
+            await update.message.reply_text("❌ News Straddle Engine is not initialized.")
+            return
+
+        if context.args:
+            arg = context.args[0].lower()
+            if arg in ["on", "enable", "1", "start"]:
+                self.straddle_engine.set_enabled(True)
+            elif arg in ["off", "disable", "0", "stop"]:
+                self.straddle_engine.set_enabled(False)
+            elif arg in ["toggle"]:
+                self.straddle_engine.toggle_enabled()
+
+        st = self.straddle_engine.get_status()
+        icon = "🟢" if st["enabled"] else "🔴"
+        st_txt = "ON" if st["enabled"] else "OFF"
+        arm_txt = " ⚡ [ARMED - Watching Spike]" if st.get("is_armed") else ""
+
+        msg = (
+            f"⚡ *High-Impact News Straddle Spike Engine*\n\n"
+            f"• Status: {icon} `{st_txt}`{arm_txt}\n"
+            f"• Asset: `XAUUSD (Gold)`\n"
+            f"• Lots & Leverage: `{st['lots']:.2f}` Lots | `{st['leverage']}x`\n"
+            f"• Trigger Buffer: `±${st['buffer']:.2f}` around pre-news M1 range\n"
+            f"• Take Profit: `+${st['tp']:.2f}` | Stop Loss: `-${st['sl']:.2f}`\n"
+            f"• Rapid Breakeven: `+$2.00` gain with dynamic trailing\n\n"
+            f"Usage: `/straddle on` | `/straddle off` | `/straddle`"
+        )
+        await update.message.reply_text(
+            msg,
+            parse_mode="Markdown",
+            reply_markup=news_menu_keyboard(self.straddle_engine.is_enabled, self.news_engine.is_shield_enabled)
+        )
 
     async def handle_reply_button(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Processes taps on the persistent reply keyboard."""
@@ -1131,6 +1200,8 @@ class TelegramTradingBot:
             if bal_fx:
                 bid = bal_fx["balance_id"]
                 self.ict_engine.set_balance(bid, "training")
+                if self.straddle_engine:
+                    self.straddle_engine.set_balance(bid, "training")
                 for c in self.channel_mgr.copiers.values():
                     if hasattr(c, "set_balance"):
                         c.set_balance(bid, "training")
@@ -1153,6 +1224,8 @@ class TelegramTradingBot:
             if bal_fx:
                 bid = bal_fx["balance_id"]
                 self.ict_engine.set_balance(bid, "regular")
+                if self.straddle_engine:
+                    self.straddle_engine.set_balance(bid, "regular")
                 for c in self.channel_mgr.copiers.values():
                     if hasattr(c, "set_balance"):
                         c.set_balance(bid, "regular")
@@ -1191,7 +1264,40 @@ class TelegramTradingBot:
         elif data == "btn_news":
             await self.news_engine.fetch_calendar()
             text = self.news_engine.get_news_dashboard()
-            await query.edit_message_text(text=text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
+            st_enabled = self.straddle_engine.is_enabled if self.straddle_engine else False
+            await query.edit_message_text(
+                text=text,
+                reply_markup=news_menu_keyboard(st_enabled, self.news_engine.is_shield_enabled),
+                parse_mode="Markdown"
+            )
+
+        elif data == "toggle_news_straddle":
+            if self.straddle_engine:
+                self.straddle_engine.toggle_enabled()
+            st_enabled = self.straddle_engine.is_enabled if self.straddle_engine else False
+            await query.edit_message_text(
+                text=self.news_engine.get_news_dashboard(),
+                reply_markup=news_menu_keyboard(st_enabled, self.news_engine.is_shield_enabled),
+                parse_mode="Markdown"
+            )
+
+        elif data == "toggle_news_shield":
+            self.news_engine.toggle_shield()
+            st_enabled = self.straddle_engine.is_enabled if self.straddle_engine else False
+            await query.edit_message_text(
+                text=self.news_engine.get_news_dashboard(),
+                reply_markup=news_menu_keyboard(st_enabled, self.news_engine.is_shield_enabled),
+                parse_mode="Markdown"
+            )
+
+        elif data == "btn_news_refresh":
+            await self.news_engine.fetch_calendar()
+            st_enabled = self.straddle_engine.is_enabled if self.straddle_engine else False
+            await query.edit_message_text(
+                text=self.news_engine.get_news_dashboard(),
+                reply_markup=news_menu_keyboard(st_enabled, self.news_engine.is_shield_enabled),
+                parse_mode="Markdown"
+            )
 
         elif data == "btn_close_all_confirm":
             await query.edit_message_text(
@@ -1231,6 +1337,9 @@ class TelegramTradingBot:
         self.app.add_handler(CommandHandler("news", self.cmd_news))
         self.app.add_handler(CommandHandler("calendar", self.cmd_news))
         self.app.add_handler(CommandHandler("events", self.cmd_news))
+        self.app.add_handler(CommandHandler("straddle", self.cmd_straddle))
+        self.app.add_handler(CommandHandler("newsstraddle", self.cmd_straddle))
+        self.app.add_handler(CommandHandler("spike", self.cmd_straddle))
         self.app.add_handler(CommandHandler("ict", self.cmd_ict))
         self.app.add_handler(CommandHandler("channels", self.cmd_channels))
         self.app.add_handler(CommandHandler("copiers", self.cmd_channels))
@@ -1263,6 +1372,8 @@ class TelegramTradingBot:
         # Wire notification callbacks
         self.channel_mgr.set_notification_callback(self.broadcast_alert)
         self.ict_engine.set_notification_callback(self.broadcast_alert)
+        if self.straddle_engine:
+            self.straddle_engine.set_notification_callback(self.broadcast_alert)
 
     async def start(self):
         await self.initialize()
@@ -1285,6 +1396,9 @@ class TelegramTradingBot:
 
         asyncio.create_task(self.session_notifier.run_loop())
         asyncio.create_task(self.news_engine.run_loop())
+        if self.straddle_engine:
+            asyncio.create_task(self.straddle_engine.run_loop())
+
         try:
             while self.is_running:
                 await asyncio.sleep(1)
@@ -1296,6 +1410,8 @@ class TelegramTradingBot:
         self.stop_active_view_refresh_task()
         self.session_notifier.stop()
         self.news_engine.stop()
+        if self.straddle_engine:
+            self.straddle_engine.stop()
         try:
             if self.app:
                 if self.app.updater and getattr(self.app.updater, "running", False):

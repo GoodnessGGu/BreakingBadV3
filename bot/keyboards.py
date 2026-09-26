@@ -102,14 +102,15 @@ def ict_menu_keyboard(ict_status: Dict[str, Any]) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(f"{s_icon('XAUUSD')} Gold (XAU)", callback_data="toggle_inst_xauusd"),
-            InlineKeyboardButton(f"{s_icon('BTCUSD')} Bitcoin (BTC)", callback_data="toggle_inst_btcusd")
+            InlineKeyboardButton(f"{s_icon('XAGUSD')} Silver (XAG)", callback_data="toggle_inst_xagusd")
         ],
         [
-            InlineKeyboardButton(f"{s_icon('EURUSD')} EUR/USD", callback_data="toggle_inst_eurusd"),
+            InlineKeyboardButton(f"{s_icon('BTCUSD')} Bitcoin (BTC)", callback_data="toggle_inst_btcusd"),
+            InlineKeyboardButton(f"{s_icon('EURUSD')} EUR/USD", callback_data="toggle_inst_eurusd")
+        ],
+        [
             InlineKeyboardButton(f"{s_icon('GBPUSD')} GBP/USD", callback_data="toggle_inst_gbpusd"),
-            InlineKeyboardButton(f"{s_icon('USDJPY')} USD/JPY", callback_data="toggle_inst_usdjpy")
-        ],
-        [
+            InlineKeyboardButton(f"{s_icon('USDJPY')} USD/JPY", callback_data="toggle_inst_usdjpy"),
             InlineKeyboardButton(f"{s_icon('AUDUSD')} AUD/USD", callback_data="toggle_inst_audusd")
         ],
         [

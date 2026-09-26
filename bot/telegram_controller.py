@@ -292,6 +292,10 @@ class TelegramTradingBot:
                 p = self.ict_engine.get_market_price("XAUUSD")
                 if p and p.get("mid", 0) > 0:
                     return float(p["mid"])
+            if sym in ["54", "SILVER", "XAG", "XAGUSD"]:
+                p = self.ict_engine.get_market_price("XAGUSD")
+                if p and p.get("mid", 0) > 0:
+                    return float(p["mid"])
             if sym in ["816", "BTC", "BTCUSD"]:
                 p = self.ict_engine.get_market_price("BTCUSD")
                 if p and p.get("mid", 0) > 0:
@@ -306,6 +310,8 @@ class TelegramTradingBot:
             aid = int(asset_id)
             if aid == 74:
                 return "Gold (XAUUSD)"
+            elif aid == 54:
+                return "Silver (XAGUSD)"
             elif aid == 816:
                 return "Bitcoin (BTCUSD)"
             for sym, prof in INSTRUMENT_PROFILES.items():

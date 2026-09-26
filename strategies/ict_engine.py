@@ -99,6 +99,18 @@ INSTRUMENT_PROFILES = {
         "body_ratio_req": 0.50,
         "default_lots": 1.0,
         "digits": 5
+    },
+    "XAGUSD": {
+        "symbol": "XAGUSD",
+        "name": "Silver (XAG/USD)",
+        "asset_id": 54,
+        "instrument_id": "mcfd.54",
+        "sl_buffer": 0.08,
+        "disp_threshold": 0.10,
+        "min_fvg_gap": 0.04,
+        "body_ratio_req": 0.50,
+        "default_lots": 1.0,
+        "digits": 3
     }
 }
 
@@ -173,6 +185,8 @@ class ICTStrategyEngine:
             sym = "BTCUSD"
         if sym == "GOLD" or sym == "XAU":
             sym = "XAUUSD"
+        if sym == "SILVER" or sym == "XAG":
+            sym = "XAGUSD"
 
         if sym not in INSTRUMENT_PROFILES:
             logger.warning(f"⚠️ Unknown instrument: {symbol}")

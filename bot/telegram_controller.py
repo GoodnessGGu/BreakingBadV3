@@ -35,6 +35,7 @@ from bot.keyboards import (
 from bot.session_notifier import MarketSessionNotifier
 from bot.news_engine import EconomicNewsEngine
 from strategies.news_straddle_engine import NewsStraddleEngine
+from strategies.crt_engine import CRTStrategyEngine
 
 logger = logging.getLogger("TelegramController")
 
@@ -42,7 +43,8 @@ class TelegramTradingBot:
     def __init__(self, token: str, admin_id: int, channel_mgr: ChannelManager,
                  ict_engine: ICTStrategyEngine, forex_mcp: IQForexMCPClient, blitz_mcp: IQBlitzMCPClient,
                  lots: float = 1.0, leverage: int = 100, blitz_stake: float = 2.0,
-                 straddle_engine: Optional[NewsStraddleEngine] = None):
+                 straddle_engine: Optional[NewsStraddleEngine] = None,
+                 crt_engine: Optional[CRTStrategyEngine] = None):
         self.token = token
         self.admin_id = int(admin_id)
         self.channel_mgr = channel_mgr
@@ -61,6 +63,16 @@ class TelegramTradingBot:
         )
         self.straddle_engine.set_notification_callback(self.broadcast_alert)
 
+        # Candle Range Theory (CRT) Engine (Forex Majors & Crypto)
+        self.crt_engine = crt_engine or CRTStrategyEngine(
+            mcp_client=self.forex_mcp,
+            symbols=["EURUSD", "BTCUSD"],
+            account_type="training",
+            lots=lots,
+            leverage=leverage
+        )
+        self.crt_engine.set_notification_callback(self.broadcast_alert)
+
         self.account_type = "training"
         self.lots = float(lots)
         self.leverage = int(leverage)
@@ -72,6 +84,8 @@ class TelegramTradingBot:
             self.ict_engine.set_photo_notification_callback(self.broadcast_photo)
         if hasattr(self.straddle_engine, "set_photo_notification_callback"):
             self.straddle_engine.set_photo_notification_callback(self.broadcast_photo)
+        if hasattr(self.crt_engine, "set_photo_notification_callback"):
+            self.crt_engine.set_photo_notification_callback(self.broadcast_photo)
 
     def is_admin(self, user_id: int) -> bool:
         return int(user_id) == self.admin_id

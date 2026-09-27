@@ -37,6 +37,7 @@ from copiers.polycarp_copier import PolycarpCopier
 from copiers.channel_manager import ChannelManager
 from strategies.ict_engine import ICTStrategyEngine
 from strategies.news_straddle_engine import NewsStraddleEngine
+from strategies.crt_engine import CRTStrategyEngine
 from bot.telegram_controller import TelegramTradingBot
 
 class SensitiveTokenFilter(logging.Filter):
@@ -162,7 +163,7 @@ async def main():
     channel_mgr.register_copier(kingmahn)
     channel_mgr.register_copier(polycarp)
 
-    # 5. Create ICT Strategy Engine
+    # 5. Create ICT Strategy Engine (Dedicated to Gold & Silver)
     ict_engine = ICTStrategyEngine(
         mcp_client=forex_mcp,
         symbol=args.ict_symbol,
@@ -173,7 +174,17 @@ async def main():
     )
     ict_engine.set_balance(fx_bid, args.account)
 
-    # 6. Create Telegram Bot Controller
+    # 6. Create CRT Strategy Engine (Dedicated to Forex Majors EURUSD, GBPUSD & Bitcoin)
+    crt_engine = CRTStrategyEngine(
+        mcp_client=forex_mcp,
+        symbols=["EURUSD", "BTCUSD"],
+        account_type=args.account,
+        lots=args.lots,
+        leverage=args.leverage
+    )
+    crt_engine.set_balance(fx_bid, args.account)
+
+    # 7. Create Telegram Bot Controller
     tg_bot = TelegramTradingBot(
         token=token,
         admin_id=admin_id,
@@ -183,7 +194,8 @@ async def main():
         blitz_mcp=blitz_mcp,
         lots=args.lots,
         leverage=args.leverage,
-        blitz_stake=args.blitz_stake
+        blitz_stake=args.blitz_stake,
+        crt_engine=crt_engine
     )
     tg_bot.account_type = args.account
     if tg_bot.straddle_engine:
@@ -193,11 +205,13 @@ async def main():
     channel_mgr.set_notification_callback(tg_bot.broadcast_alert)
     ict_engine.set_notification_callback(tg_bot.broadcast_alert)
     ict_engine.set_photo_notification_callback(tg_bot.broadcast_photo)
+    crt_engine.set_notification_callback(tg_bot.broadcast_alert)
+    crt_engine.set_photo_notification_callback(tg_bot.broadcast_photo)
     if tg_bot.straddle_engine:
         tg_bot.straddle_engine.set_notification_callback(tg_bot.broadcast_alert)
         tg_bot.straddle_engine.set_photo_notification_callback(tg_bot.broadcast_photo)
 
-    # 7. Start Concurrent Execution
+    # 8. Start Concurrent Execution
     logger.info("=" * 65)
     logger.info("🟢 ALL MODULES INITIALIZED — STARTING MASTER EVENT LOOP")
     logger.info("=" * 65)
@@ -206,7 +220,8 @@ async def main():
         await asyncio.gather(
             tg_bot.start(),
             channel_mgr.start(),
-            ict_engine.run_loop()
+            ict_engine.run_loop(),
+            crt_engine.run_loop()
         )
     except (asyncio.CancelledError, KeyboardInterrupt):
         logger.info("Shutting down master bot...")

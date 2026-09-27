@@ -268,7 +268,7 @@ def generate_trade_execution_chart(
 
         header_event = f" | {event_title}" if event_title else ""
         ax.set_title(
-            f"🚀 [{engine_name.upper()} {side_tag} EXECUTED]  {symbol}  ({timeframe}){header_event}",
+            f"[{engine_name.upper()} {side_tag} EXECUTED]  {symbol}  ({timeframe}){header_event}",
             color='#ffffff', fontsize=11.5, fontweight='bold', pad=14, loc='left'
         )
 
@@ -349,14 +349,14 @@ def generate_breakeven_chart(
         ax.axhline(entry_px, color=CYAN_LINE, linestyle='-', linewidth=1.2, alpha=0.8, zorder=4)
         ax.text(0.5, entry_px, f"  Entry: {entry_px:.2f}", color=CYAN_LINE, fontsize=8.5, verticalalignment='bottom' if is_long else 'top')
 
-        # Breakeven Stop Loss (Gold Shield Line)
+        # Stop Loss (Gold Shield Line)
         ax.axhline(be_sl, color=GOLD_LINE, linestyle='-', linewidth=1.8, alpha=0.95, zorder=5)
-        ax.text(0.5, be_sl, f"  🛡️ BREAKEVEN SL: {be_sl:.2f} (100% Risk-Free)", color=GOLD_LINE, fontsize=9.0, fontweight='bold', verticalalignment='top' if is_long else 'bottom')
+        ax.text(0.5, be_sl, f"  * BREAKEVEN SL: {be_sl:.2f} (100% Risk-Free)", color=GOLD_LINE, fontsize=9.0, fontweight='bold', verticalalignment='top' if is_long else 'bottom')
 
         # Initial SL (Faint Dotted Red)
         if initial_sl and abs(initial_sl - be_sl) > 0.05:
             ax.axhline(initial_sl, color='#ff5252', linestyle=':', linewidth=1.0, alpha=0.4, zorder=3)
-            ax.text(0.5, initial_sl, f"  [Old SL: {initial_sl:.2f} Eliminated]", color='#ff8a80', fontsize=7.5, alpha=0.6, verticalalignment='top' if is_long else 'bottom')
+            ax.text(0.5, initial_sl, f"  [Initial SL: {initial_sl:.2f} Eliminated]", color='#ff8a80', fontsize=7.5, alpha=0.6, verticalalignment='top' if is_long else 'bottom')
 
         # Take Profit
         ax.axhline(tp, color='#00e676', linestyle='--', linewidth=1.4, alpha=0.9, zorder=4)
@@ -368,7 +368,7 @@ def generate_breakeven_chart(
         ax.scatter([last_idx], [live_y], color=GOLD_LINE, s=150, marker='*', edgecolor='#ffffff', linewidth=1.2, zorder=6)
         ax.text(
             last_idx, live_y,
-            f"  🛡️ BREAKEVEN LOCKED\n  Live: {live_y:.2f}",
+            f"  * BREAKEVEN LOCKED\n  Live: {live_y:.2f}",
             color='#131722',
             fontsize=8.5,
             fontweight='bold',
@@ -384,7 +384,7 @@ def generate_breakeven_chart(
         ax.set_ylim(min_y - pad_y, max_y + pad_y)
 
         ax.set_title(
-            f"🛡️ [{engine_name.upper()} BREAKEVEN LOCKED]  {symbol}  ({timeframe})  |  Trade is 100% Risk-Free",
+            f"[{engine_name.upper()} BREAKEVEN LOCKED]  {symbol}  ({timeframe})  |  Trade is 100% Risk-Free",
             color='#ffd700', fontsize=11.5, fontweight='bold', pad=14, loc='left'
         )
 
@@ -492,7 +492,7 @@ def generate_straddle_setup_chart(
         ax.set_ylim(min_y - pad_y, max_y + pad_y)
 
         ax.set_title(
-            f"⚡ [NEWS STRADDLE ARMED]  {symbol} (M1)  |  {event_title}",
+            f"[NEWS STRADDLE ARMED]  {symbol} (M1)  |  {event_title}",
             color='#ffffff', fontsize=11.5, fontweight='bold', pad=14, loc='left'
         )
 
@@ -529,11 +529,6 @@ def generate_trade_close_chart(
 ) -> Optional[bytes]:
     """
     Renders an in-memory PNG candlestick chart when Take Profit, Breakeven, or Stop Loss is hit.
-    Features:
-      - Entry level line
-      - Target Take Profit line
-      - Exit Price line with glowing status badge (🏆 TP HIT / 🛡️ BREAKEVEN / ❌ SL HIT)
-      - PnL metrics overlay
     """
     try:
         data = _candles_to_df(df)
@@ -584,10 +579,10 @@ def generate_trade_close_chart(
         is_tp = pnl > 0
         is_be = pnl == 0
         exit_color = '#00e676' if is_tp else (GOLD_LINE if is_be else '#ff1744')
-        badge_text = f"🏆 TP HIT: +${pnl:.2f}" if is_tp else (f"🛡️ BREAKEVEN: $0.00" if is_be else f"❌ SL HIT: -${abs(pnl):.2f}")
+        badge_text = f"TP HIT: +${pnl:.2f}" if is_tp else (f"BREAKEVEN: $0.00" if is_be else f"SL HIT: -${abs(pnl):.2f}")
 
         ax.axhline(exit_px, color=exit_color, linestyle='-', linewidth=1.8, alpha=0.95, zorder=5)
-        ax.text(0.5, exit_px, f"  {badge_text} @ {exit_px:.2f}", color=exit_color, fontsize=9.0, fontweight='bold', verticalalignment='top' if is_long else 'bottom')
+        ax.text(0.5, exit_px, f"  [{badge_text}] @ {exit_px:.2f}", color=exit_color, fontsize=9.0, fontweight='bold', verticalalignment='top' if is_long else 'bottom')
 
         # Marker on final candle
         last_idx = n - 1
@@ -596,7 +591,7 @@ def generate_trade_close_chart(
         ax.scatter([last_idx], [marker_y], color=exit_color, s=180, marker=marker_sym, edgecolor='#ffffff', linewidth=1.4, zorder=6)
         ax.text(
             last_idx, marker_y,
-            f"  {badge_text}\n  Exit: {exit_px:.2f}",
+            f"  [{badge_text}]\n  Exit: {exit_px:.2f}",
             color='#ffffff' if not is_be else '#131722',
             fontsize=8.5,
             fontweight='bold',
@@ -611,10 +606,10 @@ def generate_trade_close_chart(
         pad_y = (max_y - min_y) * 0.08
         ax.set_ylim(min_y - pad_y, max_y + pad_y)
 
-        header_title = f"🏆 [{engine_name.upper()} TP HIT: +${pnl:.2f}]" if is_tp else (f"🛡️ [{engine_name.upper()} BREAKEVEN CLOSED: $0.00]" if is_be else f"❌ [{engine_name.upper()} CLOSED: -${abs(pnl):.2f}]")
+        header_title = f"[WIN: +${pnl:.2f}]" if is_tp else (f"[BREAKEVEN: $0.00]" if is_be else f"[CLOSED: -${abs(pnl):.2f}]")
         event_tag = f" | {event_title}" if event_title else ""
         ax.set_title(
-            f"{header_title}  {symbol}  ({timeframe}){event_tag}",
+            f"[{engine_name.upper()} {header_title}]  {symbol}  ({timeframe}){event_tag}",
             color='#ffffff', fontsize=11.5, fontweight='bold', pad=14, loc='left'
         )
 

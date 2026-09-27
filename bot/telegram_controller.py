@@ -70,6 +70,8 @@ class TelegramTradingBot:
         self._active_refresh_task: Optional[asyncio.Task] = None
         if hasattr(self.ict_engine, "set_photo_notification_callback"):
             self.ict_engine.set_photo_notification_callback(self.broadcast_photo)
+        if hasattr(self.straddle_engine, "set_photo_notification_callback"):
+            self.straddle_engine.set_photo_notification_callback(self.broadcast_photo)
 
     def is_admin(self, user_id: int) -> bool:
         return int(user_id) == self.admin_id

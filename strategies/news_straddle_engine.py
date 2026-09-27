@@ -19,6 +19,11 @@ from typing import Dict, Any, List, Optional, Callable, Set
 from clients.forex_mcp_client import IQForexMCPClient
 from bot.news_engine import EconomicNewsEngine
 from utils.gsheet_logger import gsheet_logger
+from utils.chart_generator import (
+    generate_straddle_setup_chart,
+    generate_trade_execution_chart,
+    generate_breakeven_chart
+)
 
 logger = logging.getLogger("NewsStraddle")
 
@@ -53,9 +58,13 @@ class NewsStraddleEngine:
 
         self.balance_id: Optional[int] = None
         self.notify_cb: Optional[Callable] = None
+        self.notify_photo_cb: Optional[Callable] = None
 
     def set_notification_callback(self, cb: Callable):
         self.notify_cb = cb
+
+    def set_photo_notification_callback(self, cb: Callable):
+        self.notify_photo_cb = cb
 
     async def notify(self, message: str):
         if self.notify_cb:
@@ -65,6 +74,17 @@ class NewsStraddleEngine:
                     await res
             except Exception as e:
                 logger.warning(f"[NewsStraddle] Notification error: {e}")
+
+    async def notify_photo(self, photo_bytes: Optional[bytes], caption: str = ""):
+        if photo_bytes and self.notify_photo_cb:
+            try:
+                res = self.notify_photo_cb(photo_bytes, caption)
+                if inspect.isawaitable(res):
+                    await res
+                return
+            except Exception as e:
+                logger.error(f"[NewsStraddle] Photo notification error: {e}")
+        await self.notify(caption)
 
     def set_balance(self, balance_id: Optional[int], account_type: str = "training"):
         self.balance_id = int(balance_id) if balance_id else None
@@ -167,7 +187,7 @@ class NewsStraddleEngine:
         secs_to_news = int(seconds_to_news % 60)
         time_tag = f"{mins_to_news}m {secs_to_news}s" if mins_to_news > 0 else f"{secs_to_news}s"
 
-        await self.notify(
+        caption = (
             f"⚡ **[NEWS STRADDLE ARMED] {event['title']} in {time_tag}**\n\n"
             f"• Asset      : `{self.symbol}`\n"
             f"• Pre-Range  : `{range_low:.2f}` – `{range_high:.2f}`\n"
@@ -176,6 +196,18 @@ class NewsStraddleEngine:
             f"• Lots & Lev : `{self.lots}` Lots | `{self.leverage}x`\n"
             f"🎯 _Listening for high-velocity breakout spike..._"
         )
+
+        chart_bytes = generate_straddle_setup_chart(
+            df=candles,
+            symbol=self.symbol,
+            event_title=event["title"],
+            pre_high=range_high,
+            pre_low=range_low,
+            buy_trigger=buy_trigger,
+            sell_trigger=sell_trigger,
+            timeframe="M1"
+        )
+        await self.notify_photo(chart_bytes, caption)
 
     async def check_straddle_triggers(self):
         """High-frequency polling loop during armed window to execute on breakout spike."""
@@ -216,7 +248,7 @@ class NewsStraddleEngine:
             return
 
     async def _execute_straddle_order(self, side: str, trigger_px: float, pre_range: Dict[str, Any]):
-        """Executes instant market order with tight SL & TP."""
+        """Executes instant market order with tight SL & TP and visual execution chart."""
         prices = self._get_market_price()
         exec_px = prices["buy"] if side == "BUY" else prices["sell"]
         if exec_px <= 0:
@@ -224,14 +256,6 @@ class NewsStraddleEngine:
 
         sl = round(exec_px - self.sl_distance if side == "BUY" else exec_px + self.sl_distance, 2)
         tp = round(exec_px + self.tp_distance if side == "BUY" else exec_px - self.tp_distance, 2)
-
-        await self.notify(
-            f"🚀 **[NEWS STRADDLE TRIGGERED] {self.symbol} {side}**\n\n"
-            f"• Event  : `{pre_range.get('event_title', 'High-Impact News')}`\n"
-            f"• Entry  : `{exec_px:.2f}`\n"
-            f"• SL / TP: `{sl:.2f}` / `{tp:.2f}`\n"
-            f"• Lots   : `{self.lots}` (`{self.leverage}x`)"
-        )
 
         res = self.mcp.place_market_order(
             side=side.lower(),
@@ -244,6 +268,20 @@ class NewsStraddleEngine:
             take_profit=tp,
             is_margin_isolated=True,
             keep_position_open=False
+        )
+
+        candles = self.mcp.get_candles(self.instrument_id, count=35)
+        side_tag = "BUY / LONG" if side == "BUY" else "SELL / SHORT"
+        chart_bytes = generate_trade_execution_chart(
+            df=candles,
+            symbol=self.symbol,
+            side=side,
+            entry_px=exec_px,
+            sl=sl,
+            tp=tp,
+            engine_name="News Straddle",
+            event_title=pre_range.get("event_title", "News Spike"),
+            timeframe="M1"
         )
 
         if "order_id" in res:
@@ -262,11 +300,20 @@ class NewsStraddleEngine:
                 "opened_at": time.time(),
                 "event_title": pre_range.get("event_title", "News")
             }
-            await self.notify(f"✅ **[NEWS STRADDLE FILLED] #{order_id} {side} @ {exec_px:.2f}**")
+            caption = (
+                f"🚀 **[NEWS STRADDLE TRIGGERED] {self.symbol} {side_tag}**\n\n"
+                f"• Event  : `{pre_range.get('event_title', 'High-Impact News')}`\n"
+                f"• Entry  : `{exec_px:.2f}`\n"
+                f"• SL / TP: `{sl:.2f}` / `{tp:.2f}`\n"
+                f"• Order  : `#{order_id}` (`{self.lots}` Lots @ `{self.leverage}x`)\n"
+                f"🎯 _Aiming for $15.00 Take Profit with auto-breakeven lock..._"
+            )
+            await self.notify_photo(chart_bytes, caption)
             asyncio.create_task(self._monitor_straddle_trade(order_id))
         else:
             logger.error(f"❌ [NewsStraddle] Order failed: {res}")
-            await self.notify(f"❌ **[NEWS STRADDLE FAILED]**: {res.get('error', res)}")
+            caption = f"❌ **[NEWS STRADDLE FAILED]**: {res.get('error', res)}"
+            await self.notify_photo(chart_bytes, caption)
 
     async def _monitor_straddle_trade(self, order_id: int):
         """High-frequency trade monitoring with rapid Breakeven lock & dynamic trailing."""
@@ -330,10 +377,27 @@ class NewsStraddleEngine:
                             trade["current_sl"] = be_level
                             trade["moved_to_be"] = True
                             logger.info(f"🛡️ [NewsStraddle +$2.00] Breakeven activated on #{pos_id}! SL: {be_level}")
-                            await self.notify(
-                                f"🛡️ **[NEWS STRADDLE BREAKEVEN] #{pos_id} ({side})**\n\n"
-                                f"• Trade is now Risk-Free! SL shifted to: `{be_level:.2f}`"
+                            
+                            candles = self.mcp.get_candles(self.instrument_id, count=35)
+                            chart_bytes = generate_breakeven_chart(
+                                df=candles,
+                                symbol=self.symbol,
+                                side=side,
+                                entry_px=entry,
+                                be_sl=be_level,
+                                initial_sl=trade.get("initial_sl", entry),
+                                tp=trade.get("tp", 0.0),
+                                cur_px=mid,
+                                engine_name="News Straddle",
+                                timeframe="M1"
                             )
+                            caption = (
+                                f"🛡️ **[NEWS STRADDLE BREAKEVEN] #{pos_id} ({side})**\n\n"
+                                f"• Trade is now 100% Risk-Free!\n"
+                                f"• SL shifted to: `{be_level:.2f}` (+$0.30 buffer)\n"
+                                f"• Live Price: `{mid:.2f}` | Target: `{trade.get('tp'):.2f}`"
+                            )
+                            await self.notify_photo(chart_bytes, caption)
 
                     # 2. Dynamic Trailing ($2.00 behind peak price once past $4.00 gain)
                     if gain >= 4.00 and trade["moved_to_be"]:

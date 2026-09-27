@@ -21,7 +21,11 @@ from typing import Dict, Any, Optional, List, Set, Callable
 import pandas as pd
 from clients.forex_mcp_client import IQForexMCPClient
 from gsheet_logger import gsheet_logger
-from utils.chart_generator import generate_ict_setup_chart
+from utils.chart_generator import (
+    generate_ict_setup_chart,
+    generate_trade_execution_chart,
+    generate_breakeven_chart
+)
 
 logger = logging.getLogger("ICTEngine")
 
@@ -472,6 +476,19 @@ class ICTStrategyEngine:
                 keep_position_open=False
             )
 
+            candles = self.mcp.get_candles(profile["instrument_id"], count=40)
+            chart_bytes = generate_trade_execution_chart(
+                df=candles,
+                symbol=symbol,
+                side=side,
+                entry_px=exec_px,
+                sl=sl,
+                tp=tp,
+                engine_name="ICT",
+                event_title=f"FVG Retest Entry [{fvg_l} - {fvg_h}]",
+                timeframe="15M" if CANDLE_SIZE == 900 else "M1"
+            )
+
             if "order_id" in res:
                 order_id = res["order_id"]
                 logger.info(f"✅ [ICTEngine] {symbol} Order filled! ID: #{order_id}")
@@ -490,7 +507,14 @@ class ICTStrategyEngine:
                     "opened_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 }
                 self.pending_fvgs.pop(symbol, None)
-                await self.notify(f"✅ **[ICT ORDER FILLED] #{order_id} {symbol} {side}**")
+                caption = (
+                    f"🚀 **[ICT ORDER FILLED] #{order_id} {symbol} {'BUY / LONG' if side == 'BUY' else 'SELL / SHORT'}**\n\n"
+                    f"• Entry Level: `{exec_px}` (FVG Retest)\n"
+                    f"• Stop Loss  : `{sl}`\n"
+                    f"• Target TP  : `{tp}` (1:{self.rr_ratio:.1f} RR)\n"
+                    f"• Lots & Lev : `{trade_lots}` Lots | `{trade_lev}x`"
+                )
+                await self.notify_photo(chart_bytes, caption)
             else:
                 logger.error(f"❌ [ICTEngine] {symbol} Order placement failed: {res}")
                 # Clear pending FVG to avoid infinite error loops on the same setup
@@ -503,6 +527,8 @@ class ICTStrategyEngine:
                         self.enabled_symbols.discard(symbol)
                     await self.notify(f"⚠️ **[ICT ALERT] {symbol} Unavailable** (Disabled).")
                 else:
+                    caption = f"❌ **[ICT ORDER FAILED] {symbol}**: {err_msg}"
+                    await self.notify_photo(chart_bytes, caption)
                     await self.notify(f"❌ **[ICT ORDER FAILED] {symbol}**: {err_msg}")
 
     async def manage_active_trade(self, symbol: str, cur_prices: Dict[str, float]):
@@ -574,11 +600,28 @@ class ICTStrategyEngine:
                 trade["moved_to_be"] = True
                 trade["trailing_stage"] = 2
                 logger.info(f"🛡️ [ICT +1.0R] Breakeven activated on {symbol} #{pos_id}! SL: {be_level}")
-                await self.notify(
-                    f"🛡️ **[ICT BREAKEVEN +1.0R] {symbol} #{pos_id}**\n\n"
-                    f"• Side: `{side}`\n"
-                    f"• Trade is now Risk-Free! SL shifted to: `{be_level:.{digits}f}`"
+                
+                candles = self.mcp.get_candles(profile["instrument_id"], count=40)
+                chart_bytes = generate_breakeven_chart(
+                    df=candles,
+                    symbol=symbol,
+                    side=side,
+                    entry_px=entry,
+                    be_sl=be_level,
+                    initial_sl=initial_sl,
+                    tp=trade.get("tp", 0.0),
+                    cur_px=mid,
+                    engine_name="ICT",
+                    timeframe="15M" if CANDLE_SIZE == 900 else "M1"
                 )
+                caption = (
+                    f"🛡️ **[ICT BREAKEVEN +1.0R] {symbol} #{pos_id}**\n\n"
+                    f"• Side       : `{'BUY / LONG' if side == 'BUY' else 'SELL / SHORT'}`\n"
+                    f"• Trade State: 100% Risk-Free (Downside Eliminated)\n"
+                    f"• Breakeven  : `{be_level:.{digits}f}`\n"
+                    f"• Live Price : `{mid:.{digits}f}` | Target: `{trade.get('tp', 0.0):.{digits}f}`"
+                )
+                await self.notify_photo(chart_bytes, caption)
 
         # Stage 3: +1.5R -> Lock in +0.75R guaranteed profit
         if r_mult >= 1.5 and stage < 3:

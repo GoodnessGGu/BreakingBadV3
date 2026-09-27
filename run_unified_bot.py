@@ -193,6 +193,9 @@ async def main():
     channel_mgr.set_notification_callback(tg_bot.broadcast_alert)
     ict_engine.set_notification_callback(tg_bot.broadcast_alert)
     ict_engine.set_photo_notification_callback(tg_bot.broadcast_photo)
+    if tg_bot.straddle_engine:
+        tg_bot.straddle_engine.set_notification_callback(tg_bot.broadcast_alert)
+        tg_bot.straddle_engine.set_photo_notification_callback(tg_bot.broadcast_photo)
 
     # 7. Start Concurrent Execution
     logger.info("=" * 65)

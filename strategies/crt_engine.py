@@ -176,6 +176,39 @@ class CRTStrategyEngine:
             return True, "NEW_YORK_OPEN"
         return False, "OFF_HOURS"
 
+    def get_market_price(self, symbol: str) -> Dict[str, float]:
+        profile = CRT_INSTRUMENT_PROFILES.get(symbol)
+        if not profile:
+            return {"buy": 0.0, "sell": 0.0, "mid": 0.0}
+
+        # 1. Fetch latest candle for instant live pricing
+        try:
+            candles = self.mcp.get_candles(asset_id=profile["asset_id"], size=60, count=2)
+            if candles and len(candles) > 0:
+                last_c = candles[-1]
+                px = float(last_c.get("close", last_c.get("c", 0.0)))
+                if px > 0:
+                    return {"buy": px, "sell": px, "mid": px}
+        except Exception as e:
+            logger.debug(f"[CRTEngine] Candle price fetch error for {symbol}: {e}")
+
+        # 2. Fallback to calculate_order_size if candle is unavailable
+        lev = min(self.leverage, 20 if symbol == "BTCUSD" else self.leverage)
+        try:
+            p = self.mcp.calculate_order_size(
+                asset_id=profile["asset_id"], balance_currency="USD",
+                lots=self.lots, leverage=lev
+            )
+            if isinstance(p, dict) and "buy_price" in p and "sell_price" in p:
+                buy = float(p.get("buy_price", 0.0))
+                sell = float(p.get("sell_price", 0.0))
+                if buy > 0 and sell > 0:
+                    return {"buy": buy, "sell": sell, "mid": (buy + sell) / 2}
+        except Exception:
+            pass
+
+        return {"buy": 0.0, "sell": 0.0, "mid": 0.0}
+
     async def run_loop(self):
         """Continuous async monitoring loop for active CRT instruments."""
         self.is_running = True
@@ -197,8 +230,8 @@ class CRTStrategyEngine:
         asset_id = profile["asset_id"]
 
         # 1. Fetch current price
-        cur_px = self.mcp.get_live_price(asset_id=asset_id)
-        if not cur_px or "mid" not in cur_px:
+        cur_px = self.get_market_price(symbol)
+        if not cur_px or cur_px.get("mid", 0.0) <= 0:
             return
 
         # 2. Manage active trade if any

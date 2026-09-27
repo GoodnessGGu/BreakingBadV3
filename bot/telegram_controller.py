@@ -30,7 +30,7 @@ from bot.keyboards import (
     main_menu_keyboard, channels_menu_keyboard,
     ict_menu_keyboard, settings_menu_keyboard, close_all_confirm_keyboard,
     persistent_reply_keyboard, history_menu_keyboard, active_setups_keyboard,
-    news_menu_keyboard
+    news_menu_keyboard, crt_menu_keyboard, mission_menu_keyboard
 )
 from bot.session_notifier import MarketSessionNotifier
 from bot.news_engine import EconomicNewsEngine
@@ -97,6 +97,8 @@ class TelegramTradingBot:
         self.ict_engine.set_lots(clean_lots)
         if self.straddle_engine:
             self.straddle_engine.set_lots(clean_lots)
+        if self.crt_engine:
+            self.crt_engine.set_lots(clean_lots)
         for c in self.channel_mgr.copiers.values():
             if hasattr(c, "set_lots"):
                 c.set_lots(clean_lots)
@@ -110,6 +112,8 @@ class TelegramTradingBot:
         self.ict_engine.set_leverage(clean_lev)
         if self.straddle_engine:
             self.straddle_engine.set_leverage(clean_lev)
+        if self.crt_engine:
+            self.crt_engine.set_leverage(clean_lev)
         for c in self.channel_mgr.copiers.values():
             if hasattr(c, "set_leverage"):
                 c.set_leverage(clean_lev)
@@ -177,7 +181,6 @@ class TelegramTradingBot:
                 )
         except Exception as e:
             logger.error(f"Failed to send direct Telegram photo broadcast: {e}")
-            # Fallback to text alert if image upload failed
             await self.broadcast_alert(caption)
 
     def build_status_text(self) -> str:
@@ -199,6 +202,10 @@ class TelegramTradingBot:
         ict_icon = "🟢" if ict_st["enabled"] else "🔴"
         pause_tag = " [PAUSED]" if self.is_paused else ""
 
+        # CRT Engine
+        crt_st = self.crt_engine.get_status() if self.crt_engine else {"enabled": False, "enabled_symbols": []}
+        crt_icon = "🟢" if crt_st.get("enabled") else "🔴"
+
         # News Straddle Engine
         straddle_st = self.straddle_engine.get_status() if self.straddle_engine else {"enabled": False, "is_armed": False}
         straddle_icon = "🟢" if straddle_st.get("enabled") else "🔴"
@@ -213,17 +220,49 @@ class TelegramTradingBot:
             f"  • 📊 Forex / Gold Lots: `{self.lots:.2f}` | Lev: `{self.leverage}x`\n"
             f"  • ⚡ Blitz Base Stake: `${self.blitz_stake:.2f}` *(2-Step Martingale)*\n\n"
             f"📡 *Signal Copiers*:\n" + "\n".join(copier_lines) + "\n\n"
-            f"🤖 *Autonomous ICT Engine*:\n"
+            f"🤖 *Autonomous ICT Engine (Metals)*:\n"
             f"  • {ict_icon} Master Switch: `{'ON' if ict_st['enabled'] else 'OFF'}`\n"
             f"  • 🎯 Active Assets: `{', '.join(ict_st['enabled_symbols']) if ict_st['enabled_symbols'] else 'None'}`\n"
             f"  • 📊 Lots: `{ict_st['lots']:.2f}` | Lev: `{ict_st['leverage']}x`\n"
             f"  • ⚖️ Risk/Reward: `1:{ict_st['rr_ratio']:.1f}`\n\n"
+            f"🕯️ *Autonomous CRT Engine (Forex & Crypto)*:\n"
+            f"  • {crt_icon} Master Switch: `{'ON' if crt_st.get('enabled') else 'OFF'}`\n"
+            f"  • 🎯 Active Assets: `{', '.join(crt_st.get('enabled_symbols', [])) if crt_st.get('enabled_symbols') else 'None'}`\n"
+            f"  • 📊 Lots: `{crt_st.get('lots', self.lots):.2f}` | Lev: `{crt_st.get('leverage', self.leverage)}x`\n\n"
             f"⚡ *News Straddle Spike Engine*:\n"
             f"  • {straddle_icon} Status: `{'ON' if straddle_st.get('enabled') else 'OFF'}`{straddle_arm_icon}\n"
             f"  • 🎯 Asset: `XAUUSD (Gold)` | Lots: `{self.straddle_engine.lots if self.straddle_engine else self.lots:.2f}`\n\n"
             f"🕒 Time: `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`"
         )
         return text
+
+    def build_mission_text(self) -> str:
+        """Renders the comprehensive, beautifully styled Mission and Strategy Description card."""
+        return (
+            "🎯 *BREAKINGBAD V3 — MISSION & STRATEGY ARCHITECTURE*\n\n"
+            "🏛 *Our Prime Mission:*\n"
+            "To execute a systematic, disciplined, and multi-asset trading edge with algorithmic precision, strict risk-to-reward asymmetry, and 100% emotional detachment.\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "💎 *1. ICT Institutional Engine (Metals Specialist)*\n"
+            "• *Focus Assets*: `Gold (XAUUSD)` & `Silver (XAGUSD)`\n"
+            "• *Core Logic*: Multi-Timeframe Institutional Order Flow (1H Macro Bias ➔ 5M/15M Precision). Identifies liquidity sweeps at external fractal swing points, confirms Change in State of Delivery (CISD), and enters on Fair Value Gap (FVG) mitigation retests.\n"
+            "• *Risk Model*: 1:2.0 – 1:4.0 Risk:Reward with dynamic Breakeven safety ratchets.\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "🕯️ *2. CRT Engine (Candle Range Theory)*\n"
+            "• *Focus Assets*: `EUR/USD`, `GBP/USD` & `Bitcoin (BTCUSD)`\n"
+            "• *Core Logic*: Exploits time-based candle ranges. Utilizes the **Asian Judas Protocol** (00:00–06:00 UTC) during London Open (07:00–10:00 UTC) and H1 candle expansions, catching manipulation wicks before the true body expansion unfolds.\n"
+            "• *Targets*: 50% Equilibrium Midpoint Breakeven Lock + Opposite Boundary Full Expansion.\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "⚡ *3. High-Impact News Straddle Spike Engine*\n"
+            "• *Focus Assets*: `US Non-Farm Payrolls (NFP)`, `CPI`, `FOMC Decisions`\n"
+            "• *Core Logic*: Calculates the tight pre-news consolidation range 60 seconds prior to release and places dual breakout triggers (±$1.50) to capture explosive multi-dollar volatility spikes.\n"
+            "• *Targets*: **+$15.00** Expansion Take Profit with rapid **+$4.00** Breakeven lock.\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "📡 *4. Signal Copiers & Blitz Options*\n"
+            "• *CFD Copiers*: CallistoFx, Gold Pips Hunter, GSociety, Kingmahn.\n"
+            "• *Polycarp VIP*: High-frequency Blitz Binary Options with a controlled 2-step Martingale recovery buffer.\n\n"
+            "🛡️ *Golden Rule*: Capital preservation first. Never trade without invalidation."
+        )
 
     # ==========================================
     # Command Handlers
@@ -905,6 +944,10 @@ class TelegramTradingBot:
             await self.cmd_news(update, context)
         elif text in ["🤖 Gold ICT", "Gold ICT", "ICT"]:
             await self.cmd_ict(update, context)
+        elif text in ["🕯️ CRT Engine", "CRT Engine", "CRT", "🕯️ CRT"]:
+            await self.cmd_crt(update, context)
+        elif text in ["🎯 Mission & Strategies", "🎯 Mission", "Mission", "Strategies"]:
+            await self.cmd_mission(update, context)
         elif text in ["📡 Channels", "Channels"]:
             await self.cmd_channels(update, context)
         elif text in ["⚙️ Risk & Sizing", "Risk & Sizing", "Settings", "⚙️ Settings"]:
@@ -929,6 +972,26 @@ class TelegramTradingBot:
         await update.message.reply_text(
             "🤖 *Autonomous Gold & Forex ICT Strategy Engine*\nAdjust instrument, lot size, leverage, and RR ratio:",
             reply_markup=ict_menu_keyboard(ict_st),
+            parse_mode="Markdown"
+        )
+
+    async def cmd_crt(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.is_admin(update.effective_user.id):
+            return
+        crt_st = self.crt_engine.get_status() if self.crt_engine else {"enabled": False, "enabled_symbols": []}
+        await update.message.reply_text(
+            "🕯️ *Autonomous Candle Range Theory (CRT) Engine*\nConfigure active Forex / Crypto instruments & sizing:",
+            reply_markup=crt_menu_keyboard(crt_st),
+            parse_mode="Markdown"
+        )
+
+    async def cmd_mission(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.is_admin(update.effective_user.id):
+            return
+        text = self.build_mission_text()
+        await update.message.reply_text(
+            text,
+            reply_markup=mission_menu_keyboard(),
             parse_mode="Markdown"
         )
 
@@ -1135,6 +1198,87 @@ class TelegramTradingBot:
             await query.edit_message_text(
                 f"🤖 Risk/Reward ratio set to: *1:{rr:.1f}*",
                 reply_markup=ict_menu_keyboard(ict_st),
+                parse_mode="Markdown"
+            )
+
+        # CRT Engine Menu
+        elif data == "btn_crt_menu":
+            crt_st = self.crt_engine.get_status() if self.crt_engine else {"enabled": False, "enabled_symbols": []}
+            await query.edit_message_text(
+                "🕯️ *Autonomous Candle Range Theory (CRT) Engine*\nConfigure active Forex / Crypto instruments & sizing:",
+                reply_markup=crt_menu_keyboard(crt_st),
+                parse_mode="Markdown"
+            )
+
+        elif data == "toggle_crt_master":
+            if self.crt_engine:
+                self.crt_engine.toggle()
+            crt_st = self.crt_engine.get_status() if self.crt_engine else {"enabled": False, "enabled_symbols": []}
+            await query.edit_message_text(
+                "🕯️ *Autonomous Candle Range Theory (CRT) Engine*\nConfigure active Forex / Crypto instruments & sizing:",
+                reply_markup=crt_menu_keyboard(crt_st),
+                parse_mode="Markdown"
+            )
+
+        elif data.startswith("toggle_crt_"):
+            sym = data.replace("toggle_crt_", "").upper()
+            if self.crt_engine:
+                self.crt_engine.toggle_symbol(sym)
+            crt_st = self.crt_engine.get_status() if self.crt_engine else {"enabled": False, "enabled_symbols": []}
+            await query.edit_message_text(
+                "🕯️ *Autonomous Candle Range Theory (CRT) Engine*\nConfigure active Forex / Crypto instruments & sizing:",
+                reply_markup=crt_menu_keyboard(crt_st),
+                parse_mode="Markdown"
+            )
+
+        elif data == "crt_lots_minus":
+            if self.crt_engine:
+                self.crt_engine.set_lots(self.crt_engine.lots - 0.1)
+            crt_st = self.crt_engine.get_status() if self.crt_engine else {"enabled": False, "enabled_symbols": []}
+            await query.edit_message_text(
+                "🕯️ *Autonomous Candle Range Theory (CRT) Engine*\nAdjust instrument, lot size, and leverage:",
+                reply_markup=crt_menu_keyboard(crt_st),
+                parse_mode="Markdown"
+            )
+
+        elif data == "crt_lots_plus":
+            if self.crt_engine:
+                self.crt_engine.set_lots(self.crt_engine.lots + 0.1)
+            crt_st = self.crt_engine.get_status() if self.crt_engine else {"enabled": False, "enabled_symbols": []}
+            await query.edit_message_text(
+                "🕯️ *Autonomous Candle Range Theory (CRT) Engine*\nAdjust instrument, lot size, and leverage:",
+                reply_markup=crt_menu_keyboard(crt_st),
+                parse_mode="Markdown"
+            )
+
+        elif data.startswith("set_crt_lots_"):
+            val = float(data.replace("set_crt_lots_", ""))
+            if self.crt_engine:
+                self.crt_engine.set_lots(val)
+            crt_st = self.crt_engine.get_status() if self.crt_engine else {"enabled": False, "enabled_symbols": []}
+            await query.edit_message_text(
+                "🕯️ *Autonomous Candle Range Theory (CRT) Engine*\nAdjust instrument, lot size, and leverage:",
+                reply_markup=crt_menu_keyboard(crt_st),
+                parse_mode="Markdown"
+            )
+
+        elif data.startswith("set_crt_lev_"):
+            val = int(data.replace("set_crt_lev_", ""))
+            if self.crt_engine:
+                self.crt_engine.set_leverage(val)
+            crt_st = self.crt_engine.get_status() if self.crt_engine else {"enabled": False, "enabled_symbols": []}
+            await query.edit_message_text(
+                "🕯️ *Autonomous Candle Range Theory (CRT) Engine*\nAdjust instrument, lot size, and leverage:",
+                reply_markup=crt_menu_keyboard(crt_st),
+                parse_mode="Markdown"
+            )
+
+        # Mission & Strategy Description
+        elif data == "btn_mission_strategies":
+            text = self.build_mission_text()
+            await query.edit_message_text(
+                text=text,
+                reply_markup=mission_menu_keyboard(),
                 parse_mode="Markdown"
             )
 
@@ -1357,6 +1501,11 @@ class TelegramTradingBot:
         self.app.add_handler(CommandHandler("newsstraddle", self.cmd_straddle))
         self.app.add_handler(CommandHandler("spike", self.cmd_straddle))
         self.app.add_handler(CommandHandler("ict", self.cmd_ict))
+        self.app.add_handler(CommandHandler("crt", self.cmd_crt))
+        self.app.add_handler(CommandHandler("candlerange", self.cmd_crt))
+        self.app.add_handler(CommandHandler("mission", self.cmd_mission))
+        self.app.add_handler(CommandHandler("strategies", self.cmd_mission))
+        self.app.add_handler(CommandHandler("about", self.cmd_mission))
         self.app.add_handler(CommandHandler("channels", self.cmd_channels))
         self.app.add_handler(CommandHandler("copiers", self.cmd_channels))
         self.app.add_handler(CommandHandler("active", self.cmd_active_trades))
@@ -1390,6 +1539,8 @@ class TelegramTradingBot:
         self.ict_engine.set_notification_callback(self.broadcast_alert)
         if self.straddle_engine:
             self.straddle_engine.set_notification_callback(self.broadcast_alert)
+        if self.crt_engine:
+            self.crt_engine.set_notification_callback(self.broadcast_alert)
 
     async def start(self):
         await self.initialize()

@@ -112,6 +112,37 @@ class CRTStrategyEngine:
         self.balance_id = balance_id
         self.account_type = account_type.lower()
 
+    def set_lots(self, lots: float):
+        self.lots = max(0.01, round(float(lots), 2))
+
+    def set_leverage(self, leverage: int):
+        self.leverage = int(leverage)
+
+    def toggle(self) -> bool:
+        self.is_enabled = not self.is_enabled
+        logger.info(f"[CRTEngine] Master switch toggled: {'ENABLED' if self.is_enabled else 'DISABLED'}")
+        return self.is_enabled
+
+    def toggle_symbol(self, symbol: str) -> bool:
+        sym_clean = symbol.upper().replace("/", "").replace("-", "")
+        if sym_clean in self.enabled_symbols:
+            self.enabled_symbols.remove(sym_clean)
+            logger.info(f"[CRTEngine] Disabled symbol: {sym_clean}")
+            return False
+        else:
+            self.enabled_symbols.add(sym_clean)
+            logger.info(f"[CRTEngine] Enabled symbol: {sym_clean}")
+            return True
+
+    def get_status(self) -> Dict[str, Any]:
+        return {
+            "enabled": self.is_enabled,
+            "enabled_symbols": list(self.enabled_symbols),
+            "lots": self.lots,
+            "leverage": self.leverage,
+            "active_trades_count": len([t for t in self.active_trades.values() if t])
+        }
+
     def set_notification_callback(self, cb: Callable):
         self.notify_cb = cb
 

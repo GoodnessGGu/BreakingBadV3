@@ -1,10 +1,16 @@
+"""
+bot/keyboards.py - Interactive Keyboards for BreakingBad V3 Bot Controller
+"""
+
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from typing import Dict, Any, List
+
 
 def persistent_reply_keyboard() -> ReplyKeyboardMarkup:
     keyboard = [
         [KeyboardButton("📊 Status"), KeyboardButton("💰 Balance")],
-        [KeyboardButton("🤖 Gold ICT"), KeyboardButton("📡 Channels")],
+        [KeyboardButton("🤖 Gold ICT"), KeyboardButton("🕯️ CRT Engine")],
+        [KeyboardButton("📡 Channels"), KeyboardButton("🎯 Mission & Strategies")],
         [KeyboardButton("📜 History"), KeyboardButton("📋 Active Setups")],
         [KeyboardButton("🌐 Market Sessions"), KeyboardButton("📰 Economic News")],
         [KeyboardButton("⚙️ Risk & Sizing"), KeyboardButton("ℹ️ Help")],
@@ -12,6 +18,7 @@ def persistent_reply_keyboard() -> ReplyKeyboardMarkup:
         [KeyboardButton("🛑 Close All")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
 
 def main_menu_keyboard() -> InlineKeyboardMarkup:
     keyboard = [
@@ -21,6 +28,10 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("🤖 ICT Multi-Engine", callback_data="btn_ict_menu"),
+            InlineKeyboardButton("🕯️ CRT Engine", callback_data="btn_crt_menu")
+        ],
+        [
+            InlineKeyboardButton("🎯 Mission & Strategies", callback_data="btn_mission_strategies"),
             InlineKeyboardButton("⚙️ Risk & Sizing", callback_data="btn_settings_menu")
         ],
         [
@@ -36,6 +47,7 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
         ]
     ]
     return InlineKeyboardMarkup(keyboard)
+
 
 def history_menu_keyboard(category: str = "all") -> InlineKeyboardMarkup:
     keyboard = [
@@ -54,6 +66,7 @@ def history_menu_keyboard(category: str = "all") -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(keyboard)
 
+
 def active_setups_keyboard(is_live: bool = True) -> InlineKeyboardMarkup:
     status_txt = "🟢 Live (Auto 4s)" if is_live else "⚪ Static"
     keyboard = [
@@ -63,6 +76,7 @@ def active_setups_keyboard(is_live: bool = True) -> InlineKeyboardMarkup:
         ]
     ]
     return InlineKeyboardMarkup(keyboard)
+
 
 def channels_menu_keyboard(copiers_status: List[Dict[str, Any]]) -> InlineKeyboardMarkup:
     keyboard = []
@@ -80,6 +94,7 @@ def channels_menu_keyboard(copiers_status: List[Dict[str, Any]]) -> InlineKeyboa
     keyboard.append([InlineKeyboardButton("🔙 Back to Main Menu", callback_data="btn_main_menu")])
     return InlineKeyboardMarkup(keyboard)
 
+
 def ict_menu_keyboard(ict_status: Dict[str, Any]) -> InlineKeyboardMarkup:
     enabled = ict_status.get("enabled", False)
     icon = "🟢" if enabled else "🔴"
@@ -89,7 +104,6 @@ def ict_menu_keyboard(ict_status: Dict[str, Any]) -> InlineKeyboardMarkup:
     cur_lots = ict_status.get("lots", 1.0)
     cur_lev = ict_status.get("leverage", 100)
 
-    # Dynamic status icon helper
     def s_icon(sym: str) -> str:
         return "🟢" if sym in active_syms else "⚪"
 
@@ -145,6 +159,78 @@ def ict_menu_keyboard(ict_status: Dict[str, Any]) -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(keyboard)
 
+
+def crt_menu_keyboard(crt_status: Dict[str, Any]) -> InlineKeyboardMarkup:
+    """Dedicated interactive keyboard for Candle Range Theory (CRT) Engine."""
+    enabled = crt_status.get("enabled", False)
+    icon = "🟢" if enabled else "🔴"
+    status_txt = "ON" if enabled else "OFF"
+    active_syms = set(crt_status.get("enabled_symbols", []))
+    cur_lots = crt_status.get("lots", 1.0)
+    cur_lev = crt_status.get("leverage", 100)
+
+    def s_icon(sym: str) -> str:
+        return "🟢" if sym in active_syms else "⚪"
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                f"{icon} CRT Master Switch: {status_txt}",
+                callback_data="toggle_crt_master"
+            )
+        ],
+        [
+            InlineKeyboardButton(f"{s_icon('EURUSD')} EUR/USD (Asian Judas)", callback_data="toggle_crt_eurusd"),
+            InlineKeyboardButton(f"{s_icon('GBPUSD')} GBP/USD (Asian Judas)", callback_data="toggle_crt_gbpusd")
+        ],
+        [
+            InlineKeyboardButton(f"{s_icon('BTCUSD')} Bitcoin (H1 Anchor)", callback_data="toggle_crt_btcusd")
+        ],
+        [
+            InlineKeyboardButton(f"📊 Lot Size: {cur_lots:.2f}", callback_data="noop_crt_lots")
+        ],
+        [
+            InlineKeyboardButton("➖ 0.1", callback_data="crt_lots_minus"),
+            InlineKeyboardButton("0.1", callback_data="set_crt_lots_0.1"),
+            InlineKeyboardButton("0.5", callback_data="set_crt_lots_0.5"),
+            InlineKeyboardButton("1.0", callback_data="set_crt_lots_1.0"),
+            InlineKeyboardButton("2.0", callback_data="set_crt_lots_2.0"),
+            InlineKeyboardButton("➕ 0.1", callback_data="crt_lots_plus")
+        ],
+        [
+            InlineKeyboardButton(f"⚡ Leverage: {cur_lev}x", callback_data="noop_crt_lev")
+        ],
+        [
+            InlineKeyboardButton(f"{'✅ ' if cur_lev == 20 else ''}20x", callback_data="set_crt_lev_20"),
+            InlineKeyboardButton(f"{'✅ ' if cur_lev == 50 else ''}50x", callback_data="set_crt_lev_50"),
+            InlineKeyboardButton(f"{'✅ ' if cur_lev == 100 else ''}100x", callback_data="set_crt_lev_100")
+        ],
+        [
+            InlineKeyboardButton("🎯 Mission & Logic", callback_data="btn_mission_strategies"),
+            InlineKeyboardButton("🔙 Back to Main Menu", callback_data="btn_main_menu")
+        ]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def mission_menu_keyboard() -> InlineKeyboardMarkup:
+    """Navigation keyboard for the Mission & Strategy Description Center."""
+    keyboard = [
+        [
+            InlineKeyboardButton("🤖 ICT Engine (Metals)", callback_data="btn_ict_menu"),
+            InlineKeyboardButton("🕯️ CRT Engine (Forex/BTC)", callback_data="btn_crt_menu")
+        ],
+        [
+            InlineKeyboardButton("⚡ News Straddle (NFP)", callback_data="btn_news"),
+            InlineKeyboardButton("📊 Balance & Status", callback_data="btn_status")
+        ],
+        [
+            InlineKeyboardButton("🔙 Back to Main Menu", callback_data="btn_main_menu")
+        ]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
 def settings_menu_keyboard(account_type: str, lots: float, leverage: int, blitz_stake: float) -> InlineKeyboardMarkup:
     is_training = account_type.lower() == "training"
     keyboard = [
@@ -192,6 +278,7 @@ def settings_menu_keyboard(account_type: str, lots: float, leverage: int, blitz_
     ]
     return InlineKeyboardMarkup(keyboard)
 
+
 def news_menu_keyboard(is_straddle_enabled: bool = False, is_shield_enabled: bool = True) -> InlineKeyboardMarkup:
     straddle_icon = "🟢" if is_straddle_enabled else "🔴"
     straddle_txt = "ON" if is_straddle_enabled else "OFF"
@@ -211,6 +298,7 @@ def news_menu_keyboard(is_straddle_enabled: bool = False, is_shield_enabled: boo
     ]
     return InlineKeyboardMarkup(keyboard)
 
+
 def close_all_confirm_keyboard() -> InlineKeyboardMarkup:
     keyboard = [
         [
@@ -221,4 +309,3 @@ def close_all_confirm_keyboard() -> InlineKeyboardMarkup:
         ]
     ]
     return InlineKeyboardMarkup(keyboard)
-

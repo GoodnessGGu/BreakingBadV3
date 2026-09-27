@@ -510,3 +510,126 @@ def generate_straddle_setup_chart(
     except Exception as e:
         logger.error(f"[ChartGenerator] Failed to generate straddle setup chart: {e}", exc_info=True)
         return None
+
+
+def generate_trade_close_chart(
+    df: Any,
+    symbol: str,
+    side: str,
+    entry_px: float,
+    exit_px: float,
+    tp: float,
+    sl: float,
+    pnl: float,
+    reason: str = "take_profit",
+    engine_name: str = "Straddle",
+    event_title: str = "",
+    timeframe: str = "M1",
+    num_candles: int = 40
+) -> Optional[bytes]:
+    """
+    Renders an in-memory PNG candlestick chart when Take Profit, Breakeven, or Stop Loss is hit.
+    Features:
+      - Entry level line
+      - Target Take Profit line
+      - Exit Price line with glowing status badge (🏆 TP HIT / 🛡️ BREAKEVEN / ❌ SL HIT)
+      - PnL metrics overlay
+    """
+    try:
+        data = _candles_to_df(df)
+        if data is None or len(data) < 5:
+            return None
+
+        sub_df = data.tail(num_candles).copy().reset_index(drop=True)
+        n = len(sub_df)
+
+        fig, ax = plt.subplots(figsize=(11, 6), dpi=140)
+        fig.patch.set_facecolor(BG_OUTER)
+        ax.set_facecolor(BG_INNER)
+        ax.grid(True, color=GRID_COLOR, linestyle='--', linewidth=0.5, alpha=0.7)
+
+        width = 0.60
+        wick_width = 1.1
+
+        for i in range(n):
+            c_open = float(sub_df.loc[i, 'Open'])
+            c_close = float(sub_df.loc[i, 'Close'])
+            c_high = float(sub_df.loc[i, 'High'])
+            c_low = float(sub_df.loc[i, 'Low'])
+
+            is_bull = c_close >= c_open
+            color = GREEN_CANDLE if is_bull else RED_CANDLE
+
+            ax.plot([i, i], [c_low, c_high], color=color, linewidth=wick_width, zorder=2)
+            lower = min(c_open, c_close)
+            height = max(abs(c_close - c_open), (c_high - c_low) * 0.01)
+            rect = patches.Rectangle(
+                (i - width / 2, lower), width, height,
+                facecolor=color, edgecolor=color, zorder=3
+            )
+            ax.add_patch(rect)
+
+        is_long = side.upper() in ["BUY", "LONG"]
+
+        # 1. Entry Line
+        ax.axhline(entry_px, color=CYAN_LINE, linestyle='-', linewidth=1.2, alpha=0.8, zorder=4)
+        ax.text(0.5, entry_px, f"  Entry: {entry_px:.2f}", color=CYAN_LINE, fontsize=8.5, verticalalignment='bottom' if is_long else 'top')
+
+        # 2. Target Take Profit Line
+        if tp and abs(tp - exit_px) > 0.05:
+            ax.axhline(tp, color='#00e676', linestyle='--', linewidth=1.2, alpha=0.6, zorder=4)
+            ax.text(0.5, tp, f"  Target TP: {tp:.2f}", color='#69f0ae', fontsize=8.0, alpha=0.8, verticalalignment='bottom' if is_long else 'top')
+
+        # 3. Exit Price Level & Badge
+        is_tp = pnl > 0
+        is_be = pnl == 0
+        exit_color = '#00e676' if is_tp else (GOLD_LINE if is_be else '#ff1744')
+        badge_text = f"🏆 TP HIT: +${pnl:.2f}" if is_tp else (f"🛡️ BREAKEVEN: $0.00" if is_be else f"❌ SL HIT: -${abs(pnl):.2f}")
+
+        ax.axhline(exit_px, color=exit_color, linestyle='-', linewidth=1.8, alpha=0.95, zorder=5)
+        ax.text(0.5, exit_px, f"  {badge_text} @ {exit_px:.2f}", color=exit_color, fontsize=9.0, fontweight='bold', verticalalignment='top' if is_long else 'bottom')
+
+        # Marker on final candle
+        last_idx = n - 1
+        marker_y = exit_px if exit_px > 0 else (sub_df.loc[last_idx, 'Close'])
+        marker_sym = '*' if is_tp else ('o' if is_be else 'x')
+        ax.scatter([last_idx], [marker_y], color=exit_color, s=180, marker=marker_sym, edgecolor='#ffffff', linewidth=1.4, zorder=6)
+        ax.text(
+            last_idx, marker_y,
+            f"  {badge_text}\n  Exit: {exit_px:.2f}",
+            color='#ffffff' if not is_be else '#131722',
+            fontsize=8.5,
+            fontweight='bold',
+            verticalalignment='center',
+            bbox=dict(boxstyle='round,pad=0.3', facecolor=exit_color, alpha=0.9, edgecolor='none'),
+            zorder=7
+        )
+
+        ax.set_xlim(-1, n + 6)
+        all_vals = [sub_df['Low'].min(), sub_df['High'].max(), entry_px, exit_px, tp, sl]
+        min_y, max_y = min(all_vals), max(all_vals)
+        pad_y = (max_y - min_y) * 0.08
+        ax.set_ylim(min_y - pad_y, max_y + pad_y)
+
+        header_title = f"🏆 [{engine_name.upper()} TP HIT: +${pnl:.2f}]" if is_tp else (f"🛡️ [{engine_name.upper()} BREAKEVEN CLOSED: $0.00]" if is_be else f"❌ [{engine_name.upper()} CLOSED: -${abs(pnl):.2f}]")
+        event_tag = f" | {event_title}" if event_title else ""
+        ax.set_title(
+            f"{header_title}  {symbol}  ({timeframe}){event_tag}",
+            color='#ffffff', fontsize=11.5, fontweight='bold', pad=14, loc='left'
+        )
+
+        ax.tick_params(colors=TEXT_COLOR, labelsize=8.5)
+        for spine in ax.spines.values():
+            spine.set_color('#30363d')
+
+        plt.tight_layout()
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png', bbox_inches='tight', facecolor=fig.get_facecolor(), edgecolor='none')
+        plt.close(fig)
+        buf.seek(0)
+        return buf.getvalue()
+
+    except Exception as e:
+        logger.error(f"[ChartGenerator] Failed to generate trade close chart: {e}", exc_info=True)
+        return None
+

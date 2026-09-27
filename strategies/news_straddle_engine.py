@@ -22,7 +22,8 @@ from utils.gsheet_logger import gsheet_logger
 from utils.chart_generator import (
     generate_straddle_setup_chart,
     generate_trade_execution_chart,
-    generate_breakeven_chart
+    generate_breakeven_chart,
+    generate_trade_close_chart
 )
 
 logger = logging.getLogger("NewsStraddle")
@@ -458,20 +459,37 @@ class NewsStraddleEngine:
 
         pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
         if pnl > 0:
-            header_line = f"🏆 **[NEWS STRADDLE WON] {self.symbol} {pnl_str}**"
+            header_line = f"🏆 **[NEWS STRADDLE TP WON] {self.symbol} {pnl_str}**"
         elif pnl == 0:
             header_line = f"🛡️ **[NEWS STRADDLE BREAKEVEN] {self.symbol} $0.00**"
         else:
             header_line = f"❌ **[NEWS STRADDLE CLOSED] {self.symbol} {pnl_str}**"
 
-        await self.notify(
+        candles = self.mcp.get_candles(self.instrument_id, count=40)
+        chart_bytes = generate_trade_close_chart(
+            df=candles,
+            symbol=self.symbol,
+            side=side,
+            entry_px=entry_px,
+            exit_px=exit_px,
+            tp=tp,
+            sl=sl,
+            pnl=pnl,
+            reason=reason,
+            engine_name="News Straddle",
+            event_title=event_name,
+            timeframe="M1"
+        )
+
+        caption = (
             f"{header_line}\n\n"
             f"• Event   : `{event_name}`\n"
-            f"• Position: `#{pos_id}` ({side})\n"
+            f"• Position: `#{pos_id}` ({'BUY / LONG' if side == 'BUY' else 'SELL / SHORT'})\n"
             f"• Prices  : `{entry_px:.2f}` ➔ `{exit_px:.2f}`\n"
             f"• Net PnL : `{pnl_str}`\n"
             f"• Reason  : `{reason}`"
         )
+        await self.notify_photo(chart_bytes, caption)
 
     async def run_loop(self):
         """Main background loop checking for upcoming high-impact news events to arm/trade."""

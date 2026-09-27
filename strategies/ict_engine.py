@@ -24,7 +24,8 @@ from gsheet_logger import gsheet_logger
 from utils.chart_generator import (
     generate_ict_setup_chart,
     generate_trade_execution_chart,
-    generate_breakeven_chart
+    generate_breakeven_chart,
+    generate_trade_close_chart
 )
 
 logger = logging.getLogger("ICTEngine")
@@ -703,19 +704,36 @@ class ICTStrategyEngine:
 
             pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
             if pnl > 0:
-                header_line = f"🏆 **[ICT TRADE WON] {symbol} {pnl_str}**"
+                header_line = f"🏆 **[ICT TRADE TP WON] {symbol} {pnl_str}**"
             elif pnl == 0:
                 header_line = f"🛡️ **[ICT TRADE BREAKEVEN] {symbol} $0.00**"
             else:
                 header_line = f"❌ **[ICT TRADE CLOSED] {symbol} {pnl_str}**"
 
-            await self.notify(
+            candles = self.mcp.get_candles(profile["instrument_id"], count=40)
+            chart_bytes = generate_trade_close_chart(
+                df=candles,
+                symbol=symbol,
+                side=trade["side"],
+                entry_px=entry_px,
+                exit_px=exit_px,
+                tp=trade.get("tp", 0.0),
+                sl=trade.get("current_sl", 0.0),
+                pnl=pnl,
+                reason=reason,
+                engine_name="ICT",
+                event_title=f"1:{self.rr_ratio:.1f} Target",
+                timeframe="15M" if CANDLE_SIZE == 900 else "M1"
+            )
+
+            caption = (
                 f"{header_line}\n\n"
-                f"• Position   : `#{pos_id}` ({trade['side']})\n"
+                f"• Position   : `#{pos_id}` ({'BUY / LONG' if trade['side'] == 'BUY' else 'SELL / SHORT'})\n"
                 f"• Entry/Exit : `{entry_px}` ➔ `{exit_px}`\n"
                 f"• Net PnL    : `{pnl_str}`\n"
                 f"• Reason     : `{reason}`"
             )
+            await self.notify_photo(chart_bytes, caption)
         except Exception as e:
             logger.error(f"[ICTEngine] Error logging trade closure for {symbol}: {e}")
 

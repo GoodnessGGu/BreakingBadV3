@@ -350,14 +350,13 @@ class CRTStrategyEngine:
         )
 
         caption = (
-            f"🎯 **[CRT {side} EXECUTED] {symbol}**\n\n"
-            f"• Engine     : `Candle Range Theory`\n"
-            f"• Killzone   : `{kz_name}`\n"
-            f"• Entry Price: `{entry:.5f}`\n"
-            f"• Stop Loss  : `{sl:.5f}`\n"
-            f"• Target TP  : `{tp:.5f}`\n"
-            f"• Equilibrium: `{mid:.5f}` (BE Lock Target)\n"
-            f"🛡️ _Dynamic Breakeven armed at +1.0R._"
+            f"CRT {side} Executed | {symbol}\n\n"
+            f"• Strategy: Candle Range Theory ({kz_name})\n"
+            f"• Entry: {entry:.5f}\n"
+            f"• Stop Loss: {sl:.5f}\n"
+            f"• Target TP: {tp:.5f}\n"
+            f"• Equilibrium: {mid:.5f} (BE Target)\n\n"
+            f"Dynamic Breakeven armed at +1.0R."
         )
         await self.notify_photo(chart_bytes, caption)
 
@@ -400,11 +399,11 @@ class CRTStrategyEngine:
                     engine_name="CRT"
                 )
                 caption = (
-                    f"🛡️ **[CRT BREAKEVEN LOCKED] {symbol}**\n\n"
-                    f"• Entry Price : `{entry:.5f}`\n"
-                    f"• New SL Level: `{entry:.5f}` (Risk-Free)\n"
-                    f"• Target TP   : `{tp:.5f}`\n"
-                    f"✅ _Trade is now 100% risk-free._"
+                    f"CRT Breakeven Locked | {symbol}\n\n"
+                    f"• Entry: {entry:.5f}\n"
+                    f"• New SL: {entry:.5f} (Risk-Free)\n"
+                    f"• Target TP: {tp:.5f}\n\n"
+                    f"Trade is now 100% risk-free."
                 )
                 await self.notify_photo(chart_bytes, caption)
 
@@ -430,10 +429,9 @@ class CRTStrategyEngine:
                 engine_name="CRT"
             )
             caption = (
-                f"🏁 **[CRT TRADE CLOSED: {outcome}] {symbol}**\n\n"
-                f"• Outcome   : `{'✅ TAKE PROFIT HIT' if hit_tp else ('🛡️ BREAKEVEN' if trade['is_breakeven'] else '❌ STOP LOSS HIT')}`\n"
-                f"• Exit Price: `{mid:.5f}`\n"
-                f"• Entry     : `{entry:.5f}`\n"
+                f"CRT Trade Closed ({outcome}) | {symbol}\n\n"
+                f"• Outcome: {'Take Profit Hit' if hit_tp else ('Breakeven' if trade['is_breakeven'] else 'Stop Loss Hit')}\n"
+                f"• Entry/Exit: {entry:.5f} ➔ {mid:.5f}"
             )
             await self.notify_photo(chart_bytes, caption)
             self.active_trades[symbol] = None

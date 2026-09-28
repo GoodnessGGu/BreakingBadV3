@@ -345,13 +345,13 @@ class ICTStrategyEngine:
             )
 
             caption = (
-                f"🔥 **[ICT SETUP DETECTED] {symbol} SELL**\n\n"
-                f"• Sweep Peak : `{sweep_peak}`\n"
-                f"• CISD Shift : Broken below `{sweep_open_h}`\n"
-                f"• FVG Zone   : `{fvg_l}` – `{fvg_h}`\n"
-                f"• Stop Loss  : `{sl}`\n"
-                f"• Target TP  : `{tp}` (1:{self.rr_ratio:.1f} RR)\n"
-                f"⏳ _Waiting for FVG retest..._"
+                f"ICT Setup Detected | {symbol} SELL\n\n"
+                f"• Sweep Peak: {sweep_peak}\n"
+                f"• CISD Shift: Broken below {sweep_open_h}\n"
+                f"• FVG Zone: {fvg_l} – {fvg_h}\n"
+                f"• Stop Loss: {sl}\n"
+                f"• Target TP: {tp} (1:{self.rr_ratio:.1f} RR)\n\n"
+                f"Waiting for FVG retest..."
             )
             await self.notify_photo(chart_bytes, caption)
 
@@ -405,13 +405,13 @@ class ICTStrategyEngine:
             )
 
             caption = (
-                f"🔥 **[ICT SETUP DETECTED] {symbol} BUY**\n\n"
-                f"• Sweep Trough: `{sweep_trough}`\n"
-                f"• CISD Shift  : Broken above `{sweep_open_l}`\n"
-                f"• FVG Zone    : `{fvg_l}` – `{fvg_h}`\n"
-                f"• Stop Loss   : `{sl}`\n"
-                f"• Target TP   : `{tp}` (1:{self.rr_ratio:.1f} RR)\n"
-                f"⏳ _Waiting for FVG retest..._"
+                f"ICT Setup Detected | {symbol} BUY\n\n"
+                f"• Sweep Trough: {sweep_trough}\n"
+                f"• CISD Shift: Broken above {sweep_open_l}\n"
+                f"• FVG Zone: {fvg_l} – {fvg_h}\n"
+                f"• Stop Loss: {sl}\n"
+                f"• Target TP: {tp} (1:{self.rr_ratio:.1f} RR)\n\n"
+                f"Waiting for FVG retest..."
             )
             await self.notify_photo(chart_bytes, caption)
 
@@ -509,28 +509,28 @@ class ICTStrategyEngine:
                 }
                 self.pending_fvgs.pop(symbol, None)
                 caption = (
-                    f"🚀 **[ICT ORDER FILLED] #{order_id} {symbol} {'BUY / LONG' if side == 'BUY' else 'SELL / SHORT'}**\n\n"
-                    f"• Entry Level: `{exec_px}` (FVG Retest)\n"
-                    f"• Stop Loss  : `{sl}`\n"
-                    f"• Target TP  : `{tp}` (1:{self.rr_ratio:.1f} RR)\n"
-                    f"• Lots & Lev : `{trade_lots}` Lots | `{trade_lev}x`"
+                    f"ICT Order Filled | #{order_id} {symbol} ({'BUY' if side == 'BUY' else 'SELL'})\n\n"
+                    f"• Entry: {exec_px}\n"
+                    f"• Stop Loss: {sl}\n"
+                    f"• Target TP: {tp} (1:{self.rr_ratio:.1f} RR)\n"
+                    f"• Size: {trade_lots} Lots ({trade_lev}x)"
                 )
                 await self.notify_photo(chart_bytes, caption)
             else:
-                logger.error(f"❌ [ICTEngine] {symbol} Order placement failed: {res}")
+                logger.error(f"[ICTEngine] {symbol} Order placement failed: {res}")
                 # Clear pending FVG to avoid infinite error loops on the same setup
                 self.pending_fvgs.pop(symbol, None)
                 err_dict = res.get('error', {})
                 err_msg = err_dict.get('message', str(err_dict)) if isinstance(err_dict, dict) else str(res)
                 if "not_available" in err_msg.lower():
-                    logger.warning(f"⚠️ [ICTEngine] Instrument {symbol} is not tradeable on broker. Disabling {symbol}.")
+                    logger.warning(f"[ICTEngine] Instrument {symbol} is not tradeable on broker. Disabling {symbol}.")
                     if symbol != "XAUUSD":
                         self.enabled_symbols.discard(symbol)
-                    await self.notify(f"⚠️ **[ICT ALERT] {symbol} Unavailable** (Disabled).")
+                    await self.notify(f"ICT Alert: {symbol} is currently unavailable on broker.")
                 else:
-                    caption = f"❌ **[ICT ORDER FAILED] {symbol}**: {err_msg}"
+                    caption = f"ICT Order Failed | {symbol}: {err_msg}"
                     await self.notify_photo(chart_bytes, caption)
-                    await self.notify(f"❌ **[ICT ORDER FAILED] {symbol}**: {err_msg}")
+                    await self.notify(caption)
 
     async def manage_active_trade(self, symbol: str, cur_prices: Dict[str, float]):
         trade = self.active_trades.get(symbol)
@@ -616,11 +616,11 @@ class ICTStrategyEngine:
                     timeframe="15M" if CANDLE_SIZE == 900 else "M1"
                 )
                 caption = (
-                    f"🛡️ **[ICT BREAKEVEN +1.0R] {symbol} #{pos_id}**\n\n"
-                    f"• Side       : `{'BUY / LONG' if side == 'BUY' else 'SELL / SHORT'}`\n"
-                    f"• Trade State: 100% Risk-Free (Downside Eliminated)\n"
-                    f"• Breakeven  : `{be_level:.{digits}f}`\n"
-                    f"• Live Price : `{mid:.{digits}f}` | Target: `{trade.get('tp', 0.0):.{digits}f}`"
+                    f"ICT Breakeven Locked (+1.0R) | {symbol} #{pos_id}\n\n"
+                    f"• Side: {'BUY' if side == 'BUY' else 'SELL'}\n"
+                    f"• Status: Risk-Free\n"
+                    f"• Breakeven SL: {be_level:.{digits}f}\n"
+                    f"• Current Price: {mid:.{digits}f} (Target: {trade.get('tp', 0.0):.{digits}f})"
                 )
                 await self.notify_photo(chart_bytes, caption)
 
@@ -633,9 +633,9 @@ class ICTStrategyEngine:
                 trade["trailing_stage"] = 3
                 logger.info(f"💰 [ICT +1.5R] Locked +0.75R profit on {symbol} #{pos_id}! SL: {lock_075_level}")
                 await self.notify(
-                    f"🔒 **[ICT PROFIT LOCK +1.5R] {symbol} #{pos_id}**\n\n"
-                    f"• Side: `{side}`\n"
-                    f"• Secured +0.75R profit! New SL: `{lock_075_level:.{digits}f}`"
+                    f"ICT Profit Lock (+1.5R) | {symbol} #{pos_id}\n\n"
+                    f"• Side: {side}\n"
+                    f"• Secured +0.75R profit. New SL: {lock_075_level:.{digits}f}"
                 )
 
         # Stage 4: +2.0R -> Lock in +1.25R guaranteed profit
@@ -647,9 +647,9 @@ class ICTStrategyEngine:
                 trade["trailing_stage"] = 4
                 logger.info(f"💰 [ICT +2.0R] Locked +1.25R profit on {symbol} #{pos_id}! SL: {lock_125_level}")
                 await self.notify(
-                    f"🔒 **[ICT PROFIT LOCK +2.0R] {symbol} #{pos_id}**\n\n"
-                    f"• Side: `{side}`\n"
-                    f"• Secured +1.25R profit! New SL: `{lock_125_level:.{digits}f}`"
+                    f"ICT Profit Lock (+2.0R) | {symbol} #{pos_id}\n\n"
+                    f"• Side: {side}\n"
+                    f"• Secured +1.25R profit. New SL: {lock_125_level:.{digits}f}"
                 )
 
         # Stage 5: +2.5R+ -> Dynamic Trailing Stop (Ratchets 0.75R behind market price)
@@ -664,8 +664,8 @@ class ICTStrategyEngine:
                     trade["current_sl"] = trail_sl
                     logger.info(f"🚀 [ICT Trailing 0.75R] Ratchet SL on {symbol} #{pos_id}! SL: {trail_sl}")
                     await self.notify(
-                        f"📈 **[ICT DYNAMIC TRAILING] {symbol} #{pos_id}**\n\n"
-                        f"• SL ratcheted to: `{trail_sl:.{digits}f}` (Market: `{mid:.{digits}f}`)"
+                        f"ICT Dynamic Trailing | {symbol} #{pos_id}\n\n"
+                        f"• SL ratcheted to: {trail_sl:.{digits}f} (Market: {mid:.{digits}f})"
                     )
 
     async def _log_trade_closure(self, symbol: str, pos_id: int):
@@ -704,11 +704,11 @@ class ICTStrategyEngine:
 
             pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
             if pnl > 0:
-                header_line = f"🏆 **[ICT TRADE TP WON] {symbol} {pnl_str}**"
+                header_line = f"ICT Trade TP Hit | {symbol} {pnl_str}"
             elif pnl == 0:
-                header_line = f"🛡️ **[ICT TRADE BREAKEVEN] {symbol} $0.00**"
+                header_line = f"ICT Trade Breakeven | {symbol} $0.00"
             else:
-                header_line = f"❌ **[ICT TRADE CLOSED] {symbol} {pnl_str}**"
+                header_line = f"ICT Trade Closed | {symbol} {pnl_str}"
 
             candles = self.mcp.get_candles(profile["instrument_id"], count=40)
             chart_bytes = generate_trade_close_chart(
@@ -728,10 +728,10 @@ class ICTStrategyEngine:
 
             caption = (
                 f"{header_line}\n\n"
-                f"• Position   : `#{pos_id}` ({'BUY / LONG' if trade['side'] == 'BUY' else 'SELL / SHORT'})\n"
-                f"• Entry/Exit : `{entry_px}` ➔ `{exit_px}`\n"
-                f"• Net PnL    : `{pnl_str}`\n"
-                f"• Reason     : `{reason}`"
+                f"• Position: #{pos_id} ({'BUY' if trade['side'] == 'BUY' else 'SELL'})\n"
+                f"• Entry/Exit: {entry_px} ➔ {exit_px}\n"
+                f"• Net PnL: {pnl_str}\n"
+                f"• Reason: {reason}"
             )
             await self.notify_photo(chart_bytes, caption)
         except Exception as e:

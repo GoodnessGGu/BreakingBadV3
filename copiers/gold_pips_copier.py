@@ -85,7 +85,7 @@ class GoldSignalParser:
 
 class GoldPipsCopier(BaseCopier):
     def __init__(self, mcp_client: IQForexMCPClient, channel_id: int = GOLD_PIPS_DEFAULT_CHANNEL,
-                 lots: float = 1.0, leverage: int = 100, tp_target: int = 1,
+                 lots: float = 1.0, leverage: int = 100, tp_target: int = 2,
                  max_slippage: float = 4.0, enabled: bool = True):
         super().__init__("GoldPipsHunter", channel_id, enabled)
         self.mcp = mcp_client
@@ -220,12 +220,12 @@ class GoldPipsCopier(BaseCopier):
         exec_price = prices["buy"] if side == "BUY" else prices["sell"]
 
         await self.notify(
-            f"⚡ **[GOLD PIPS SIGNAL] {side} @ ~{exec_price:.2f}**\n\n"
-            f"• Side : `{side}`\n"
-            f"• Entry: `~{exec_price:.2f}`\n"
-            f"• SL   : `{sl if sl else 'None'}`\n"
-            f"• TP   : `{tp if tp else 'None'}` (Target {self.tp_target})\n"
-            f"• Lots : `{self.lots}` (Lev `{self.leverage}x`)"
+            f"⚡ [GOLD PIPS SIGNAL] {side} @ ~{exec_price:.2f}\n\n"
+            f"• Side: {side}\n"
+            f"• Entry: ~{exec_price:.2f}\n"
+            f"• SL: {sl if sl else 'None'}\n"
+            f"• TP: {tp if tp else 'None'} (Target {self.tp_target})\n"
+            f"• Lots: {self.lots} (Lev {self.leverage}x)"
         )
 
         res = self.mcp.place_market_order(
@@ -255,11 +255,11 @@ class GoldPipsCopier(BaseCopier):
                 "moved_to_be": False,
                 "opened_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             }
-            await self.notify(f"✅ **[GOLD PIPS FILLED] #{order_id} {side} @ {exec_price:.2f}**")
+            await self.notify(f"✅ [GOLD PIPS FILLED] #{order_id} {side} @ {exec_price:.2f}")
             asyncio.create_task(self._monitor_position(order_id))
         else:
             logger.error(f"❌ [GoldPips] Order failed: {res}")
-            await self.notify(f"❌ **[GOLD PIPS FAILED]**: {res.get('error', res)}")
+            await self.notify(f"❌ [GOLD PIPS FAILED]: {res.get('error', res)}")
 
     async def _monitor_position(self, order_id: int):
         """Monitors active Gold Pips trade and logs settlement."""
@@ -369,19 +369,19 @@ class GoldPipsCopier(BaseCopier):
 
         pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
         if pnl > 0:
-            header_line = f"🏆 **[GOLD PIPS WON] {pnl_str}**"
+            header_line = f"🏆 [GOLD PIPS WON] {pnl_str}"
         elif pnl == 0:
-            header_line = f"🛡️ **[GOLD PIPS BREAKEVEN] $0.00**"
+            header_line = f"🛡️ [GOLD PIPS BREAKEVEN] $0.00"
         else:
-            header_line = f"❌ **[GOLD PIPS CLOSED] {pnl_str}**"
+            header_line = f"❌ [GOLD PIPS CLOSED] {pnl_str}"
 
         await self.notify(
             f"{header_line}\n\n"
-            f"• Side    : `{side}` (`{self.lots}` Lots)\n"
-            f"• Entry   : `{entry_px:.2f}`\n"
-            f"• Exit    : `{exit_px:.2f}`\n"
-            f"• Net PnL : `{pnl_str}`\n"
-            f"• Reason  : `{reason}`"
+            f"• Side: {side} ({self.lots} Lots)\n"
+            f"• Entry: {entry_px:.2f}\n"
+            f"• Exit: {exit_px:.2f}\n"
+            f"• Net PnL: {pnl_str}\n"
+            f"• Reason: {reason}"
         )
 
     async def apply_breakeven(self):
@@ -418,8 +418,8 @@ class GoldPipsCopier(BaseCopier):
                 pos["moved_to_be"] = True
                 count += 1
                 await self.notify(
-                    f"🛡️ **[GOLD PIPS BREAKEVEN] #{pos_id} ({side})**\n\n"
-                    f"• Trade is now Risk-Free! SL shifted to: `{be_level:.2f}`"
+                    f"🛡️ [GOLD PIPS BREAKEVEN] #{pos_id} ({side})\n\n"
+                    f"• Trade is now Risk-Free! SL shifted to: {be_level:.2f}"
                 )
 
     async def close_all_positions(self):
@@ -436,7 +436,7 @@ class GoldPipsCopier(BaseCopier):
                     count += 1
         self.open_positions.clear()
         if count > 0:
-            await self.notify(f"🛑 **[GOLD PIPS] Closed {count} position(s)**")
+            await self.notify(f"🛑 [GOLD PIPS] Closed {count} position(s)")
 
     def get_status(self) -> Dict[str, Any]:
         return {

@@ -79,6 +79,7 @@ async def main():
     parser.add_argument("--blitz-stake", type=float, default=float(os.getenv("BLITZ_STAKE", "2.0")))
     parser.add_argument("--enable-polycarp", action="store_true", default=os.getenv("ENABLE_POLYCARP", "false").lower() == "true")
     parser.add_argument("--ict-symbol", default=os.getenv("ICT_SYMBOL", "XAUUSD"))
+    parser.add_argument("--gold-pips-tp", type=int, default=int(os.getenv("GOLD_PIPS_TP", "2")), choices=[1, 2, 3])
     parser.add_argument("--lookback-mins", type=int, default=int(os.getenv("LOOKBACK_MINS", "240")))
     args = parser.parse_args()
 
@@ -126,7 +127,8 @@ async def main():
     gold_pips = GoldPipsCopier(
         mcp_client=forex_mcp,
         lots=args.lots,
-        leverage=args.leverage
+        leverage=args.leverage,
+        tp_target=args.gold_pips_tp
     )
     gold_pips.set_balance(fx_bid, args.account)
 

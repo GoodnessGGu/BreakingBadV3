@@ -322,6 +322,16 @@ class CRTStrategyEngine:
             keep_position_open=False
         )
 
+        if not res or "error" in res or not (res.get("order_id") or res.get("position_id")):
+            err_dict = res.get('error', {}) if isinstance(res, dict) else {}
+            err_msg = err_dict.get('message', str(err_dict)) if isinstance(err_dict, dict) else str(res)
+            logger.error(f"[CRTEngine] {symbol} Order placement rejected by broker: {err_msg}")
+            if "not_available" in str(err_msg).lower():
+                await self.notify_text(f"CRT Order Failed | {symbol} is currently unavailable for CFD trading on broker.")
+            else:
+                await self.notify_text(f"CRT Order Failed | {symbol}: {err_msg}")
+            return
+
         pos_id = res.get("order_id") or res.get("position_id") or f"crt_{int(time.time())}"
         self.active_trades[symbol] = {
             "position_id": pos_id,
@@ -351,7 +361,7 @@ class CRTStrategyEngine:
         )
 
         caption = (
-            f"CRT {side} Executed | {symbol}\n\n"
+            f"CRT {side} Executed | #{pos_id} {symbol}\n\n"
             f"• Strategy: Candle Range Theory ({kz_name})\n"
             f"• Entry: {entry:.5f}\n"
             f"• Stop Loss: {sl:.5f}\n"

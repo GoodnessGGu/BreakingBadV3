@@ -41,6 +41,7 @@ CRT_INSTRUMENT_PROFILES: Dict[str, Dict[str, Any]] = {
         "max_sweep": 0.0035,
         "sl_buffer": 0.0003,
         "default_lots": 1.0,
+        "contract_size": 100000,
         "target_rr": 2.5,
         "digits": 5,
         "mode": "ASIAN_JUDAS"
@@ -54,6 +55,7 @@ CRT_INSTRUMENT_PROFILES: Dict[str, Dict[str, Any]] = {
         "max_sweep": 0.0040,
         "sl_buffer": 0.0004,
         "default_lots": 1.0,
+        "contract_size": 100000,
         "target_rr": 2.5,
         "digits": 5,
         "mode": "ASIAN_JUDAS"
@@ -67,9 +69,24 @@ CRT_INSTRUMENT_PROFILES: Dict[str, Dict[str, Any]] = {
         "max_sweep": 800.0,
         "sl_buffer": 40.0,
         "default_lots": 0.1,
+        "contract_size": 1,
         "target_rr": 2.2,
         "digits": 2,
         "mode": "H1_ANCHOR"
+    },
+    "XAUUSD": {
+        "symbol": "XAUUSD",
+        "name": "Gold (XAU/USD)",
+        "asset_id": 74,
+        "instrument_id": "mcfd.74",
+        "min_sweep": 3.0,
+        "max_sweep": 35.0,
+        "sl_buffer": 3.0,
+        "default_lots": 1.0,
+        "contract_size": 100,
+        "target_rr": 2.5,
+        "digits": 2,
+        "mode": "ASIAN_JUDAS"
     }
 }
 
@@ -77,7 +94,7 @@ CRT_INSTRUMENT_PROFILES: Dict[str, Dict[str, Any]] = {
 class CRTStrategyEngine:
     """
     Autonomous Candle Range Theory (CRT) Execution Engine.
-    Specialized for Forex (EURUSD, GBPUSD) & Crypto (BTCUSD).
+    Specialized for Forex (EURUSD, GBPUSD), Crypto (BTCUSD), and Metals.
     """
 
     def __init__(
@@ -107,6 +124,7 @@ class CRTStrategyEngine:
         self.h1_anchors: Dict[str, Dict[str, Any]] = {}
         self.pending_setups: Dict[str, Optional[Dict[str, Any]]] = {}
         self.active_trades: Dict[str, Optional[Dict[str, Any]]] = {}
+        self.unavailable_cooldown: Dict[str, float] = {}
 
     def set_balance(self, balance_id: int, account_type: str = "training"):
         self.balance_id = balance_id
@@ -226,6 +244,10 @@ class CRTStrategyEngine:
             await asyncio.sleep(15)
 
     async def _evaluate_symbol_cycle(self, symbol: str):
+        # 0. Check if symbol is in temporary unavailable cooldown
+        if time.time() < self.unavailable_cooldown.get(symbol, 0.0):
+            return
+
         profile = CRT_INSTRUMENT_PROFILES[symbol]
         asset_id = profile["asset_id"]
 
@@ -327,7 +349,8 @@ class CRTStrategyEngine:
             err_msg = err_dict.get('message', str(err_dict)) if isinstance(err_dict, dict) else str(res)
             logger.error(f"[CRTEngine] {symbol} Order placement rejected by broker: {err_msg}")
             if "not_available" in str(err_msg).lower():
-                await self.notify_text(f"CRT Order Failed | {symbol} is currently unavailable for CFD trading on broker.")
+                self.unavailable_cooldown[symbol] = time.time() + 3600
+                await self.notify_text(f"CRT Order Failed | {symbol} is currently unavailable for CFD trading on broker (paused for 1h).")
             else:
                 await self.notify_text(f"CRT Order Failed | {symbol}: {err_msg}")
             return
@@ -344,6 +367,8 @@ class CRTStrategyEngine:
             "tp_price": tp,
             "mid_equilibrium": mid,
             "risk_points": abs(entry - sl),
+            "lots": lots,
+            "contract_size": profile.get("contract_size", 1.0),
             "is_breakeven": False,
             "opened_at": time.time()
         }
@@ -424,8 +449,19 @@ class CRTStrategyEngine:
 
         if hit_tp or hit_sl:
             outcome = "WIN" if hit_tp else ("BREAKEVEN" if trade["is_breakeven"] else "LOSS")
-            pnl = (tp - entry) if hit_tp else (0.0 if trade["is_breakeven"] else -(risk))
-            logger.info(f"🏁 [CRTEngine] {symbol} trade closed: {outcome} | PnL: {pnl:.5f}")
+            contract_size = trade.get("contract_size", 1.0)
+            trade_lots = trade.get("lots", 1.0)
+
+            if hit_tp:
+                gain_pts = (tp - entry) if side == "BUY" else (entry - tp)
+                dollar_pnl = gain_pts * contract_size * trade_lots
+            elif trade["is_breakeven"]:
+                dollar_pnl = 0.0
+            else:
+                dollar_pnl = -(risk * contract_size * trade_lots)
+
+            pnl_sign = f"+${dollar_pnl:.2f}" if dollar_pnl >= 0 else f"-${abs(dollar_pnl):.2f}"
+            logger.info(f"🏁 [CRTEngine] {symbol} trade closed: {outcome} | PnL: {pnl_sign}")
 
             chart_bytes = generate_trade_close_chart(
                 df=None,
@@ -435,14 +471,15 @@ class CRTStrategyEngine:
                 exit_px=mid,
                 tp=tp,
                 sl=sl,
-                pnl=pnl,
+                pnl=dollar_pnl,
                 reason="take_profit" if hit_tp else "stop_loss",
                 engine_name="CRT"
             )
             caption = (
-                f"CRT Trade Closed ({outcome}) | {symbol}\n\n"
+                f"CRT Trade Closed ({outcome}) | {symbol} {pnl_sign}\n\n"
                 f"• Outcome: {'Take Profit Hit' if hit_tp else ('Breakeven' if trade['is_breakeven'] else 'Stop Loss Hit')}\n"
-                f"• Entry/Exit: {entry:.5f} ➔ {mid:.5f}"
+                f"• Entry/Exit: {entry:.5f} ➔ {mid:.5f}\n"
+                f"• Realized PnL: {pnl_sign}"
             )
             await self.notify_photo(chart_bytes, caption)
             self.active_trades[symbol] = None

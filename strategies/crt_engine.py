@@ -309,8 +309,9 @@ class CRTStrategyEngine:
 
         logger.info(f"⚡ [CRTEngine] Executing {side} on {symbol} @ {entry:.5f} | SL: {sl} | TP: {tp} ({kz_name})")
         trade_lev = min(self.leverage, 20 if symbol == "BTCUSD" else self.leverage)
-        res = self.mcp.create_market_order(
+        res = self.mcp.place_market_order(
             side=side.lower(),
+            balance_id=self.balance_id,
             instrument_id=instrument_id,
             asset_id=profile["asset_id"],
             lots=lots,

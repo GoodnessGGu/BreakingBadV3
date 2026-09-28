@@ -108,8 +108,8 @@ INSTRUMENT_PROFILES = {
     "XAGUSD": {
         "symbol": "XAGUSD",
         "name": "Silver (XAG/USD)",
-        "asset_id": 54,
-        "instrument_id": "mcfd.54",
+        "asset_id": 1487,
+        "instrument_id": "mcfd.1487",
         "sl_buffer": 0.08,
         "disp_threshold": 0.10,
         "min_fvg_gap": 0.04,

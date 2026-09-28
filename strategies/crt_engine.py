@@ -308,18 +308,23 @@ class CRTStrategyEngine:
         lots = profile.get("default_lots", self.lots)
 
         logger.info(f"⚡ [CRTEngine] Executing {side} on {symbol} @ {entry:.5f} | SL: {sl} | TP: {tp} ({kz_name})")
-        res = self.mcp.open_position(
-            instrument_id=instrument_id,
+        trade_lev = min(self.leverage, 20 if symbol == "BTCUSD" else self.leverage)
+        res = self.mcp.create_market_order(
             side=side.lower(),
-            amount=lots,
-            leverage=self.leverage,
-            balance_id=self.balance_id,
-            account_type=self.account_type
+            instrument_id=instrument_id,
+            asset_id=profile["asset_id"],
+            lots=lots,
+            leverage=trade_lev,
+            stop_loss=sl,
+            take_profit=tp,
+            is_margin_isolated=True,
+            keep_position_open=False
         )
 
         pos_id = res.get("order_id") or res.get("position_id") or f"crt_{int(time.time())}"
         self.active_trades[symbol] = {
             "position_id": pos_id,
+            "order_id": pos_id,
             "symbol": symbol,
             "side": side,
             "entry_price": entry,
@@ -375,6 +380,13 @@ class CRTStrategyEngine:
                 trade["sl_price"] = entry
                 trade["is_breakeven"] = True
                 logger.info(f"🛡️ [CRTEngine] {symbol} reached +1.0R Equilibrium. Ratcheting SL to Breakeven @ {entry}!")
+                
+                pos_id = trade.get("position_id")
+                if pos_id and str(pos_id).isdigit():
+                    try:
+                        self.mcp.change_position_stop_loss(position_id=int(pos_id), level=entry)
+                    except Exception as e:
+                        logger.debug(f"[CRTEngine] Could not update broker SL for #{pos_id}: {e}")
                 
                 chart_bytes = generate_breakeven_chart(
                     df=None,

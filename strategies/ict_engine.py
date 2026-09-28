@@ -130,8 +130,8 @@ class ICTStrategyEngine:
         self.rr_ratio = rr_ratio
         self.is_enabled = enabled
 
-        # Multi-asset state: Defaults to Gold (XAUUSD) active
-        self.enabled_symbols: Set[str] = {"XAUUSD"}
+        # Multi-asset state: Defaults to Gold (XAUUSD) and Silver (XAGUSD) active
+        self.enabled_symbols: Set[str] = {"XAUUSD", "XAGUSD"}
         if symbol:
             sym_clean = symbol.upper().replace("/", "").replace("-", "")
             if sym_clean in INSTRUMENT_PROFILES:

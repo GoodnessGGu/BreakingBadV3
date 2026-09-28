@@ -759,12 +759,12 @@ class ICTStrategyEngine:
                             await self.check_fvg_retest_and_enter(sym, prices)
                             await self.manage_active_trade(sym, prices)
 
-                await asyncio.sleep(5)
+                await asyncio.sleep(12)
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"[ICTEngine] Unexpected loop error: {e}")
-                await asyncio.sleep(10)
+                await asyncio.sleep(15)
 
     def get_status(self) -> Dict[str, Any]:
         return {

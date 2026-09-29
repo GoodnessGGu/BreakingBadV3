@@ -24,3 +24,13 @@ data/
 models/
 callisto_sample_photos/
 legacy/
+test_*.py
+check_*.py
+backtest_*.py
+run_*_backtest.py
+inspect_open_pos.py
+phone_login.py
+find_btc.py
+create_fresh_session.py
+*.png
+*.pine

@@ -14,9 +14,13 @@ class BaseCopier(abc.ABC):
         self.channel_id = int(channel_id)
         self.is_enabled = enabled
         self.notify_cb: Optional[Callable] = None
+        self.notify_photo_cb: Optional[Callable] = None
 
     def set_notification_callback(self, cb: Callable):
         self.notify_cb = cb
+
+    def set_photo_notification_callback(self, cb: Callable):
+        self.notify_photo_cb = cb
 
     async def notify(self, message: str):
         if self.notify_cb:
@@ -24,6 +28,16 @@ class BaseCopier(abc.ABC):
                 await self.notify_cb(message)
             except Exception as e:
                 logger.warning(f"[{self.name}] Notification error: {e}")
+
+    async def notify_photo(self, photo_bytes: Optional[bytes], caption: str = ""):
+        if photo_bytes and self.notify_photo_cb:
+            try:
+                await self.notify_photo_cb(photo_bytes, caption)
+                return
+            except Exception as e:
+                logger.warning(f"[{self.name}] Photo notification error: {e}")
+        if caption:
+            await self.notify(caption)
 
     def enable(self):
         self.is_enabled = True

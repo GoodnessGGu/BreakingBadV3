@@ -626,3 +626,96 @@ def generate_trade_close_chart(
     except Exception as e:
         logger.error(f"[ChartGenerator] Failed to generate trade close chart: {e}", exc_info=True)
         return None
+
+
+# ============================================================================
+# 6. CALLISTO REACTION ZONE CHART
+# ============================================================================
+def generate_callisto_zone_chart(
+    df: Any,
+    symbol: str,
+    side: str,
+    zone_low: float,
+    zone_high: float,
+    target: Optional[float] = None,
+    cur_px: Optional[float] = None,
+    timeframe: str = "5M",
+    num_candles: int = 40
+) -> Optional[bytes]:
+    """
+    Renders TradingView Pro Callisto Zone chart:
+    - Shaded institutional demand (BUY) or supply (SELL) zone [zone_low - zone_high]
+    - Zone boundaries with dashed accent lines
+    - Target level with cyan/green dashed line (if provided)
+    - Current market price line and pill
+    - Candlesticks with volume underlay
+    """
+    try:
+        data = _candles_to_df(df)
+        if data is None or len(data) < 5:
+            return None
+
+        sub_df = data.tail(num_candles).copy().reset_index(drop=True)
+        n = len(sub_df)
+        is_bull = side.upper() in ["BUY", "LONG"]
+
+        tag_color = BULL_COLOR if is_bull else BEAR_COLOR
+        fig, ax, ax_vol = _setup_figure(
+            title_tag=f"CALLISTO {side.upper()} ZONE",
+            tag_color=tag_color,
+            symbol=symbol,
+            timeframe=timeframe,
+            subtitle="Institutional Reaction Zone"
+        )
+
+        _plot_candles_and_volume(ax, ax_vol, sub_df)
+
+        # Shaded Zone Area
+        zone_color = BULL_COLOR if is_bull else BEAR_COLOR
+        zone_width = n + 6
+        zone_height = abs(zone_high - zone_low)
+
+        rect_zone = patches.Rectangle(
+            (-0.5, min(zone_low, zone_high)),
+            zone_width, zone_height,
+            facecolor=zone_color, alpha=0.18,
+            edgecolor=zone_color, linestyle='--', linewidth=1.4, zorder=1
+        )
+        ax.add_patch(rect_zone)
+
+        zone_mid = (zone_low + zone_high) / 2.0
+        zone_label = f"CALLISTO {side.upper()} ZONE [{zone_low:.2f} - {zone_high:.2f}]"
+        ax.text(
+            0.5, zone_mid, zone_label,
+            color=zone_color, fontsize=8.5, fontweight='bold', va='center', zorder=4
+        )
+
+        # Target Line (if specified)
+        if target and target > 0:
+            ax.axhline(target, color=CYAN_ACCENT, linestyle='-.', linewidth=1.5, alpha=0.9, zorder=4)
+
+        # Current Price Line (if provided or last candle close)
+        latest_px = cur_px if (cur_px and cur_px > 0) else float(sub_df.loc[n - 1, 'Close'])
+        ax.axhline(latest_px, color='#ffffff', linestyle=':', linewidth=1.1, alpha=0.65, zorder=3)
+
+        # Set Limits
+        ax.set_xlim(-1, n + 6)
+        all_vals = [sub_df['Low'].min(), sub_df['High'].max(), zone_low, zone_high, latest_px]
+        if target and target > 0:
+            all_vals.append(target)
+        min_y, max_y = min(all_vals), max(all_vals)
+        pad = (max_y - min_y) * 0.10
+        ax.set_ylim(min_y - pad, max_y + pad)
+
+        # Right Price Pills
+        _add_price_pill(ax, zone_high, f"ZONE HIGH: {zone_high:.2f}", zone_color, text_color='#0c1017' if is_bull else '#ffffff')
+        _add_price_pill(ax, zone_low, f"ZONE LOW: {zone_low:.2f}", zone_color, text_color='#0c1017' if is_bull else '#ffffff')
+        if target and target > 0:
+            _add_price_pill(ax, target, f"TARGET: {target:.2f}", CYAN_ACCENT, text_color='#0c1017')
+        _add_price_pill(ax, latest_px, f"LIVE: {latest_px:.2f}", '#475569', text_color='#ffffff', align='left', x_pos=n - 1.5)
+
+        return _render_and_close(fig)
+
+    except Exception as e:
+        logger.error(f"[ChartGenerator] Failed to generate Callisto zone chart: {e}", exc_info=True)
+        return None

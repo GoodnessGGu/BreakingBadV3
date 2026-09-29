@@ -80,6 +80,8 @@ class TelegramTradingBot:
         self.is_paused = False
         self.app: Optional[Application] = None
         self._active_refresh_task: Optional[asyncio.Task] = None
+        if hasattr(self.channel_mgr, "set_photo_notification_callback"):
+            self.channel_mgr.set_photo_notification_callback(self.broadcast_photo)
         if hasattr(self.ict_engine, "set_photo_notification_callback"):
             self.ict_engine.set_photo_notification_callback(self.broadcast_photo)
         if hasattr(self.straddle_engine, "set_photo_notification_callback"):

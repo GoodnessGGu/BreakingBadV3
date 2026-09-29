@@ -33,11 +33,18 @@ class ChannelManager:
         self.channel_to_copier: Dict[int, BaseCopier] = {}
         self.is_running = False
         self.notify_cb: Optional[Callable] = None
+        self.notify_photo_cb: Optional[Callable] = None
 
     def set_notification_callback(self, cb: Callable):
         self.notify_cb = cb
         for c in self.copiers.values():
             c.set_notification_callback(cb)
+
+    def set_photo_notification_callback(self, cb: Callable):
+        self.notify_photo_cb = cb
+        for c in self.copiers.values():
+            if hasattr(c, "set_photo_notification_callback"):
+                c.set_photo_notification_callback(cb)
 
     def register_copier(self, copier: BaseCopier):
         """Register a channel copier into the manager."""
@@ -45,6 +52,8 @@ class ChannelManager:
         self.channel_to_copier[copier.channel_id] = copier
         if self.notify_cb:
             copier.set_notification_callback(self.notify_cb)
+        if self.notify_photo_cb and hasattr(copier, "set_photo_notification_callback"):
+            copier.set_photo_notification_callback(self.notify_photo_cb)
         logger.info(f"Registered Copier: '{copier.name}' for Channel ID: {copier.channel_id}")
 
     def get_copier(self, name: str) -> Optional[BaseCopier]:

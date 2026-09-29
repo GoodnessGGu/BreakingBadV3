@@ -12,6 +12,7 @@ from typing import Dict, Any, Optional, List
 from copiers.base_copier import BaseCopier
 from clients.forex_mcp_client import IQForexMCPClient
 from gsheet_logger import gsheet_logger
+from utils.chart_generator import generate_callisto_zone_chart
 
 logger = logging.getLogger("CallistoCopier")
 
@@ -318,11 +319,11 @@ class CallistoCopier(BaseCopier):
                     "trailing_stage": 0,
                     "opened_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 }
-                await self.notify(f"✅ **[CALLISTO EXECUTED] #{order_id} {side} {o['lots']}L @ {exec_price:.2f}**")
+                await self.notify(f"✅ [CALLISTO EXECUTED] #{order_id} {side} {o['lots']}L @ {exec_price:.2f}")
                 asyncio.create_task(self._monitor_position(order_id))
             else:
                 logger.error(f"❌ [Callisto] {o['tag']} order failed: {res}")
-                await self.notify(f"❌ **[CALLISTO FAILED] {o['tag']}**: {res.get('error', res)}")
+                await self.notify(f"❌ [CALLISTO FAILED] {o['tag']}: {res.get('error', res)}")
 
     async def trigger_manual_breakeven(self, reason: str = "Channel Broadcast"):
         """Shifts all active Callisto positions to Breakeven."""
@@ -356,15 +357,15 @@ class CallistoCopier(BaseCopier):
             be_level = round(entry + be_buf if side == "BUY" else entry - be_buf, 2)
 
             logger.info(f"🛡️ [Callisto BREAKEVEN] ({reason}) Moving SL to {be_level} for #{pos_id}")
-            res = self.mcp.change_position_stop_loss(position_id=pos_id, level=be_level)
+            res = self.mcp.change_position_stop_loss(position_id=pos_id, level=be_level, balance_id=self.balance_id)
             if not res.get("error"):
                 pos["sl"] = be_level
                 pos["moved_to_be"] = True
                 pos["trailing_stage"] = max(pos.get("trailing_stage", 0), 2)
                 await self.notify(
-                    f"🛡️ **[CALLISTO BREAKEVEN] #{pos_id} ({side})**\n\n"
+                    f"🛡️ [CALLISTO BREAKEVEN] #{pos_id} ({side})\n\n"
                     f"• Trigger: {reason}\n"
-                    f"• Trade is now Risk-Free! SL shifted to: `{be_level:.2f}`"
+                    f"• Trade is now Risk-Free! SL shifted to: {be_level:.2f}"
                 )
 
     async def _monitor_position(self, order_id: int):
@@ -569,19 +570,19 @@ class CallistoCopier(BaseCopier):
 
         pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
         if pnl > 0:
-            header_line = f"🏆 **[CALLISTO WON] {tag} {pnl_str}**"
+            header_line = f"🏆 [CALLISTO WON] {tag} {pnl_str}"
         elif pnl == 0:
-            header_line = f"🛡️ **[CALLISTO BREAKEVEN] {tag} $0.00**"
+            header_line = f"🛡️ [CALLISTO BREAKEVEN] {tag} $0.00"
         else:
-            header_line = f"❌ **[CALLISTO CLOSED] {tag} {pnl_str}**"
+            header_line = f"❌ [CALLISTO CLOSED] {tag} {pnl_str}"
 
         await self.notify(
             f"{header_line}\n\n"
-            f"• Side    : `{side}` (`{lots}` Lots)\n"
-            f"• Entry   : `{entry_px:.2f}`\n"
-            f"• Exit    : `{exit_px:.2f}`\n"
-            f"• Net PnL : `{pnl_str}`\n"
-            f"• Reason  : `{reason}`"
+            f"• Side: {side} ({lots} Lots)\n"
+            f"• Entry: {entry_px:.2f}\n"
+            f"• Exit: {exit_px:.2f}\n"
+            f"• Net PnL: {pnl_str}\n"
+            f"• Reason: {reason}"
         )
 
     async def handle_message(self, text: str, message_id: int, event: Any = None, msg_date: Any = None):
@@ -600,11 +601,11 @@ class CallistoCopier(BaseCopier):
             side  = item.get("side")
             if itype == "INVALIDATE":
                 self.invalidate_zone(side)
-                await self.notify(f"🚫 **[CALLISTO] {side} Zone Retired** (Target Completed).")
+                await self.notify(f"🚫 [CALLISTO] {side} Zone Retired (Target Completed).")
             elif itype == "INVALIDATE_ALL":
                 for s in list(self.active_zones.keys()):
                     self.invalidate_zone(s)
-                await self.notify("🚫 **[CALLISTO] Active Zones Retired** (Full Target Hit).")
+                await self.notify("🚫 [CALLISTO] Active Zones Retired (Full Target Hit).")
             elif itype == "BREAKEVEN":
                 logger.info("📢 [Callisto] Received BREAKEVEN / SECURE PROFIT broadcast from channel!")
                 await self.trigger_manual_breakeven(reason="Channel Broadcast")
@@ -617,12 +618,40 @@ class CallistoCopier(BaseCopier):
                     "created_at": time.time()
                 }
                 self.set_zone(side, zone_data)
-                target_str = f" | Target: `{zone_data['target']:.2f}`" if zone_data['target'] else ""
-                await self.notify(
-                    f"📍 **[CALLISTO ZONE DETECTED] {side}**\n\n"
-                    f"• Range : `{zone_data['zone_low']:.2f}` – `{zone_data['zone_high']:.2f}`{target_str}\n"
-                    f"• Status: _Monitoring for candle confirmation..._"
+                target_str = f" | Target: {zone_data['target']:.2f}" if zone_data['target'] else ""
+                caption = (
+                    f"📍 [CALLISTO ZONE DETECTED] {side}\n\n"
+                    f"• Range: {zone_data['zone_low']:.2f} – {zone_data['zone_high']:.2f}{target_str}\n"
+                    f"• Status: Monitoring for candle confirmation..."
                 )
+
+                # Generate TradingView Pro Candlestick Chart for Callisto Zone
+                chart_bytes = None
+                try:
+                    candles = self.mcp.get_candles(asset_id=GOLD_ASSET_ID, size=300, count=40)
+                    if not candles or len(candles) < 5:
+                        candles = self.mcp.get_candles(asset_id=GOLD_ASSET_ID, size=60, count=40)
+
+                    if candles:
+                        prices = self.get_market_price()
+                        chart_bytes = generate_callisto_zone_chart(
+                            df=candles,
+                            symbol="XAUUSD",
+                            side=side,
+                            zone_low=zone_data["zone_low"],
+                            zone_high=zone_data["zone_high"],
+                            target=zone_data.get("target"),
+                            cur_px=prices.get("mid"),
+                            timeframe="5M",
+                            num_candles=40
+                        )
+                except Exception as e:
+                    logger.warning(f"[Callisto] Failed to generate zone chart: {e}")
+
+                if chart_bytes:
+                    await self.notify_photo(chart_bytes, caption)
+                else:
+                    await self.notify(caption)
 
     def get_status(self) -> Dict[str, Any]:
         return {

@@ -433,16 +433,33 @@ class IQForexMCPClient:
                 return retry_res
         return res
 
-    def change_position_stop_loss(self, position_id: int, level: float) -> Dict[str, Any]:
+    def change_position_stop_loss(self, position_id: int, level: float, balance_id: Optional[int] = None) -> Dict[str, Any]:
         """
         Move or set the Stop Loss trigger price for an open position.
         Level 0 cancels the existing stop-loss.
+        If balance_id is provided, verifies that the broker backend accepted and updated the SL level.
         """
         logger.info(f"🔄 [MCP Forex] Updating SL on Position #{position_id} to {level:.5f}")
-        return self.call_tool("change_position_stop_loss", {
+        res = self.call_tool("change_position_stop_loss", {
             "position_id": int(position_id),
             "level": round(float(level), 5)
         })
+        if "error" in res or res.get("isError"):
+            return res
+
+        # Verify against list_positions to detect silent broker drops
+        if balance_id:
+            try:
+                positions = self.list_positions(balance_id=balance_id)
+                pos = next((p for p in positions if (p.get("position_id") or p.get("id")) == position_id), None)
+                if pos:
+                    actual_sl = pos.get("stop_lose_price")
+                    if level > 0 and (actual_sl is None or abs(float(actual_sl) - float(level)) > 0.15):
+                        logger.warning(f"⚠️ [MCP Forex] Broker silently dropped SL update on #{position_id}! Target was {level}, but broker position still has {actual_sl}")
+                        return {"error": {"message": f"Broker silently dropped SL update (still at {actual_sl})"}}
+            except Exception as e:
+                logger.warning(f"[MCP Forex] Error verifying SL update on #{position_id}: {e}")
+        return res
 
     def change_position_take_profit(self, position_id: int, level: float) -> Dict[str, Any]:
         """

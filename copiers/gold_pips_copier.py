@@ -325,6 +325,10 @@ class GoldPipsCopier(BaseCopier):
                 self.open_positions.pop(order_id, None)
                 break
 
+            # If BE is pending and not yet confirmed, retry applying BE as price progresses into profit
+            if pos.get("pending_be") and not pos.get("moved_to_be"):
+                await self.apply_breakeven()
+
     async def _log_trade_closure(self, order_id: int):
         pos = self.open_positions.get(order_id, {})
         pos_id = pos.get("position_id")
@@ -401,26 +405,40 @@ class GoldPipsCopier(BaseCopier):
             side = pos["side"]
             entry = pos["entry_price"]
 
-            # Prevent premature stopout if currently in drawdown
-            if mid > 0:
-                if side == "BUY" and mid < (entry - 0.50):
-                    logger.warning(f"⚠️ [GoldPips] Position #{pos_id} is below entry ({mid:.2f} < {entry:.2f}). Skipping premature BE.")
-                    continue
-                elif side == "SELL" and mid > (entry + 0.50):
-                    logger.warning(f"⚠️ [GoldPips] Position #{pos_id} is above entry ({mid:.2f} > {entry:.2f}). Skipping premature BE.")
-                    continue
+            # Broker requires minimum stop_levels distance of 1.0 on Gold.
+            # Require at least 1.20 profit distance so SL can be set at entry +- buffer without rejection.
+            min_broker_dist = 1.20
+            profit_dist = (mid - entry) if side == "BUY" else (entry - mid)
+
+            if profit_dist < min_broker_dist:
+                if not pos.get("pending_be"):
+                    logger.info(f"⏳ [GoldPips] Position #{pos_id} profit distance (${profit_dist:.2f}) < required broker distance (${min_broker_dist:.2f}). Arming pending BE.")
+                    pos["pending_be"] = True
+                continue
 
             be_buf = 0.30
             be_level = round(entry + be_buf if side == "BUY" else entry - be_buf, 2)
-            res = self.mcp.change_position_stop_loss(position_id=pos_id, level=be_level)
+
+            # Double-check distance from current market price
+            dist_to_market = abs(mid - be_level)
+            if dist_to_market < 1.05:
+                logger.info(f"⏳ [GoldPips] Distance to current price (${dist_to_market:.2f}) < 1.05. Waiting for deeper profit expansion.")
+                pos["pending_be"] = True
+                continue
+
+            res = self.mcp.change_position_stop_loss(position_id=pos_id, level=be_level, balance_id=self.balance_id)
             if not res.get("error"):
                 pos["sl"] = be_level
                 pos["moved_to_be"] = True
+                pos["pending_be"] = False
                 count += 1
                 await self.notify(
                     f"🛡️ [GOLD PIPS BREAKEVEN] #{pos_id} ({side})\n\n"
                     f"• Trade is now Risk-Free! SL shifted to: {be_level:.2f}"
                 )
+            else:
+                logger.warning(f"⚠️ [GoldPips] Failed to set BE on #{pos_id}: {res.get('error')}. Retrying when price progresses.")
+                pos["pending_be"] = True
 
     async def close_all_positions(self):
         if not self.open_positions:

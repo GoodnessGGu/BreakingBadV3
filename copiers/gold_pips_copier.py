@@ -406,8 +406,8 @@ class GoldPipsCopier(BaseCopier):
             entry = pos["entry_price"]
 
             # Broker requires minimum stop_levels distance of 1.0 on Gold.
-            # Require at least 1.20 profit distance so SL can be set at entry +- buffer without rejection.
-            min_broker_dist = 1.20
+            # Require at least 1.80 profit distance so SL can be set at entry +- buffer without rejection or spread chop.
+            min_broker_dist = 1.80
             profit_dist = (mid - entry) if side == "BUY" else (entry - mid)
 
             if profit_dist < min_broker_dist:
@@ -416,7 +416,7 @@ class GoldPipsCopier(BaseCopier):
                     pos["pending_be"] = True
                 continue
 
-            be_buf = 0.30
+            be_buf = 0.80
             be_level = round(entry + be_buf if side == "BUY" else entry - be_buf, 2)
 
             # Double-check distance from current market price

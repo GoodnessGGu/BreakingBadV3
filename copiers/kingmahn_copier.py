@@ -292,17 +292,20 @@ class KingmahnCopier(BaseCopier):
             side = pos["side"]
             entry = pos["entry_price"]
 
-            # Prevent premature stopout if currently in drawdown
-            if mid > 0:
-                if side == "BUY" and mid < (entry - 0.50):
-                    logger.warning(f"⚠️ [KingmahnTribe] Position #{pos_id} is below entry ({mid:.2f} < {entry:.2f}). Skipping premature BE.")
-                    continue
-                elif side == "SELL" and mid > (entry + 0.50):
-                    logger.warning(f"⚠️ [KingmahnTribe] Position #{pos_id} is above entry ({mid:.2f} > {entry:.2f}). Skipping premature BE.")
-                    continue
+            # Require at least +20.0 pips ($2.00 on Gold) profit distance before moving SL to BE
+            profit_dist = (mid - entry) if side == "BUY" else (entry - mid)
+            if mid > 0 and profit_dist < 2.00:
+                logger.warning(f"⚠️ [KingmahnTribe] Position #{pos_id} profit distance (${profit_dist:.2f} / {profit_dist*10:.1f} pips) < $2.00 (20 pips). Skipping premature BE.")
+                continue
 
-            be_buf = 0.30
+            be_buf = 0.80
             be_level = round(entry + be_buf if side == "BUY" else entry - be_buf, 2)
+
+            # Ensure distance to current price is at least 1.00 to avoid immediate broker stopout / stop-level rejection
+            dist_to_market = abs(mid - be_level)
+            if dist_to_market < 1.00:
+                logger.info(f"⏳ [KingmahnTribe] Distance to market price (${dist_to_market:.2f}) too close to new SL. Waiting for profit expansion.")
+                continue
 
             logger.info(f"🛡️ [Kingmahn BREAKEVEN] ({reason}) Moving SL to {be_level} for #{pos_id}")
             res = self.mcp.change_position_stop_loss(position_id=pos_id, level=be_level)
@@ -414,9 +417,9 @@ class KingmahnCopier(BaseCopier):
                                 f"• Risk reduced by 50% | New SL: `{half_risk_sl:.2f}`"
                             )
 
-                    # Stage 2: +50 Pips ($5.00) or 1.0R -> Move to Breakeven (+0.30 buffer)
+                    # Stage 2: +50 Pips ($5.00) or 1.0R -> Move to Breakeven (+0.80 buffer)
                     if (gain_pips >= 50.0 or gain >= risk_dist) and stage < 2:
-                        be_buf = 0.30
+                        be_buf = 0.80
                         be_level = round(entry + be_buf if side == "BUY" else entry - be_buf, 2)
                         res = self.mcp.change_position_stop_loss(position_id=pos_id, level=be_level)
                         if not res.get("error"):

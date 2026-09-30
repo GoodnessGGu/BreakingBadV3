@@ -367,7 +367,7 @@ class TelegramTradingBot:
                 p = self.ict_engine.get_market_price("XAUUSD")
                 if p and p.get("mid", 0) > 0:
                     return float(p["mid"])
-            if sym in ["54", "SILVER", "XAG", "XAGUSD"]:
+            if sym in ["1487", "54", "SILVER", "XAG", "XAGUSD"]:
                 p = self.ict_engine.get_market_price("XAGUSD")
                 if p and p.get("mid", 0) > 0:
                     return float(p["mid"])
@@ -375,9 +375,56 @@ class TelegramTradingBot:
                 p = self.ict_engine.get_market_price("BTCUSD")
                 if p and p.get("mid", 0) > 0:
                     return float(p["mid"])
+            aid = None
+            try:
+                aid = int(symbol_or_id)
+            except Exception:
+                for s, prof in INSTRUMENT_PROFILES.items():
+                    if s == sym:
+                        aid = prof.get("asset_id")
+                        break
+            if aid:
+                candles = self.forex_mcp.get_candles(asset_id=aid, size=60, count=1)
+                if candles and len(candles) > 0:
+                    return float(candles[-1].get("close", 0.0))
         except Exception:
             pass
         return 0.0
+
+    @staticmethod
+    def calculate_pips(symbol_or_name: str, open_px: float, cur_px: float, side: str) -> float:
+        """Calculates pip movement relative to entry (positive for gain, negative for loss)."""
+        if open_px <= 0 or cur_px <= 0:
+            return 0.0
+        diff = (cur_px - open_px) if side.upper() in ["BUY", "LONG"] else (open_px - cur_px)
+        s = str(symbol_or_name).upper().replace("/", "").replace("-", "")
+        if "XAU" in s or "GOLD" in s or s == "74":
+            # Gold: 1 pip = $0.10 (e.g. $1.00 move = 10 pips)
+            return round(diff * 10.0, 1)
+        elif "XAG" in s or "SILVER" in s or s in ["1487", "54"]:
+            # Silver: 1 pip = $0.01 (1 cent)
+            return round(diff * 100.0, 1)
+        elif "JPY" in s:
+            return round(diff * 100.0, 1)
+        elif any(k in s for k in ["BTC", "ETH", "US100", "US500", "OIL", "WTI", "BRENT"]):
+            return round(diff, 1)
+        else:
+            # Standard Forex 4/5 decimal pairs (EURUSD, GBPUSD): 1 pip = 0.0001
+            return round(diff * 10000.0, 1)
+
+    @staticmethod
+    def get_asset_multiplier(symbol_or_id: Any) -> float:
+        """Returns standard contract multiplier per lot for PnL calculations."""
+        s = str(symbol_or_id).upper().replace("/", "").replace("-", "")
+        if "XAU" in s or "GOLD" in s or s == "74":
+            return 1.0
+        elif "XAG" in s or "SILVER" in s or s in ["1487", "54"]:
+            return 50.0
+        elif "BTC" in s or s == "816":
+            return 1.0
+        elif any(k in s for k in ["EURUSD", "GBPUSD", "AUDUSD", "NZDUSD", "USDCHF"]):
+            return 100000.0
+        return 1.0
 
     def resolve_asset_name(self, asset_id: Any) -> str:
         """Helper to resolve ticker symbol from asset ID."""
@@ -385,10 +432,22 @@ class TelegramTradingBot:
             aid = int(asset_id)
             if aid == 74:
                 return "Gold (XAUUSD)"
-            elif aid == 54:
+            elif aid in [1487, 54]:
                 return "Silver (XAGUSD)"
             elif aid == 816:
                 return "Bitcoin (BTCUSD)"
+            elif aid == 1:
+                return "EURUSD"
+            elif aid == 2:
+                return "GBPUSD"
+            elif aid == 1471:
+                return "US100"
+            elif aid == 1470:
+                return "US500"
+            elif aid == 971:
+                return "Crude Oil (WTI)"
+            elif aid == 969:
+                return "Crude Oil (Brent)"
             for sym, prof in INSTRUMENT_PROFILES.items():
                 if prof.get("asset_id") == aid:
                     return f"{sym}"
@@ -426,16 +485,73 @@ class TelegramTradingBot:
                     if cur_px <= 0:
                         cur_px = self.get_live_price(sym)
 
-                    pnl = float(p.get("pnl") or p.get("profit") or p.get("isolated_pnl_net", 0.0))
-                    pnl_sign = "+" if pnl >= 0 else ""
-                    sl = p.get("stop_loss", "None")
-                    tp = p.get("take_profit", "None")
+                    # PnL Resolution: IQ Option Marginal CFD uses expected_pnl for open floating PnL
+                    pnl = None
+                    if p.get("expected_pnl") is not None:
+                        try:
+                            pnl = float(p.get("expected_pnl"))
+                        except (ValueError, TypeError):
+                            pass
+                    if pnl is None:
+                        for k in ["pnl", "profit", "isolated_pnl_net", "net_profit"]:
+                            if p.get(k) is not None:
+                                try:
+                                    pnl = float(p.get(k))
+                                    break
+                                except (ValueError, TypeError):
+                                    pass
+                    if pnl is None:
+                        if cur_px > 0 and open_px > 0:
+                            diff = (cur_px - open_px) if side == "BUY" else (open_px - cur_px)
+                            multiplier = self.get_asset_multiplier(sym or asset_id)
+                            pnl = diff * multiplier * lots
+                        else:
+                            pnl = 0.0
 
-                    price_str = f" ➔ Live: `${cur_px:.2f}`" if cur_px > 0 else ""
+                    pnl_sign = "+" if pnl > 0 else ("" if pnl == 0 else "-")
+                    pnl_abs = abs(pnl)
+
+                    # Pips calculation relative to entry
+                    pips_str = ""
+                    if cur_px > 0 and open_px > 0:
+                        pips = self.calculate_pips(sym or str(asset_id), open_px, cur_px, side)
+                        pips_sign = "+" if pips > 0 else ("" if pips == 0 else "-")
+                        pips_str = f" ({pips_sign}{abs(pips):.1f} pips)"
+
+                    # Stop loss & take profit prices
+                    sl_raw = p.get("stop_lose_price") or p.get("stop_loss") or p.get("sl")
+                    tp_raw = p.get("take_profit_price") or p.get("take_profit") or p.get("tp")
+                    sl_str = f"${float(sl_raw):.2f}" if sl_raw is not None and float(sl_raw) > 0 else "None"
+                    tp_str = f"${float(tp_raw):.2f}" if tp_raw is not None and float(tp_raw) > 0 else "None"
+
+                    # Detect trade origin
+                    origin_tag = ""
+                    for c_name, c_inst in self.channel_mgr.copiers.items():
+                        if hasattr(c_inst, "open_positions"):
+                            for oid, opos in c_inst.open_positions.items():
+                                if opos.get("position_id") == pos_id or oid == pos_id:
+                                    if "callisto" in c_name.lower(): origin_tag = " [Callisto Fx]"
+                                    elif "gold" in c_name.lower(): origin_tag = " [Gold Pips]"
+                                    elif "gsociety" in c_name.lower() or "society" in c_name.lower(): origin_tag = " [G Society]"
+                                    elif "king" in c_name.lower(): origin_tag = " [Kingmahn]"
+                                    else: origin_tag = f" [{c_inst.name}]"
+                                    break
+                        if origin_tag:
+                            break
+
+                    if not origin_tag:
+                        ict_trades = getattr(self.ict_engine, "active_trades", {})
+                        for s_ict, t_ict in ict_trades.items():
+                            if t_ict and (t_ict.get("position_id") == pos_id or t_ict.get("order_id") == pos_id):
+                                origin_tag = " [ICT Engine]"
+                                break
+
+                    price_str = f" ➔ Live: ${cur_px:.2f}" if cur_px > 0 else ""
+                    entry_str = f"${open_px:.2f}" if open_px > 0 else "N/A"
                     cfd_lines.append(
-                        f"  • *{sym}* `{side}` ({lots:.2f} Lots)\n"
-                        f"    Entry: `${open_px:.2f}`{price_str}\n"
-                        f"    PnL: `{pnl_sign}${pnl:.2f}` | SL: `{sl}` | TP: `{tp}` [#{pos_id}]"
+                        f"  • *{sym}* {side} ({lots:.2f} Lots){origin_tag}\n"
+                        f"    Entry: {entry_str}{price_str}\n"
+                        f"    PnL: {pnl_sign}${pnl_abs:.2f}{pips_str} | SL: {sl_str} | TP: {tp_str} [#{pos_id}]"
                     )
                 cfd_txt = "\n".join(cfd_lines)
             else:
@@ -450,17 +566,29 @@ class TelegramTradingBot:
                 live_p = self.get_live_price(s)
                 open_p = float(t.get("entry_price", 0.0))
                 pnl_str = ""
+                side_t = str(t.get("side", "BUY")).upper()
+                lots_t = float(t.get("lots", 1.0))
                 if live_p > 0 and open_p > 0:
-                    diff = (live_p - open_p) if t["side"] == "BUY" else (open_p - live_p)
-                    pnl_sign = "+" if diff >= 0 else ""
-                    pnl_str = f" | PnL: `{pnl_sign}${diff * float(t.get('lots', 1.0)):.2f}`"
+                    diff = (live_p - open_p) if side_t in ["BUY", "LONG"] else (open_p - live_p)
+                    mult = self.get_asset_multiplier(s)
+                    pnl_calc = diff * mult * lots_t
+                    pnl_sign = "+" if pnl_calc > 0 else ("" if pnl_calc == 0 else "-")
+                    pips = self.calculate_pips(s, open_p, live_p, side_t)
+                    pips_sign = "+" if pips > 0 else ("" if pips == 0 else "-")
+                    pips_str = f" ({pips_sign}{abs(pips):.1f} pips)"
+                    pnl_str = f" | PnL: {pnl_sign}${abs(pnl_calc):.2f}{pips_str}"
+
                 stage = t.get("trailing_stage", 0)
-                stage_str = f" `(Stage {stage})`" if stage > 0 else ""
-                p_str = f" ➔ Live: `${live_p:.2f}`" if live_p > 0 else ""
+                stage_str = f" (Stage {stage})" if stage > 0 else ""
+                p_str = f" ➔ Live: ${live_p:.2f}" if live_p > 0 else ""
+                sl_t = t.get("current_sl")
+                tp_t = t.get("tp")
+                sl_str = f"${float(sl_t):.2f}" if sl_t is not None else "None"
+                tp_str = f"${float(tp_t):.2f}" if tp_t is not None else "None"
                 active_pos.append(
-                    f"  • *{s}* `{t['side']}`{stage_str}\n"
-                    f"    Entry: `${open_p:.2f}`{p_str}{pnl_str}\n"
-                    f"    SL: `${t['current_sl']}` | TP: `${t['tp']}`"
+                    f"  • *{s}* {side_t}{stage_str}\n"
+                    f"    Entry: ${open_p:.2f}{p_str}{pnl_str}\n"
+                    f"    SL: {sl_str} | TP: {tp_str}"
                 )
             if active_pos:
                 ict_trade_txt = "\n".join(active_pos)
@@ -474,9 +602,11 @@ class TelegramTradingBot:
                 if not f:
                     continue
                 live_p = self.get_live_price(s)
-                p_str = f" | Live: `${live_p:.2f}`" if live_p > 0 else ""
-                dist_str = f" (Dist: `${abs(live_p - f['fvg_low']):.2f}`)" if live_p > 0 else ""
-                active_fvgs.append(f"  • *{s}* `{f['side']}` `[{f['fvg_low']} – {f['fvg_high']}]`{p_str}{dist_str} (SL: `{f['sl']}`)")
+                p_str = f" | Live: ${live_p:.2f}" if live_p > 0 else ""
+                dist_str = f" (Dist: ${abs(live_p - f['fvg_low']):.2f})" if live_p > 0 else ""
+                sl_val = float(f.get('sl', 0.0))
+                sl_str = f"${sl_val:.2f}" if sl_val > 0 else "None"
+                active_fvgs.append(f"  • *{s}* {f['side']} [{f['fvg_low']:.2f} – {f['fvg_high']:.2f}]{p_str}{dist_str} (SL: {sl_str})")
             if active_fvgs:
                 fvg_txt = "\n".join(active_fvgs)
             else:
@@ -489,8 +619,8 @@ class TelegramTradingBot:
                 zones_lines = []
                 for s, z in zones.items():
                     live_p = self.get_live_price(s)
-                    p_str = f" | Live: `${live_p:.2f}`" if live_p > 0 else ""
-                    zones_lines.append(f"  • *{s}*: `{z['zone_low']:.2f} – {z['zone_high']:.2f}`{p_str} (Target: `{z.get('target', 'N/A')}`)")
+                    p_str = f" | Live: ${live_p:.2f}" if live_p > 0 else ""
+                    zones_lines.append(f"  • *{s}*: {z['zone_low']:.2f} – {z['zone_high']:.2f}{p_str} (Target: {z.get('target', 'N/A')})")
                 zones_txt = "\n".join(zones_lines)
             else:
                 zones_txt = "  • No active zones currently watching."
@@ -503,17 +633,17 @@ class TelegramTradingBot:
                 for pid, t in blitz_trades.items():
                     pair = t.get("pair", "OTC")
                     side = str(t.get("direction", "CALL")).upper()
-                    amt = t.get("amount", 2.0)
+                    amt = float(t.get("amount", 2.0))
                     op_px = t.get("open_price")
-                    px_str = f" @ `{op_px}`" if op_px else ""
-                    b_lines.append(f"  • *{pair}* `{side}`{px_str} (`${amt:.2f}`) [Pos #{pid}]")
+                    px_str = f" @ {op_px}" if op_px else ""
+                    b_lines.append(f"  • *{pair}* {side}{px_str} (${amt:.2f}) [Pos #{pid}]")
                 blitz_txt = "\n".join(b_lines)
             else:
                 blitz_txt = "  • No active Blitz option trades."
 
             text = (
                 f"📋 *Active Watchers, Zones & Live Setups* 🔴\n\n"
-                f"👤 *Account*: `{self.account_type.upper()}` | 🕒 `{now_str}`\n\n"
+                f"👤 *Account*: {self.account_type.upper()} | 🕒 {now_str}\n\n"
                 f"💼 *Open Broker CFD Positions*:\n{cfd_txt}\n\n"
                 f"🎯 *ICT Autonomous Setups*:\n{ict_trade_txt}\n\n"
                 f"🔥 *ICT Pending FVGs*:\n{fvg_txt}\n\n"
@@ -588,10 +718,17 @@ class TelegramTradingBot:
                 self.start_active_view_refresh_task(update.effective_chat.id, sent_msg.message_id)
 
     def get_active_balance_id(self) -> Optional[int]:
+        try:
+            bal = self.forex_mcp.get_real_balance() if self.account_type == "regular" else self.forex_mcp.get_training_balance()
+            if bal:
+                bid = bal.get("balance_id") or bal.get("id")
+                if bid:
+                    return int(bid)
+        except Exception as e:
+            logger.debug(f"[ActiveBalance] Error checking active balance: {e}")
         if self.ict_engine.balance_id:
             return self.ict_engine.balance_id
-        bal = self.forex_mcp.get_real_balance() if self.account_type == "regular" else self.forex_mcp.get_training_balance()
-        return bal.get("balance_id") if bal else None
+        return None
 
     def build_history_view(self, category: str = "all") -> str:
         """

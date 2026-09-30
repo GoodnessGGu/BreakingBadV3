@@ -385,17 +385,22 @@ class IQForexMCPClient:
         """
         Place an immediate market order on IQ Option Marginal Forex engine.
         """
-        # Dynamically resolve active instrument_id if get_instruments returns active contracts
+        # Dynamically resolve active instrument_id and enforce min_quantity
         active_inst_id = instrument_id
         try:
             inst_data = self.get_instruments(asset_id)
             if inst_data and isinstance(inst_data, dict) and "instruments" in inst_data:
                 for inst in inst_data["instruments"]:
-                    if isinstance(inst, dict) and inst.get("id"):
-                        active_inst_id = inst["id"]
+                    if isinstance(inst, dict):
+                        if inst.get("id"):
+                            active_inst_id = inst["id"]
+                        min_q = float(inst.get("min_quantity", 0.0))
+                        if min_q > 0 and lots < min_q:
+                            logger.warning(f"⚠️ [MCP Forex] Adjusted lots from {lots} to instrument minimum quantity {min_q} for asset {asset_id}")
+                            lots = min_q
                         break
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"[MCP Forex] Error inspecting instrument for asset {asset_id}: {e}")
 
         # Dynamically resolve balance_id if not provided
         active_bal_id = balance_id

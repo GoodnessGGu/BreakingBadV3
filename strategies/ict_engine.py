@@ -114,7 +114,8 @@ INSTRUMENT_PROFILES = {
         "disp_threshold": 0.10,
         "min_fvg_gap": 0.04,
         "body_ratio_req": 0.50,
-        "default_lots": 1.0,
+        "default_lots": 10.0,
+        "min_lots": 10.0,
         "digits": 3
     }
 }
@@ -254,10 +255,11 @@ class ICTStrategyEngine:
 
         # 2. Fallback to calculate_order_size if candle is unavailable
         lev = min(self.leverage, 20 if symbol == "BTCUSD" else self.leverage)
+        calc_lots = profile.get("default_lots", self.lots)
         try:
             p = self.mcp.calculate_order_size(
                 asset_id=profile["asset_id"], balance_currency="USD",
-                lots=self.lots, leverage=lev
+                lots=calc_lots, leverage=lev
             )
             if isinstance(p, dict) and "buy_price" in p and "sell_price" in p:
                 buy = float(p.get("buy_price", 0.0))
@@ -451,8 +453,15 @@ class ICTStrategyEngine:
             if risk_dist < (min_fvg_gap * 0.5):
                 return
 
-            trade_lots = profile.get("default_lots", self.lots) if symbol == "BTCUSD" else self.lots
-            trade_lots = max(0.01, round(float(trade_lots), 4))
+            trade_lots = profile.get("default_lots") or self.lots
+            if symbol == "XAGUSD":
+                trade_lots = max(10.0, float(trade_lots))
+            elif symbol == "BTCUSD":
+                trade_lots = profile.get("default_lots", 0.01)
+            else:
+                trade_lots = self.lots
+            min_l = profile.get("min_lots", 0.01)
+            trade_lots = max(min_l, round(float(trade_lots), 4))
             tp = round(exec_px + (risk_dist * self.rr_ratio) if side == "BUY" else exec_px - (risk_dist * self.rr_ratio), digits)
 
             await self.notify(

@@ -30,7 +30,8 @@ from bot.keyboards import (
     main_menu_keyboard, channels_menu_keyboard,
     ict_menu_keyboard, settings_menu_keyboard, close_all_confirm_keyboard,
     persistent_reply_keyboard, history_menu_keyboard, active_setups_keyboard,
-    news_menu_keyboard, crt_menu_keyboard, mission_menu_keyboard
+    news_menu_keyboard, crt_menu_keyboard, mission_menu_keyboard,
+    individual_close_keyboard
 )
 from bot.session_notifier import MarketSessionNotifier
 from bot.news_engine import EconomicNewsEngine
@@ -80,6 +81,7 @@ class TelegramTradingBot:
         self.is_paused = False
         self.app: Optional[Application] = None
         self._active_refresh_task: Optional[asyncio.Task] = None
+        self.last_open_positions = []
         if hasattr(self.channel_mgr, "set_photo_notification_callback"):
             self.channel_mgr.set_photo_notification_callback(self.broadcast_photo)
         if hasattr(self.ict_engine, "set_photo_notification_callback"):
@@ -516,6 +518,7 @@ class TelegramTradingBot:
                 except Exception as e:
                     logger.debug(f"[ActiveSetups] Error listing broker positions: {e}")
 
+            parsed_positions = []
             if open_cfd:
                 cfd_lines = []
                 for p in open_cfd:
@@ -555,6 +558,17 @@ class TelegramTradingBot:
                             pnl = diff * multiplier * lots
                         else:
                             pnl = 0.0
+
+                    parsed_positions.append({
+                        "position_id": pos_id,
+                        "asset_id": asset_id,
+                        "symbol": sym,
+                        "side": side,
+                        "lots": lots,
+                        "open_price": open_px,
+                        "current_price": cur_px,
+                        "pnl": pnl
+                    })
 
                     pnl_sign = "+" if pnl > 0 else ("" if pnl == 0 else "-")
                     pnl_abs = abs(pnl)
@@ -601,8 +615,10 @@ class TelegramTradingBot:
                         f"    Entry: {entry_str}{price_str}\n"
                         f"    PnL: {pnl_sign}${pnl_abs:.2f}{pips_str} | SL: {sl_str} | TP: {tp_str} [#{pos_id}]"
                     )
+                self.last_open_positions = parsed_positions
                 cfd_txt = "\n".join(cfd_lines)
             else:
+                self.last_open_positions = []
                 cfd_txt = "  • No open Marginal CFD positions on broker."
 
             # 2. ICT Active Autonomous Positions
@@ -731,7 +747,7 @@ class TelegramTradingBot:
                             message_id=message_id,
                             text=new_text,
                             parse_mode="Markdown",
-                            reply_markup=active_setups_keyboard(is_live=True)
+                            reply_markup=active_setups_keyboard(is_live=True, open_positions=self.last_open_positions)
                         )
                     except Exception as e:
                         err_s = str(e)
@@ -749,18 +765,19 @@ class TelegramTradingBot:
         if not self.is_admin(update.effective_user.id):
             return
         text = self.build_active_setups_view()
+        kb = active_setups_keyboard(is_live=True, open_positions=self.last_open_positions)
         try:
             sent_msg = await update.message.reply_text(
                 text,
                 parse_mode="Markdown",
-                reply_markup=active_setups_keyboard(is_live=True)
+                reply_markup=kb
             )
             if sent_msg:
                 self.start_active_view_refresh_task(update.effective_chat.id, sent_msg.message_id)
         except Exception:
             sent_msg = await update.message.reply_text(
                 text,
-                reply_markup=active_setups_keyboard(is_live=True)
+                reply_markup=kb
             )
             if sent_msg:
                 self.start_active_view_refresh_task(update.effective_chat.id, sent_msg.message_id)
@@ -1048,6 +1065,7 @@ class TelegramTradingBot:
             "• `/active` - Active zones, FVGs, and open trades\n"
             "• `/history` - View categorized trade & PnL history\n"
             "• `/pause` / `/resume` - Master trading pause/resume\n"
+            "• `/close [id|sym]` - Interactively or directly close an open position\n"
             "• `/closeall` - Emergency close all open positions\n\n"
             "📊 *Sizing Commands:*\n"
             "• `/lots <val>` - Set global Forex lot size (e.g. `/lots 0.5`)\n"
@@ -1234,6 +1252,130 @@ class TelegramTradingBot:
             await update.message.reply_text(f"✅ Blitz base stake updated to: *${new_stake:.2f}* (Gale 1: ${new_stake*2.2:.2f}, Gale 2: ${new_stake*(2.2**2):.2f}).", parse_mode="Markdown")
         except ValueError:
             await update.message.reply_text("❌ Invalid number. Example usage: `/stake 2.0`")
+
+    def _cleanup_closed_trade(self, pos_id: Any, symbol: Optional[str] = None):
+        """Clean up active tracking in ICT, CRT, and Channel copiers when a position is closed."""
+        pid_str = str(pos_id)
+        # 1. ICT Engine
+        if hasattr(self.ict_engine, "active_trades"):
+            for s, t in list(self.ict_engine.active_trades.items()):
+                if t and (str(t.get("position_id")) == pid_str or str(t.get("order_id")) == pid_str or (symbol and s == symbol)):
+                    self.ict_engine.active_trades.pop(s, None)
+                    logger.info(f"[Cleanup] Cleared ICT trade for {s} (#{pos_id})")
+
+        # 2. CRT Engine
+        if hasattr(self.crt_engine, "active_trades"):
+            for s, t in list(self.crt_engine.active_trades.items()):
+                if t and (str(t.get("position_id")) == pid_str or str(t.get("order_id")) == pid_str or (symbol and s == symbol)):
+                    self.crt_engine.active_trades.pop(s, None)
+                    logger.info(f"[Cleanup] Cleared CRT trade for {s} (#{pos_id})")
+
+        # 3. Channel Copiers
+        if hasattr(self.channel_mgr, "copiers"):
+            for c_name, copier in self.channel_mgr.copiers.items():
+                if hasattr(copier, "open_positions"):
+                    for oid, opos in list(copier.open_positions.items()):
+                        if str(oid) == pid_str or str(opos.get("position_id")) == pid_str:
+                            copier.open_positions.pop(oid, None)
+                            logger.info(f"[Cleanup] Cleared {c_name} position #{pos_id}")
+
+    async def cmd_close(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Close open trades individually by position ID or symbol, or display interactive close menu."""
+        if not self.is_admin(update.effective_user.id):
+            return
+
+        bid = self.get_active_balance_id()
+        open_positions = []
+        if bid:
+            try:
+                open_positions = self.forex_mcp.list_positions(balance_id=bid) or []
+            except Exception as e:
+                logger.error(f"[cmd_close] Error fetching positions: {e}")
+
+        if not open_positions:
+            await update.message.reply_text("ℹ️ No open positions found on broker to close.", reply_markup=main_menu_keyboard())
+            return
+
+        # Build parsed list of open positions
+        parsed = []
+        for p in open_positions:
+            pid = p.get("position_id") or p.get("id")
+            aid = p.get("asset_id")
+            sym = self.resolve_asset_name(aid)
+            side = str(p.get("side") or p.get("type", "BUY")).upper()
+            if side == "LONG": side = "BUY"
+            if side == "SHORT": side = "SELL"
+            lots = float(p.get("lots") or p.get("count") or 1.0)
+            pnl = float(p.get("expected_pnl") or p.get("pnl") or 0.0)
+            parsed.append({
+                "position_id": pid,
+                "asset_id": aid,
+                "symbol": sym,
+                "side": side,
+                "lots": lots,
+                "pnl": pnl
+            })
+
+        # Check if user specified an argument: e.g. /close 100104887557 or /close btc or /close gold
+        args = context.args if context and context.args else []
+        if args:
+            target_str = str(args[0]).strip().lower()
+            matched = None
+            for p in parsed:
+                pid = str(p.get("position_id", ""))
+                sym = str(p.get("symbol", "")).lower()
+                aid = str(p.get("asset_id", ""))
+                if target_str == pid:
+                    matched = p
+                    break
+                if target_str in sym or sym in target_str:
+                    matched = p
+                    break
+                if target_str == aid:
+                    matched = p
+                    break
+                # Common aliases
+                if target_str in ["btc", "bitcoin"] and "btc" in sym:
+                    matched = p
+                    break
+                if target_str in ["gold", "xau"] and "xau" in sym:
+                    matched = p
+                    break
+                if target_str in ["silver", "xag"] and "xag" in sym:
+                    matched = p
+                    break
+                if target_str in ["eur", "eurusd"] and "eur" in sym:
+                    matched = p
+                    break
+
+            if not matched:
+                await update.message.reply_text(
+                    f"❌ Could not find an open position matching `{args[0]}`.\n\nSelect a trade below to close:",
+                    reply_markup=individual_close_keyboard(parsed),
+                    parse_mode="Markdown"
+                )
+                return
+
+            # Found matching position, execute closure
+            close_pid = matched["position_id"]
+            sym = matched["symbol"]
+            res = self.forex_mcp.close_position(position_id=int(close_pid))
+            self._cleanup_closed_trade(close_pid, sym)
+            pnl_val = matched.get("pnl", 0.0)
+            pnl_sign = f"+${pnl_val:.2f}" if pnl_val >= 0 else f"-${abs(pnl_val):.2f}"
+            await update.message.reply_text(
+                f"✅ Closed *{sym}* position `#{close_pid}`.\nRealized PnL: *{pnl_sign}*",
+                reply_markup=main_menu_keyboard(),
+                parse_mode="Markdown"
+            )
+            return
+
+        # No argument passed: display interactive close menu with buttons
+        await update.message.reply_text(
+            f"🎯 *Close Open Trades Individually*\nFound *{len(parsed)}* open position(s). Tap any trade below to close it:",
+            reply_markup=individual_close_keyboard(parsed),
+            parse_mode="Markdown"
+        )
 
     async def cmd_closeall(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.is_admin(update.effective_user.id):
@@ -1602,16 +1744,17 @@ class TelegramTradingBot:
 
         elif data in ["btn_active_trades", "btn_active_trades_refresh"]:
             text = self.build_active_setups_view()
+            kb = active_setups_keyboard(is_live=True, open_positions=self.last_open_positions)
             try:
                 await query.edit_message_text(
                     text=text,
-                    reply_markup=active_setups_keyboard(is_live=True),
+                    reply_markup=kb,
                     parse_mode="Markdown"
                 )
             except Exception:
                 await query.edit_message_text(
                     text=text,
-                    reply_markup=active_setups_keyboard(is_live=True)
+                    reply_markup=kb
                 )
             self.start_active_view_refresh_task(query.message.chat_id, query.message.message_id)
 
@@ -1673,12 +1816,43 @@ class TelegramTradingBot:
                     pos_id = p.get("position_id") or p.get("id")
                     if pos_id:
                         self.forex_mcp.close_position(position_id=pos_id)
+                        self._cleanup_closed_trade(pos_id)
                         closed_cnt += 1
             await query.edit_message_text(
                 f"🛑 Closed *{closed_cnt}* open position(s) across all engines.",
                 reply_markup=main_menu_keyboard(),
                 parse_mode="Markdown"
             )
+
+        elif data.startswith("close_trade_"):
+            pos_id_str = data.replace("close_trade_", "").strip()
+            try:
+                pos_id = int(pos_id_str)
+                res = self.forex_mcp.close_position(position_id=pos_id)
+                self._cleanup_closed_trade(pos_id)
+                if res and not res.get("error") and not res.get("isError"):
+                    msg = f"✅ Position *#{pos_id}* closed successfully on broker."
+                else:
+                    err_msg = res.get("error", {}).get("message", str(res)) if isinstance(res, dict) else str(res)
+                    msg = f"⚠️ Close request processed for *#{pos_id}* ({err_msg})"
+            except Exception as e:
+                msg = f"❌ Error closing position #{pos_id_str}: {e}"
+
+            await asyncio.sleep(0.8)
+            text = self.build_active_setups_view()
+            kb = active_setups_keyboard(is_live=True, open_positions=self.last_open_positions)
+            try:
+                await query.edit_message_text(
+                    text=f"{msg}\n\n{text}",
+                    reply_markup=kb,
+                    parse_mode="Markdown"
+                )
+            except Exception:
+                await query.edit_message_text(
+                    text=f"{msg}\n\n{text}",
+                    reply_markup=kb
+                )
+            self.start_active_view_refresh_task(query.message.chat_id, query.message.message_id)
 
     async def initialize(self):
         """Build and configure python-telegram-bot Application."""
@@ -1727,6 +1901,9 @@ class TelegramTradingBot:
         self.app.add_handler(CommandHandler("resume", self.cmd_resume))
         self.app.add_handler(CommandHandler("history", self.cmd_history))
         self.app.add_handler(CommandHandler("stats", self.cmd_history))
+        self.app.add_handler(CommandHandler("close", self.cmd_close))
+        self.app.add_handler(CommandHandler("closetrade", self.cmd_close))
+        self.app.add_handler(CommandHandler("exit", self.cmd_close))
         self.app.add_handler(CommandHandler("closeall", self.cmd_closeall))
         self.app.add_handler(CommandHandler("help", self.cmd_help))
         self.app.add_handler(CallbackQueryHandler(self.on_button_click))

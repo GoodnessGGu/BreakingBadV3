@@ -67,14 +67,65 @@ def history_menu_keyboard(category: str = "all") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
 
 
-def active_setups_keyboard(is_live: bool = True) -> InlineKeyboardMarkup:
+def active_setups_keyboard(is_live: bool = True, open_positions: Optional[List[Dict[str, Any]]] = None) -> InlineKeyboardMarkup:
     status_txt = "🟢 Live (Auto 4s)" if is_live else "⚪ Static"
-    keyboard = [
-        [
-            InlineKeyboardButton(f"🔄 {status_txt}", callback_data="btn_active_trades_refresh"),
-            InlineKeyboardButton("🔙 Main Menu", callback_data="btn_main_menu")
-        ]
-    ]
+    keyboard = []
+
+    if open_positions:
+        for p in open_positions:
+            pid = p.get("position_id") or p.get("id")
+            sym = p.get("symbol") or p.get("asset_name") or f"Asset {p.get('asset_id')}"
+            side = str(p.get("side") or p.get("type", "BUY")).upper()
+            if side == "LONG": side = "BUY"
+            if side == "SHORT": side = "SELL"
+            pnl_val = p.get("pnl")
+            pnl_txt = ""
+            if pnl_val is not None:
+                pnl_sign = "+" if pnl_val > 0 else ("" if pnl_val == 0 else "-")
+                pnl_txt = f" ({pnl_sign}${abs(pnl_val):.2f})"
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"❌ Close {sym} {side} #{pid}{pnl_txt}",
+                    callback_data=f"close_trade_{pid}"
+                )
+            ])
+        keyboard.append([
+            InlineKeyboardButton("🛑 Close ALL Positions", callback_data="btn_close_all_confirm")
+        ])
+
+    keyboard.append([
+        InlineKeyboardButton(f"🔄 {status_txt}", callback_data="btn_active_trades_refresh"),
+        InlineKeyboardButton("🔙 Main Menu", callback_data="btn_main_menu")
+    ])
+    return InlineKeyboardMarkup(keyboard)
+
+
+def individual_close_keyboard(open_positions: List[Dict[str, Any]]) -> InlineKeyboardMarkup:
+    keyboard = []
+    for p in open_positions:
+        pid = p.get("position_id") or p.get("id")
+        sym = p.get("symbol") or p.get("asset_name") or f"Asset {p.get('asset_id')}"
+        side = str(p.get("side") or p.get("type", "BUY")).upper()
+        if side == "LONG": side = "BUY"
+        if side == "SHORT": side = "SELL"
+        pnl_val = p.get("pnl")
+        pnl_txt = ""
+        if pnl_val is not None:
+            pnl_sign = "+" if pnl_val > 0 else ("" if pnl_val == 0 else "-")
+            pnl_txt = f" ({pnl_sign}${abs(pnl_val):.2f})"
+        keyboard.append([
+            InlineKeyboardButton(
+                f"❌ Close {sym} {side} #{pid}{pnl_txt}",
+                callback_data=f"close_trade_{pid}"
+            )
+        ])
+    if open_positions:
+        keyboard.append([
+            InlineKeyboardButton("⚠️ Emergency Close ALL", callback_data="btn_close_all_confirm")
+        ])
+    keyboard.append([
+        InlineKeyboardButton("🔙 Back to Main Menu", callback_data="btn_main_menu")
+    ])
     return InlineKeyboardMarkup(keyboard)
 
 

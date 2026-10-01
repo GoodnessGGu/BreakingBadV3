@@ -573,7 +573,7 @@ class ICTStrategyEngine:
                 keep_position_open=False
             )
 
-            candles = self.mcp.get_candles(profile["instrument_id"], count=40)
+            candles = self.mcp.get_candles(profile["asset_id"], count=40)
             chart_bytes = generate_trade_execution_chart(
                 df=candles,
                 symbol=symbol,

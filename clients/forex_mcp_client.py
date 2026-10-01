@@ -330,15 +330,23 @@ class IQForexMCPClient:
             return res
         return None
 
-    def get_candles(self, asset_id: int, size: int = 60, count: int = 100, **kwargs) -> List[Dict[str, Any]]:
+    def get_candles(self, asset_id: Any, size: int = 60, count: int = 100, **kwargs) -> List[Dict[str, Any]]:
         """Get historical candles from the appropriate server endpoint."""
+        if isinstance(asset_id, str):
+            if "." in asset_id:
+                try:
+                    asset_id = int(asset_id.split(".")[-1])
+                except ValueError:
+                    pass
+            elif asset_id.isdigit():
+                asset_id = int(asset_id)
         if "period" in kwargs:
             size = kwargs["period"]
         if size == 180:
             size = 120
         ep = self.resolve_endpoint(asset_id=asset_id)
         res = self.call_tool("get_candles", {
-            "asset_id": asset_id,
+            "asset_id": int(asset_id),
             "size": size,
             "count": count
         }, endpoint=ep)
@@ -413,6 +421,13 @@ class IQForexMCPClient:
 
         logger.info(f"🚀 [MCP {ep.upper()}] Placing {side.upper()} order: Asset={asset_id} ({instrument_id}), Lots={lots}, Lev={leverage}x, SL={stop_loss}, TP={take_profit}")
         res = self.call_tool("place_market_order", args, endpoint=ep)
+        if "error" in res or res.get("isError"):
+            err_str = str(res.get("error", res))
+            if "deadline" in err_str.lower() or "timeout" in err_str.lower():
+                logger.warning(f"⚠️ [MCP {ep.upper()}] Order placement encountered deadline/timeout ({err_str}). Retrying once after 1s...")
+                time.sleep(1.0)
+                res = self.call_tool("place_market_order", args, endpoint=ep)
+
         if ("error" in res or res.get("isError")) and ("stop_loss" in args or "take_profit" in args):
             err_str = str(res.get("error", res))
             if "not_filled" in err_str or "stop_levels" in err_str:

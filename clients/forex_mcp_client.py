@@ -422,35 +422,55 @@ class IQForexMCPClient:
                 return retry_res
         return res
 
+    def _resolve_actual_position_id(self, candidate_id: int) -> int:
+        """Resolve a candidate position_id or order_id to an active broker position_id."""
+        if not candidate_id:
+            return candidate_id
+        try:
+            positions = self.list_positions()
+            for p in positions:
+                pid = p.get("position_id") or p.get("id")
+                oid = p.get("order_id")
+                if pid and int(pid) == int(candidate_id):
+                    return int(pid)
+                if oid and int(oid) == int(candidate_id):
+                    logger.info(f"🔄 [MCP] Resolved Order ID #{candidate_id} -> Position ID #{pid}")
+                    return int(pid)
+        except Exception as e:
+            logger.debug(f"Could not resolve position_id: {e}")
+        return candidate_id
+
     def change_position_stop_loss(self, position_id: int, level: float, balance_id: Optional[int] = None) -> Dict[str, Any]:
         """Move or set the Stop Loss trigger price for an open position across endpoints."""
-        logger.info(f"🔄 [MCP] Updating SL on Position #{position_id} to {level:.5f}")
+        actual_pid = self._resolve_actual_position_id(int(position_id))
+        logger.info(f"🔄 [MCP] Updating SL on Position #{actual_pid} (input: #{position_id}) to {level:.5f}")
         for ep in ("cfd", "forex", "crypto"):
             try:
                 res = self.call_tool("change_position_stop_loss", {
-                    "position_id": int(position_id),
+                    "position_id": int(actual_pid),
                     "level": round(float(level), 5)
                 }, endpoint=ep)
                 if res and not res.get("error") and not res.get("isError"):
                     return res
             except Exception:
                 pass
-        return {"error": {"message": f"Failed to update SL for position {position_id}"}}
+        return {"error": {"message": f"Failed to update SL for position {actual_pid}"}}
 
     def change_position_take_profit(self, position_id: int, level: float) -> Dict[str, Any]:
         """Move or set the Take Profit trigger price for an open position across endpoints."""
-        logger.info(f"🎯 [MCP] Updating TP on Position #{position_id} to {level:.5f}")
+        actual_pid = self._resolve_actual_position_id(int(position_id))
+        logger.info(f"🎯 [MCP] Updating TP on Position #{actual_pid} (input: #{position_id}) to {level:.5f}")
         for ep in ("cfd", "forex", "crypto"):
             try:
                 res = self.call_tool("change_position_take_profit", {
-                    "position_id": int(position_id),
+                    "position_id": int(actual_pid),
                     "level": round(float(level), 5)
                 }, endpoint=ep)
                 if res and not res.get("error") and not res.get("isError"):
                     return res
             except Exception:
                 pass
-        return {"error": {"message": f"Failed to update TP for position {position_id}"}}
+        return {"error": {"message": f"Failed to update TP for position {actual_pid}"}}
 
     def list_positions(self, balance_id: Optional[int] = None, skip: int = 0, limit: int = 50) -> List[Dict[str, Any]]:
         """List currently open marginal positions across all engines (CFD, Forex, Crypto)."""
@@ -517,12 +537,13 @@ class IQForexMCPClient:
 
     def close_position(self, position_id: int) -> Dict[str, Any]:
         """Close an open marginal position by trying endpoints until accepted."""
-        logger.info(f"🔒 [MCP Forex] Closing position #{position_id}")
+        actual_pid = self._resolve_actual_position_id(int(position_id))
+        logger.info(f"🔒 [MCP] Closing position #{actual_pid} (input: #{position_id})")
         for ep in ("cfd", "forex", "crypto"):
             try:
-                res = self.call_tool("close_position", {"position_id": int(position_id)}, endpoint=ep)
+                res = self.call_tool("close_position", {"position_id": int(actual_pid)}, endpoint=ep)
                 if res and not res.get("error") and not res.get("isError"):
                     return res
             except Exception:
                 pass
-        return self.call_tool("close_position", {"position_id": int(position_id)}, endpoint="cfd")
+        return self.call_tool("close_position", {"position_id": int(actual_pid)}, endpoint="cfd")

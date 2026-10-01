@@ -355,10 +355,24 @@ class CRTStrategyEngine:
                 await self.notify_text(f"CRT Order Failed | {symbol}: {err_msg}")
             return
 
-        pos_id = res.get("order_id") or res.get("position_id") or f"crt_{int(time.time())}"
+        order_id = res.get("order_id")
+        pos_id = res.get("position_id")
+        # Auto-resolve actual position_id from broker if missing or still equal to order_id
+        if not pos_id or pos_id == order_id:
+            try:
+                time.sleep(1.0)
+                open_positions = self.mcp.list_positions(balance_id=self.balance_id)
+                for p in open_positions:
+                    if p.get("asset_id") == profile["asset_id"]:
+                        pos_id = p.get("position_id") or p.get("id")
+                        break
+            except Exception as e:
+                logger.debug(f"[CRTEngine] Error resolving position_id: {e}")
+        pos_id = pos_id or order_id or f"crt_{int(time.time())}"
+
         self.active_trades[symbol] = {
             "position_id": pos_id,
-            "order_id": pos_id,
+            "order_id": order_id or pos_id,
             "symbol": symbol,
             "side": side,
             "entry_price": entry,
@@ -401,6 +415,45 @@ class CRTStrategyEngine:
         if not trade:
             return
 
+        profile = CRT_INSTRUMENT_PROFILES.get(symbol, {})
+        pos_id = trade.get("position_id")
+
+        # 1. Resolve actual position_id from broker if missing or still equal to order_id
+        if not pos_id or pos_id == trade.get("order_id"):
+            try:
+                open_positions = self.mcp.list_positions(balance_id=self.balance_id)
+                for p in open_positions:
+                    if p.get("asset_id") == profile.get("asset_id"):
+                        pos_id = p.get("position_id") or p.get("id")
+                        trade["position_id"] = pos_id
+                        break
+            except Exception as e:
+                logger.debug(f"[CRTEngine] Position ID resolution error: {e}")
+
+        # 2. Check if position was closed on broker directly (broker SL or TP executed)
+        if pos_id and str(pos_id).isdigit():
+            try:
+                open_positions = self.mcp.list_positions(balance_id=self.balance_id)
+                is_still_open = any((p.get("position_id") or p.get("id")) == int(pos_id) for p in open_positions)
+                if not is_still_open:
+                    logger.info(f"🏁 [CRTEngine] {symbol} Position #{pos_id} was closed on broker platform!")
+                    hist = self.mcp.get_trade_history(balance_id=self.balance_id, limit=5)
+                    matched_hist = next((h for h in hist if str(h.get("position_id")) == str(pos_id)), None)
+                    pnl = float(matched_hist.get("pnl", 0.0)) if matched_hist else 0.0
+                    outcome = "WIN" if pnl > 0 else ("BREAKEVEN" if pnl == 0 else "LOSS")
+                    pnl_sign = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
+                    caption = (
+                        f"CRT Trade Closed ({outcome}) | {symbol} {pnl_sign}\n\n"
+                        f"• Position: #{pos_id}\n"
+                        f"• Realized PnL: {pnl_sign}\n"
+                        f"• Settled directly on broker."
+                    )
+                    await self.notify_text(caption)
+                    self.active_trades[symbol] = None
+                    return
+            except Exception as e:
+                logger.debug(f"[CRTEngine] Error verifying broker position state: {e}")
+
         mid = cur_prices["mid"]
         side = trade["side"]
         entry = trade["entry_price"]
@@ -416,12 +469,15 @@ class CRTStrategyEngine:
                 trade["is_breakeven"] = True
                 logger.info(f"🛡️ [CRTEngine] {symbol} reached +1.0R Equilibrium. Ratcheting SL to Breakeven @ {entry}!")
                 
-                pos_id = trade.get("position_id")
                 if pos_id and str(pos_id).isdigit():
                     try:
-                        self.mcp.change_position_stop_loss(position_id=int(pos_id), level=entry)
+                        sl_res = self.mcp.change_position_stop_loss(position_id=int(pos_id), level=entry)
+                        if sl_res and not sl_res.get("error"):
+                            logger.info(f"✅ [CRTEngine] Broker SL successfully confirmed at Breakeven @ {entry} on #{pos_id}!")
+                        else:
+                            logger.warning(f"⚠️ [CRTEngine] Broker rejected Breakeven SL update on #{pos_id}: {sl_res}")
                     except Exception as e:
-                        logger.debug(f"[CRTEngine] Could not update broker SL for #{pos_id}: {e}")
+                        logger.error(f"[CRTEngine] Could not update broker SL for #{pos_id}: {e}")
                 
                 chart_bytes = generate_breakeven_chart(
                     df=None,
@@ -443,7 +499,7 @@ class CRTStrategyEngine:
                 )
                 await self.notify_photo(chart_bytes, caption)
 
-        # Check TP or SL Hit
+        # Check TP or SL Hit locally
         hit_tp = (mid >= tp) if side == "BUY" else (mid <= tp)
         hit_sl = (mid <= sl) if side == "BUY" else (mid >= sl)
 
@@ -451,6 +507,14 @@ class CRTStrategyEngine:
             outcome = "WIN" if hit_tp else ("BREAKEVEN" if trade["is_breakeven"] else "LOSS")
             contract_size = trade.get("contract_size", 1.0)
             trade_lots = trade.get("lots", 1.0)
+
+            # Explicitly liquidate position on broker if still open
+            if pos_id and str(pos_id).isdigit():
+                try:
+                    logger.info(f"🔒 [CRTEngine] Explicitly closing #{pos_id} on broker ({outcome})...")
+                    self.mcp.close_position(int(pos_id))
+                except Exception as e:
+                    logger.error(f"[CRTEngine] Could not close broker position #{pos_id}: {e}")
 
             if hit_tp:
                 gain_pts = (tp - entry) if side == "BUY" else (entry - tp)

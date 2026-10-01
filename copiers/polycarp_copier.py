@@ -262,23 +262,6 @@ class PolycarpCopier(BaseCopier):
             is_win = (res_str == "win" or profit > 0)
             pnl = profit
 
-            try:
-                gsheet_logger.log_trade({
-                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "asset": pair,
-                    "direction": direction.upper(),
-                    "amount": stake,
-                    "expiry": exp_secs,
-                    "result": "WIN" if is_win else "LOSS",
-                    "profit": pnl if is_win else -stake,
-                    "gale_level": gale_level,
-                    "signal_source": "Polycarp VIP",
-                    "entry_price": trade.get("open_price", trade.get("entry_price", 0.0)),
-                    "close": trade.get("close_price", 0.0)
-                }, worksheet_name="Polycarp_Trades")
-            except Exception as ge:
-                logger.warning(f"[Polycarp] GSheet log error: {ge}")
-
             gale_label = f" (Gale {gale_level})" if gale_level > 0 else ""
 
             if is_win:
@@ -291,6 +274,41 @@ class PolycarpCopier(BaseCopier):
                 )
             else:
                 logger.info(f"❌ [Polycarp] LOSS on #{pos_id}{gale_label}! Net: -${abs(pnl):.2f}")
+                if gale_level < self.max_gales:
+                    next_gale = gale_level + 1
+                    next_stake = round(self.stake_amount * (self.martingale_multiplier ** next_gale), 2)
+                    await self.notify(
+                        f"🔄 **[POLYCARP MARTINGALE — GALE {next_gale}/{self.max_gales}]**\n\n"
+                        f"• Loss on `#{pos_id}`{gale_label}\n"
+                        f"• Re-entering `{pair}` `{direction.upper()}` with `${next_stake:.2f}`..."
+                    )
+                    # Immediate re-entry on same pair and direction!
+                    asyncio.create_task(self.schedule_and_execute(sig, gale_level=next_gale))
+                else:
+                    await self.notify(
+                        f"❌ **[POLYCARP MAX GALE REACHED] {pair}**\n\n"
+                        f"• Position `#{pos_id}` ended in loss after {self.max_gales} recovery step(s).\n"
+                        f"• Stopping Martingale sequence."
+                    )
+
+            # Async non-blocking Google Sheets log in background
+            try:
+                trade_payload = {
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "asset": pair,
+                    "direction": direction.upper(),
+                    "amount": stake,
+                    "expiry": exp_secs,
+                    "result": "WIN" if is_win else "LOSS",
+                    "profit": pnl if is_win else -stake,
+                    "gale_level": gale_level,
+                    "signal_source": "Polycarp VIP",
+                    "entry_price": trade.get("open_price", trade.get("entry_price", 0.0)),
+                    "close": trade.get("close_price", 0.0)
+                }
+                asyncio.create_task(asyncio.to_thread(gsheet_logger.log_trade, trade_payload, "Polycarp_Trades"))
+            except Exception as ge:
+                logger.warning(f"[Polycarp] GSheet log error: {ge}")
                 if gale_level < self.max_gales:
                     next_gale = gale_level + 1
                     next_stake = round(self.stake_amount * (self.martingale_multiplier ** next_gale), 2)

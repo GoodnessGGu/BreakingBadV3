@@ -380,7 +380,7 @@ class GSocietyCopier(BaseCopier):
                 open_positions = self.mcp.list_positions(balance_id=self.balance_id)
                 is_still_open = False
                 if pos_id:
-                    is_still_open = any((p.get("position_id") or p.get("id")) == pos_id for p in open_positions)
+                    is_still_open = any(str(p.get("position_id") or p.get("id")) == str(pos_id) for p in open_positions)
                 else:
                     is_still_open = any(p.get("asset_id") == GOLD_ASSET_ID for p in open_positions)
             except Exception as e:
@@ -467,7 +467,7 @@ class GSocietyCopier(BaseCopier):
                                 pos["trailing_stage"] = 5
                                 logger.info(f"🎯 [GSociety Trailing Stop] Trailing SL updated to {trail_sl:.2f} on #{pos_id}")
 
-    async def _log_trade_closure(self, order_id: int):
+    async def _log_trade_closure(self, order_id: int, reason_override: Optional[str] = None):
         pos = self.open_positions.get(order_id, {})
         pos_id = pos.get("position_id")
         tag = pos.get("tag", "Standard")
@@ -479,23 +479,57 @@ class GSocietyCopier(BaseCopier):
 
         pnl = 0.0
         exit_px = 0.0
-        reason = "closed"
+        reason = reason_override or "closed"
 
+        for attempt in range(3):
+            try:
+                history = self.mcp.get_trade_history(balance_id=self.balance_id, limit=15) or []
+                matched = next(
+                    (h for h in history if 
+                     (pos_id and str(h.get("position_id")) == str(pos_id)) or
+                     (pos_id and str(h.get("order_id")) == str(pos_id)) or
+                     (pos_id and str(h.get("id")) == str(pos_id)) or
+                     (str(h.get("order_id")) == str(order_id)) or
+                     (not pos_id and h.get("asset_id") == GOLD_ASSET_ID)),
+                    None
+                )
+                if matched:
+                    pnl = float(matched.get("pnl", 0.0))
+                    exit_px = float(matched.get("close_price", matched.get("exit_price", 0.0)))
+                    reason = reason_override or matched.get("close_reason", reason)
+                    break
+            except Exception as e:
+                logger.warning(f"[GSociety] Trade history lookup error (attempt {attempt+1}): {e}")
+            if attempt < 2:
+                await asyncio.sleep(0.8)
+
+        if exit_px == 0.0:
+            prices = self.get_market_price()
+            exit_px = prices.get("mid", entry_px)
+
+        pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
+        if pnl > 0:
+            header_line = f"🏆 [G SOCIETY WON] {tag} {pnl_str}"
+        elif pnl == 0:
+            header_line = f"🛡️ [G SOCIETY BREAKEVEN] {tag} $0.00"
+        else:
+            header_line = f"❌ [G SOCIETY CLOSED] {tag} {pnl_str}"
+
+        # 1. Dispatch Telegram Settlement Notification IMMEDIATELY
+        await self.notify(
+            f"{header_line}\n\n"
+            f"• Side: {side} ({lots} Lots)\n"
+            f"• Entry: {entry_px:.2f}\n"
+            f"• Exit: {exit_px:.2f}\n"
+            f"• Net PnL: {pnl_str}\n"
+            f"• Reason: {reason}"
+        )
+
+        # 2. Async non-blocking Google Sheets log in background
         try:
-            history = self.mcp.get_trade_history(balance_id=self.balance_id, limit=10)
-            matched = next((h for h in history if (pos_id and h.get("position_id") == pos_id) or h.get("asset_id") == GOLD_ASSET_ID), None)
-            if matched:
-                pnl = float(matched.get("pnl", 0.0))
-                exit_px = float(matched.get("close_price", 0.0))
-                reason = matched.get("close_reason", "closed")
-        except Exception as e:
-            logger.warning(f"[GSociety] Trade history lookup error: {e}")
-
-        bal = self.mcp.get_training_balance() if self.account_type == "training" else self.mcp.get_real_balance()
-        eq = bal.get("equity", 0.0) if bal else 0.0
-
-        try:
-            gsheet_logger.log_forex_margin_trade({
+            bal = self.mcp.get_training_balance() if self.account_type == "training" else self.mcp.get_real_balance()
+            eq = bal.get("equity", 0.0) if bal else 0.0
+            trade_payload = {
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "asset": f"G Society Gold ({tag})",
                 "side": side,
@@ -510,26 +544,10 @@ class GSocietyCopier(BaseCopier):
                 "exit_reason": reason,
                 "position_id": pos_id or order_id,
                 "balance_equity": eq
-            })
+            }
+            asyncio.create_task(asyncio.to_thread(gsheet_logger.log_forex_margin_trade, trade_payload))
         except Exception as e:
-            logger.warning(f"[GSociety] GSheet log error: {e}")
-
-        pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
-        if pnl > 0:
-            header_line = f"🏆 **[G SOCIETY WON] {tag} {pnl_str}**"
-        elif pnl == 0:
-            header_line = f"🛡️ **[G SOCIETY BREAKEVEN] {tag} $0.00**"
-        else:
-            header_line = f"❌ **[G SOCIETY CLOSED] {tag} {pnl_str}**"
-
-        await self.notify(
-            f"{header_line}\n\n"
-            f"• Side    : `{side}` (`{lots}` Lots)\n"
-            f"• Entry   : `{entry_px:.2f}`\n"
-            f"• Exit    : `{exit_px:.2f}`\n"
-            f"• Net PnL : `{pnl_str}`\n"
-            f"• Reason  : `{reason}`"
-        )
+            logger.warning(f"[GSociety] GSheet background dispatch error: {e}")
 
     async def handle_message(self, text: str, message_id: int, event: Any = None, msg_date: Any = None):
         if not self.is_enabled:

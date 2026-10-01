@@ -142,6 +142,8 @@ class TelegramTradingBot:
                     chat_id=self.admin_id,
                     text=text
                 )
+                first_line = text.splitlines()[0] if text else ""
+                logger.info(f"📢 [Broadcast Alert] Dispatched to Admin ({self.admin_id}): {first_line}")
                 return
             except Exception as e:
                 logger.warning(f"Error sending broadcast via app.bot: {e}")
@@ -149,10 +151,11 @@ class TelegramTradingBot:
         # Resilient fallback via direct Telegram HTTP API
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
-                await client.post(
+                res = await client.post(
                     f"https://api.telegram.org/bot{self.token}/sendMessage",
                     json={"chat_id": self.admin_id, "text": text}
                 )
+                logger.info(f"📢 [Broadcast Alert Fallback] HTTP {res.status_code}")
         except Exception as e:
             logger.error(f"Failed to send direct Telegram broadcast alert: {e}")
 
@@ -1253,31 +1256,99 @@ class TelegramTradingBot:
         except ValueError:
             await update.message.reply_text("❌ Invalid number. Example usage: `/stake 2.0`")
 
-    def _cleanup_closed_trade(self, pos_id: Any, symbol: Optional[str] = None):
-        """Clean up active tracking in ICT, CRT, and Channel copiers when a position is closed."""
+    async def _cleanup_closed_trade(self, pos_id: Any, symbol: Optional[str] = None, close_reason: str = "client_close"):
+        """Clean up active tracking in ICT, CRT, and Channel copiers when a position is closed, and dispatch closure settlement notification."""
         pid_str = str(pos_id)
-        # 1. ICT Engine
-        if hasattr(self.ict_engine, "active_trades"):
-            for s, t in list(self.ict_engine.active_trades.items()):
-                if t and (str(t.get("position_id")) == pid_str or str(t.get("order_id")) == pid_str or (symbol and s == symbol)):
-                    self.ict_engine.active_trades.pop(s, None)
-                    logger.info(f"[Cleanup] Cleared ICT trade for {s} (#{pos_id})")
+        handled = False
 
-        # 2. CRT Engine
-        if hasattr(self.crt_engine, "active_trades"):
-            for s, t in list(self.crt_engine.active_trades.items()):
-                if t and (str(t.get("position_id")) == pid_str or str(t.get("order_id")) == pid_str or (symbol and s == symbol)):
-                    self.crt_engine.active_trades.pop(s, None)
-                    logger.info(f"[Cleanup] Cleared CRT trade for {s} (#{pos_id})")
-
-        # 3. Channel Copiers
+        # 1. Channel Copiers
         if hasattr(self.channel_mgr, "copiers"):
             for c_name, copier in self.channel_mgr.copiers.items():
                 if hasattr(copier, "open_positions"):
                     for oid, opos in list(copier.open_positions.items()):
                         if str(oid) == pid_str or str(opos.get("position_id")) == pid_str:
+                            handled = True
+                            try:
+                                if hasattr(copier, "_log_trade_closure"):
+                                    await copier._log_trade_closure(oid, reason_override=close_reason)
+                            except Exception as ce:
+                                logger.warning(f"Error logging trade closure for {c_name} #{pos_id}: {ce}")
                             copier.open_positions.pop(oid, None)
                             logger.info(f"[Cleanup] Cleared {c_name} position #{pos_id}")
+
+        # 2. ICT Engine
+        if hasattr(self.ict_engine, "active_trades"):
+            for s, t in list(self.ict_engine.active_trades.items()):
+                if t and (str(t.get("position_id")) == pid_str or str(t.get("order_id")) == pid_str or (symbol and s == symbol)):
+                    handled = True
+                    try:
+                        if hasattr(self.ict_engine, "_log_trade_closure"):
+                            await self.ict_engine._log_trade_closure(s, int(pos_id), reason_override=close_reason)
+                    except Exception as ie:
+                        logger.warning(f"Error logging ICT trade closure #{pos_id}: {ie}")
+                    self.ict_engine.active_trades.pop(s, None)
+                    logger.info(f"[Cleanup] Cleared ICT trade for {s} (#{pos_id})")
+
+        # 3. CRT Engine
+        if hasattr(self.crt_engine, "active_trades"):
+            for s, t in list(self.crt_engine.active_trades.items()):
+                if t and (str(t.get("position_id")) == pid_str or str(t.get("order_id")) == pid_str or (symbol and s == symbol)):
+                    handled = True
+                    try:
+                        if hasattr(self.crt_engine, "_log_trade_closure"):
+                            await self.crt_engine._log_trade_closure(s, t, reason_override=close_reason)
+                    except Exception as cre:
+                        logger.warning(f"Error logging CRT trade closure #{pos_id}: {cre}")
+                    self.crt_engine.active_trades.pop(s, None)
+                    logger.info(f"[Cleanup] Cleared CRT trade for {s} (#{pos_id})")
+
+        # 4. Fallback for manual broker positions not tracked in any engine
+        if not handled:
+            try:
+                bid = self.get_active_balance_id()
+                if bid:
+                    matched = None
+                    for attempt in range(3):
+                        hist = self.forex_mcp.get_trade_history(balance_id=bid, limit=15) or []
+                        matched = next(
+                            (h for h in hist if 
+                             str(h.get("position_id")) == pid_str or 
+                             str(h.get("order_id")) == pid_str or 
+                             str(h.get("id")) == pid_str),
+                            None
+                        )
+                        if matched:
+                            break
+                        if attempt < 2:
+                            await asyncio.sleep(0.8)
+
+                    if matched:
+                        pnl = float(matched.get("pnl", 0.0))
+                        exit_px = float(matched.get("close_price", matched.get("exit_price", 0.0)))
+                        entry_px = float(matched.get("open_price", matched.get("entry_price", 0.0)))
+                        side = str(matched.get("side") or matched.get("direction", "BUY")).upper()
+                        lots = float(matched.get("lots") or matched.get("count", 1.0))
+                        sym = symbol or self.resolve_asset_name(matched.get("asset_id"))
+                        r_name = close_reason or matched.get("close_reason", "client_close")
+                        pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
+                        if pnl > 0:
+                            header_line = f"🏆 [TRADE WON] {sym} {pnl_str}"
+                        elif pnl == 0:
+                            header_line = f"🛡️ [TRADE BREAKEVEN] {sym} $0.00"
+                        else:
+                            header_line = f"❌ [TRADE CLOSED] {sym} {pnl_str}"
+
+                        card = (
+                            f"{header_line}\n\n"
+                            f"• Side: {side} ({lots} Lots)\n"
+                            f"• Entry: {entry_px:.2f}\n"
+                            f"• Exit: {exit_px:.2f}\n"
+                            f"• Net PnL: {pnl_str}\n"
+                            f"• Reason: {r_name}"
+                        )
+                        await self.broadcast_alert(card)
+            except Exception as e:
+                logger.warning(f"Fallback closure card lookup error for #{pos_id}: {e}")
 
     async def cmd_close(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Close open trades individually by position ID or symbol, or display interactive close menu."""
@@ -1360,7 +1431,7 @@ class TelegramTradingBot:
             close_pid = matched["position_id"]
             sym = matched["symbol"]
             res = self.forex_mcp.close_position(position_id=int(close_pid))
-            self._cleanup_closed_trade(close_pid, sym)
+            await self._cleanup_closed_trade(close_pid, sym)
             pnl_val = matched.get("pnl", 0.0)
             pnl_sign = f"+${pnl_val:.2f}" if pnl_val >= 0 else f"-${abs(pnl_val):.2f}"
             await update.message.reply_text(
@@ -1816,7 +1887,7 @@ class TelegramTradingBot:
                     pos_id = p.get("position_id") or p.get("id")
                     if pos_id:
                         self.forex_mcp.close_position(position_id=pos_id)
-                        self._cleanup_closed_trade(pos_id)
+                        await self._cleanup_closed_trade(pos_id, close_reason="client_close_all")
                         closed_cnt += 1
             await query.edit_message_text(
                 f"🛑 Closed *{closed_cnt}* open position(s) across all engines.",
@@ -1829,7 +1900,7 @@ class TelegramTradingBot:
             try:
                 pos_id = int(pos_id_str)
                 res = self.forex_mcp.close_position(position_id=pos_id)
-                self._cleanup_closed_trade(pos_id)
+                await self._cleanup_closed_trade(pos_id, close_reason="client_close")
                 if res and not res.get("error") and not res.get("isError"):
                     msg = f"✅ Position *#{pos_id}* closed successfully on broker."
                 else:

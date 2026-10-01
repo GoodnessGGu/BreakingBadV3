@@ -410,6 +410,61 @@ class CRTStrategyEngine:
         )
         await self.notify_photo(chart_bytes, caption)
 
+    async def _log_trade_closure(self, symbol: str, trade: dict, reason_override: Optional[str] = None):
+        """Broadcast standard trade closure settlement card for CRT trades."""
+        if not trade:
+            return
+        pos_id = trade.get("position_id") or trade.get("order_id")
+        side = trade.get("side", "BUY")
+        entry = float(trade.get("entry_price", 0.0))
+        lots = float(trade.get("lots", self.lots))
+
+        pnl = 0.0
+        exit_px = 0.0
+        reason = reason_override or "closed"
+
+        for attempt in range(3):
+            try:
+                hist = self.mcp.get_trade_history(balance_id=self.balance_id, limit=15) or []
+                matched = next(
+                    (h for h in hist if 
+                     (pos_id and str(h.get("position_id")) == str(pos_id)) or
+                     (pos_id and str(h.get("order_id")) == str(pos_id)) or
+                     (pos_id and str(h.get("id")) == str(pos_id))),
+                    None
+                )
+                if matched:
+                    pnl = float(matched.get("pnl", 0.0))
+                    exit_px = float(matched.get("close_price", matched.get("exit_price", 0.0)))
+                    reason = reason_override or matched.get("close_reason", reason)
+                    break
+            except Exception as e:
+                logger.debug(f"[CRTEngine] Hist lookup error (attempt {attempt+1}): {e}")
+            if attempt < 2:
+                await asyncio.sleep(0.8)
+
+        if exit_px == 0.0:
+            prices = self.get_market_price(symbol)
+            exit_px = prices.get("mid", entry)
+
+        pnl_sign = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
+        if pnl > 0:
+            header_line = f"🏆 [CRT WON] {symbol} {pnl_sign}"
+        elif pnl == 0:
+            header_line = f"🛡️ [CRT BREAKEVEN] {symbol} $0.00"
+        else:
+            header_line = f"❌ [CRT CLOSED] {symbol} {pnl_sign}"
+
+        card = (
+            f"{header_line}\n\n"
+            f"• Side: {side} ({lots} Lots)\n"
+            f"• Entry: {entry:.5f}\n"
+            f"• Exit: {exit_px:.5f}\n"
+            f"• Net PnL: {pnl_sign}\n"
+            f"• Reason: {reason}"
+        )
+        await self.notify_text(card)
+
     async def _manage_active_trade(self, symbol: str, cur_prices: Dict[str, float]):
         trade = self.active_trades.get(symbol)
         if not trade:
@@ -434,21 +489,10 @@ class CRTStrategyEngine:
         if pos_id and str(pos_id).isdigit():
             try:
                 open_positions = self.mcp.list_positions(balance_id=self.balance_id)
-                is_still_open = any((p.get("position_id") or p.get("id")) == int(pos_id) for p in open_positions)
+                is_still_open = any(str(p.get("position_id") or p.get("id")) == str(pos_id) for p in open_positions)
                 if not is_still_open:
                     logger.info(f"🏁 [CRTEngine] {symbol} Position #{pos_id} was closed on broker platform!")
-                    hist = self.mcp.get_trade_history(balance_id=self.balance_id, limit=5)
-                    matched_hist = next((h for h in hist if str(h.get("position_id")) == str(pos_id)), None)
-                    pnl = float(matched_hist.get("pnl", 0.0)) if matched_hist else 0.0
-                    outcome = "WIN" if pnl > 0 else ("BREAKEVEN" if pnl == 0 else "LOSS")
-                    pnl_sign = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
-                    caption = (
-                        f"CRT Trade Closed ({outcome}) | {symbol} {pnl_sign}\n\n"
-                        f"• Position: #{pos_id}\n"
-                        f"• Realized PnL: {pnl_sign}\n"
-                        f"• Settled directly on broker."
-                    )
-                    await self.notify_text(caption)
+                    await self._log_trade_closure(symbol, trade)
                     self.active_trades[symbol] = None
                     return
             except Exception as e:
@@ -504,46 +548,15 @@ class CRTStrategyEngine:
         hit_sl = (mid <= sl) if side == "BUY" else (mid >= sl)
 
         if hit_tp or hit_sl:
-            outcome = "WIN" if hit_tp else ("BREAKEVEN" if trade["is_breakeven"] else "LOSS")
-            contract_size = trade.get("contract_size", 1.0)
-            trade_lots = trade.get("lots", 1.0)
+            close_reason = "take_profit" if hit_tp else ("breakeven" if trade["is_breakeven"] else "stop_loss")
 
             # Explicitly liquidate position on broker if still open
             if pos_id and str(pos_id).isdigit():
                 try:
-                    logger.info(f"🔒 [CRTEngine] Explicitly closing #{pos_id} on broker ({outcome})...")
+                    logger.info(f"🔒 [CRTEngine] Explicitly closing #{pos_id} on broker ({close_reason})...")
                     self.mcp.close_position(int(pos_id))
                 except Exception as e:
                     logger.error(f"[CRTEngine] Could not close broker position #{pos_id}: {e}")
 
-            if hit_tp:
-                gain_pts = (tp - entry) if side == "BUY" else (entry - tp)
-                dollar_pnl = gain_pts * contract_size * trade_lots
-            elif trade["is_breakeven"]:
-                dollar_pnl = 0.0
-            else:
-                dollar_pnl = -(risk * contract_size * trade_lots)
-
-            pnl_sign = f"+${dollar_pnl:.2f}" if dollar_pnl >= 0 else f"-${abs(dollar_pnl):.2f}"
-            logger.info(f"🏁 [CRTEngine] {symbol} trade closed: {outcome} | PnL: {pnl_sign}")
-
-            chart_bytes = generate_trade_close_chart(
-                df=None,
-                symbol=symbol,
-                side=side,
-                entry_px=entry,
-                exit_px=mid,
-                tp=tp,
-                sl=sl,
-                pnl=dollar_pnl,
-                reason="take_profit" if hit_tp else "stop_loss",
-                engine_name="CRT"
-            )
-            caption = (
-                f"CRT Trade Closed ({outcome}) | {symbol} {pnl_sign}\n\n"
-                f"• Outcome: {'Take Profit Hit' if hit_tp else ('Breakeven' if trade['is_breakeven'] else 'Stop Loss Hit')}\n"
-                f"• Entry/Exit: {entry:.5f} ➔ {mid:.5f}\n"
-                f"• Realized PnL: {pnl_sign}"
-            )
-            await self.notify_photo(chart_bytes, caption)
+            await self._log_trade_closure(symbol, trade, reason_override=close_reason)
             self.active_trades[symbol] = None

@@ -812,72 +812,108 @@ class ICTStrategyEngine:
                         f"• SL ratcheted to: `{trail_sl:.{digits}f}` (Trailing {trail_dist * pip_multiplier:.1f} pips behind market)"
                     )
 
-    async def _log_trade_closure(self, symbol: str, pos_id: int):
+    async def _log_trade_closure(self, symbol: str, pos_id: int, reason_override: Optional[str] = None):
         trade = self.active_trades.get(symbol)
         if not trade:
             return
         profile = INSTRUMENT_PROFILES[symbol]
         digits = profile["digits"]
         try:
-            history = self.mcp.get_trade_history(balance_id=self.balance_id, limit=5)
-            matched = next((h for h in history if h.get("position_id") == pos_id), None)
-            pnl = float(matched.get("pnl", 0.0)) if matched else 0.0
-            exit_px = float(matched.get("close_price", 0.0)) if matched else 0.0
-            reason = matched.get("close_reason", "closed") if matched else "closed"
+            pnl = 0.0
+            exit_px = 0.0
+            reason = reason_override or "closed"
+
+            for attempt in range(3):
+                try:
+                    history = self.mcp.get_trade_history(balance_id=self.balance_id, limit=15) or []
+                    matched = next(
+                        (h for h in history if 
+                         str(h.get("position_id")) == str(pos_id) or 
+                         str(h.get("order_id")) == str(pos_id) or 
+                         str(h.get("id")) == str(pos_id)),
+                        None
+                    )
+                    if matched:
+                        pnl = float(matched.get("pnl", 0.0))
+                        exit_px = float(matched.get("close_price", matched.get("exit_price", 0.0)))
+                        reason = reason_override or matched.get("close_reason", reason)
+                        break
+                except Exception as he:
+                    logger.debug(f"[ICTEngine] History lookup attempt {attempt+1} error: {he}")
+                if attempt < 2:
+                    await asyncio.sleep(0.8)
+
             entry_px = trade["entry_price"]
-
-            bal = self.mcp.get_training_balance() if self.account_type == "training" else self.mcp.get_real_balance()
-            eq = bal.get("equity", 0.0) if bal else 0.0
-
-            gsheet_logger.log_forex_margin_trade({
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "asset": f"ICT {symbol}",
-                "side": trade["side"],
-                "lots": self.lots,
-                "entry_price": entry_px,
-                "stop_loss": trade["current_sl"],
-                "take_profit": trade["tp"],
-                "exit_price": exit_px,
-                "pnl": pnl,
-                "pips": round(abs(exit_px - entry_px) * (10 ** (digits - 1)), 1),
-                "risk_reward": f"1:{self.rr_ratio:.1f} (ICT Autonomous)",
-                "exit_reason": reason,
-                "position_id": pos_id,
-                "balance_equity": eq
-            })
+            if exit_px == 0.0:
+                candles = self.mcp.get_candles(profile["asset_id"], count=2)
+                if candles and len(candles) > 0:
+                    last_c = candles[-1]
+                    exit_px = float(last_c.get("close", last_c.get("c", entry_px)))
+                else:
+                    exit_px = entry_px
 
             pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
             if pnl > 0:
-                header_line = f"ICT Trade TP Hit | {symbol} {pnl_str}"
+                header_line = f"🏆 [ICT WON] {symbol} {pnl_str}"
             elif pnl == 0:
-                header_line = f"ICT Trade Breakeven | {symbol} $0.00"
+                header_line = f"🛡️ [ICT BREAKEVEN] {symbol} $0.00"
             else:
-                header_line = f"ICT Trade Closed | {symbol} {pnl_str}"
-
-            candles = self.mcp.get_candles(profile["instrument_id"], count=40)
-            chart_bytes = generate_trade_close_chart(
-                df=candles,
-                symbol=symbol,
-                side=trade["side"],
-                entry_px=entry_px,
-                exit_px=exit_px,
-                tp=trade.get("tp", 0.0),
-                sl=trade.get("current_sl", 0.0),
-                pnl=pnl,
-                reason=reason,
-                engine_name="ICT",
-                event_title=f"1:{self.rr_ratio:.1f} Target",
-                timeframe="15M" if CANDLE_SIZE == 900 else "M1"
-            )
+                header_line = f"❌ [ICT CLOSED] {symbol} {pnl_str}"
 
             caption = (
                 f"{header_line}\n\n"
-                f"• Position: #{pos_id} ({'BUY' if trade['side'] == 'BUY' else 'SELL'})\n"
-                f"• Entry/Exit: {entry_px} ➔ {exit_px}\n"
+                f"• Side: {trade['side']} ({self.lots} Lots)\n"
+                f"• Entry: {entry_px:.{digits}f}\n"
+                f"• Exit: {exit_px:.{digits}f}\n"
                 f"• Net PnL: {pnl_str}\n"
                 f"• Reason: {reason}"
             )
-            await self.notify_photo(chart_bytes, caption)
+
+            # Try generating trade close chart; fallback to text if chart fails
+            try:
+                candles = self.mcp.get_candles(profile["instrument_id"], count=40)
+                chart_bytes = generate_trade_close_chart(
+                    df=candles,
+                    symbol=symbol,
+                    side=trade["side"],
+                    entry_px=entry_px,
+                    exit_px=exit_px,
+                    tp=trade.get("tp", 0.0),
+                    sl=trade.get("current_sl", 0.0),
+                    pnl=pnl,
+                    reason=reason,
+                    engine_name="ICT",
+                    event_title=f"1:{self.rr_ratio:.1f} Target",
+                    timeframe="15M" if CANDLE_SIZE == 900 else "M1"
+                )
+                await self.notify_photo(chart_bytes, caption)
+            except Exception as ce:
+                logger.warning(f"[ICTEngine] Chart gen error: {ce}, sending text card")
+                await self.notify_text(caption)
+
+            # Async non-blocking Google Sheets log in background
+            try:
+                bal = self.mcp.get_training_balance() if self.account_type == "training" else self.mcp.get_real_balance()
+                eq = bal.get("equity", 0.0) if bal else 0.0
+                trade_payload = {
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "asset": f"ICT {symbol}",
+                    "side": trade["side"],
+                    "lots": self.lots,
+                    "entry_price": entry_px,
+                    "stop_loss": trade["current_sl"],
+                    "take_profit": trade["tp"],
+                    "exit_price": exit_px,
+                    "pnl": pnl,
+                    "pips": round(abs(exit_px - entry_px) * (10 ** (digits - 1)), 1),
+                    "risk_reward": f"1:{self.rr_ratio:.1f} (ICT Autonomous)",
+                    "exit_reason": reason,
+                    "position_id": pos_id,
+                    "balance_equity": eq
+                }
+                asyncio.create_task(asyncio.to_thread(gsheet_logger.log_forex_margin_trade, trade_payload))
+            except Exception as ge:
+                logger.warning(f"[ICTEngine] GSheet background dispatch error: {ge}")
         except Exception as e:
             logger.error(f"[ICTEngine] Error logging trade closure for {symbol}: {e}")
 

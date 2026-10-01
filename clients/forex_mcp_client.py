@@ -1,19 +1,16 @@
 """
-forex_mcp_client.py - IQ Option Official Marginal Forex MCP Client
+forex_mcp_client.py - IQ Option Official Marginal Forex, CFD & Crypto MCP Client
 
-Direct integration with IQ Option's official Model Context Protocol (MCP) streamable-HTTP server
-at https://marginal-forex.mcp.iqoption.com using Bearer AI token authentication.
+Direct integration with IQ Option's official Model Context Protocol (MCP) streamable-HTTP servers:
+- CFD / Commodities (Gold, Silver, Indices, Stocks): https://marginal-cfd.mcp.iqoption.com
+- Forex Currencies (EUR/USD, GBP/USD, USD/JPY, etc.): https://marginal-forex.mcp.iqoption.com
+- Crypto (Bitcoin, Ethereum, etc.): https://marginal-crypto.mcp.iqoption.com
 
 Features:
-- Robust session initialization with Mcp-Session-Id header management.
-- Transparent structured JSON response parsing.
-- Dynamic balance & margin queries (Practice/Training vs Real).
-- Instrument metadata & leverage profiles inspection.
-- Candlestick history fetching directly via MCP.
-- Mathematical risk-based lot sizing (1% equity risk).
-- Market order execution with Stop Loss & Take Profit.
-- Dynamic Stop Loss adjustment for trailing stops.
-- Open positions and closed trade history tracking.
+- Multi-endpoint smart routing based on asset_id, instrument_id, or symbol ticker.
+- Unified session initialization and Mcp-Session-Id header management across endpoints.
+- Automatic aggregation of open positions and trade history across all marginal engines.
+- Robust error handling and fallback execution for SL/TP stop-level constraints.
 """
 
 import os
@@ -26,73 +23,137 @@ from dotenv import load_dotenv
 
 logger = logging.getLogger("IQForexMCP")
 
+FOREX_ENDPOINTS = {
+    "cfd": "https://marginal-cfd.mcp.iqoption.com",
+    "forex": "https://marginal-forex.mcp.iqoption.com",
+    "crypto": "https://marginal-crypto.mcp.iqoption.com"
+}
+
 class IQForexMCPClient:
     def __init__(self, token: Optional[str] = None, base_url: str = "https://marginal-cfd.mcp.iqoption.com"):
         load_dotenv()
         self.token = token or os.getenv("IQ_AI_TOKEN") or os.getenv("IQ_MCP_TOKEN")
-        self.base_url = base_url.rstrip("/")
-        self.session = requests.Session()
+        self.default_base_url = base_url.rstrip("/")
         self.request_id = 0
-        self.session_id: Optional[str] = None
-        self.tools: Dict[str, Any] = {}
+        
+        # Multi-endpoint sessions
+        self.endpoint_urls = dict(FOREX_ENDPOINTS)
+        if self.default_base_url not in self.endpoint_urls.values():
+            self.endpoint_urls["custom"] = self.default_base_url
+
+        self.sessions: Dict[str, requests.Session] = {k: requests.Session() for k in self.endpoint_urls}
+        self.session_ids: Dict[str, Optional[str]] = {k: None for k in self.endpoint_urls}
+        self.tools: Dict[str, Dict[str, Any]] = {k: {} for k in self.endpoint_urls}
         self.asset_cache: Dict[str, Any] = {}
         self.instrument_cache: Dict[int, Any] = {}
         
         if self.token:
-            self._update_auth_header()
+            self._update_auth_headers()
 
-    def _update_auth_header(self):
-        headers = {
-            "Authorization": f"Bearer {self.token}",
-            "Content-Type": "application/json",
-            "User-Agent": "SmartTrailForex/1.0 (Antigravity-AI)"
-        }
-        if self.session_id:
-            headers["Mcp-Session-Id"] = self.session_id
-        self.session.headers.update(headers)
+    @property
+    def base_url(self) -> str:
+        return self.default_base_url
+
+    @property
+    def session(self) -> requests.Session:
+        return self.sessions.get("cfd", list(self.sessions.values())[0])
+
+    @property
+    def session_id(self) -> Optional[str]:
+        return self.session_ids.get("cfd")
+
+    @session_id.setter
+    def session_id(self, val: Optional[str]):
+        self.session_ids["cfd"] = val
+
+    def _update_auth_headers(self):
+        for ep_key, sess in self.sessions.items():
+            headers = {
+                "Authorization": f"Bearer {self.token}",
+                "Content-Type": "application/json",
+                "User-Agent": "SmartTrailForex/1.0 (Antigravity-AI)"
+            }
+            if self.session_ids.get(ep_key):
+                headers["Mcp-Session-Id"] = self.session_ids[ep_key]
+            sess.headers.update(headers)
 
     def set_token(self, token: str):
         self.token = token.strip()
-        self._update_auth_header()
+        self._update_auth_headers()
 
     def _next_id(self) -> int:
         self.request_id += 1
         return self.request_id
 
-    def rpc_call(self, method: str, params: Optional[Dict[str, Any]] = None, retry_init: bool = True) -> Dict[str, Any]:
-        """Execute a JSON-RPC 2.0 call against the streamable-HTTP MCP endpoint."""
+    def resolve_endpoint(self, asset_id: Optional[int] = None, instrument_id: Optional[str] = None, symbol: Optional[str] = None) -> str:
+        """Resolve which MCP server endpoint hosts the given asset/instrument/symbol."""
+        if instrument_id:
+            i = str(instrument_id).lower()
+            if i.startswith("mf."):
+                return "forex"
+            if i.startswith("mcrpt."):
+                return "crypto"
+            if i.startswith("mcfd."):
+                return "cfd"
+        if symbol:
+            s = str(symbol).upper().replace("/", "").replace("-", "")
+            if s in ("BTCUSD", "BTC", "ETHUSD", "ETH", "BCHUSD"):
+                return "crypto"
+            if s in ("EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "EURGBP", "EURJPY", "GBPJPY", "EURCAD", "EURAUD", "EURNZD", "EURCHF"):
+                return "forex"
+            if s in ("XAUUSD", "GOLD", "XAGUSD", "SILVER", "XAU", "XAG"):
+                return "cfd"
+        if asset_id is not None:
+            try:
+                aid = int(asset_id)
+                if aid in (816, 824, 836, 886, 1979):
+                    return "crypto"
+                if aid in (1, 2, 4, 5, 6, 99, 105, 108, 212, 946, 951, 955, 1011):
+                    return "forex"
+                return "cfd"
+            except (ValueError, TypeError):
+                pass
+        return "cfd"
+
+    def rpc_call(self, method: str, params: Optional[Dict[str, Any]] = None, endpoint: str = "cfd", retry_init: bool = True) -> Dict[str, Any]:
+        """Execute a JSON-RPC 2.0 call against the resolved streamable-HTTP MCP endpoint."""
         if not self.token:
             raise ValueError("Missing IQ Option AI Integration Token. Please set IQ_AI_TOKEN in .env")
-            
+
+        if endpoint not in self.endpoint_urls:
+            endpoint = "cfd"
+        url = self.endpoint_urls[endpoint]
+        sess = self.sessions[endpoint]
+
         payload = {
             "jsonrpc": "2.0",
             "id": self._next_id(),
             "method": method,
             "params": params or {}
         }
-        
+
         try:
-            resp = self.session.post(self.base_url, json=payload, timeout=20)
-            
+            resp = sess.post(url, json=payload, timeout=20)
+
             # Check for Mcp-Session-Id in response headers
             sess_hdr = resp.headers.get("Mcp-Session-Id") or resp.headers.get("mcp-session-id")
-            if sess_hdr and sess_hdr != self.session_id:
-                self.session_id = sess_hdr
-                self.session.headers["Mcp-Session-Id"] = self.session_id
-                
+            if sess_hdr and sess_hdr != self.session_ids[endpoint]:
+                self.session_ids[endpoint] = sess_hdr
+                sess.headers["Mcp-Session-Id"] = self.session_ids[endpoint]
+
             if resp.status_code == 401:
-                logger.error("❌ 401 Unauthorized: Invalid or expired IQ Option AI token.")
+                logger.error(f"❌ 401 Unauthorized on {endpoint}: Invalid or expired IQ Option AI token.")
                 return {"error": {"code": 401, "message": "Unauthorized: Invalid or expired token"}}
             elif resp.status_code == 403:
-                logger.error("❌ 403 Forbidden: Token lacks Margin Forex trading permission.")
-                return {"error": {"code": 403, "message": "Forbidden: Token lacks Margin Forex permission"}}
+                logger.error(f"❌ 403 Forbidden on {endpoint}: Token lacks permission.")
+                return {"error": {"code": 403, "message": "Forbidden: Token lacks permission"}}
             elif resp.status_code in (400, 404, 410) and retry_init and method != "initialize":
-                logger.warning(f"⚠️ Forex MCP HTTP {resp.status_code} (session invalid/expired). Re-initializing...")
-                if self.initialize():
-                    return self.rpc_call(method, params, retry_init=False)
-                
+                logger.warning(f"⚠️ Forex MCP [{endpoint}] HTTP {resp.status_code} (session invalid/expired). Re-initializing...")
+                if self.initialize(endpoint=endpoint):
+                    return self.rpc_call(method, params, endpoint=endpoint, retry_init=False)
+
             resp.raise_for_status()
-            
+
             content_type = resp.headers.get("Content-Type", "")
             data = None
             if "application/json" in content_type:
@@ -109,93 +170,93 @@ class IQForexMCPClient:
                         continue
                 if data is None:
                     data = {"result": resp.text}
-                    
+
             # Check if error indicates expired/invalid session
             err = data.get("error") if isinstance(data, dict) else None
             if err and retry_init and ("session" in str(err).lower() or "not found" in str(err).lower()):
-                logger.warning("⚠️ Forex MCP session expired or uninitialized. Re-initializing...")
-                if self.initialize():
-                    return self.rpc_call(method, params, retry_init=False)
+                logger.warning(f"⚠️ Forex MCP [{endpoint}] session expired. Re-initializing...")
+                if self.initialize(endpoint=endpoint):
+                    return self.rpc_call(method, params, endpoint=endpoint, retry_init=False)
 
             return data
-                
+
         except requests.RequestException as e:
             if retry_init and method != "initialize":
-                logger.warning(f"⚠️ Forex MCP request exception: {e}. Re-initializing session...")
-                if self.initialize():
-                    return self.rpc_call(method, params, retry_init=False)
-            logger.error(f"HTTP error during MCP rpc_call({method}): {e}")
+                logger.warning(f"⚠️ Forex MCP [{endpoint}] request exception: {e}. Re-initializing...")
+                if self.initialize(endpoint=endpoint):
+                    return self.rpc_call(method, params, endpoint=endpoint, retry_init=False)
+            logger.error(f"HTTP error during MCP rpc_call({method}) on {endpoint}: {e}")
             return {"error": {"code": -1, "message": str(e)}}
 
-    def initialize(self) -> bool:
-        """Initialize MCP session with IQ Option server and exchange session handshake."""
-        # Clear existing session ID for fresh handshake
-        if "Mcp-Session-Id" in self.session.headers:
-            del self.session.headers["Mcp-Session-Id"]
-        self.session_id = None
+    def initialize(self, endpoint: Optional[str] = None) -> bool:
+        """Initialize MCP sessions with IQ Option servers and exchange session handshakes."""
+        targets = [endpoint] if endpoint else list(self.endpoint_urls.keys())
+        any_success = False
+        for ep in targets:
+            sess = self.sessions[ep]
+            if "Mcp-Session-Id" in sess.headers:
+                del sess.headers["Mcp-Session-Id"]
+            self.session_ids[ep] = None
 
-        init_res = self.rpc_call("initialize", {
-            "protocolVersion": "2024-11-05",
-            "capabilities": {},
-            "clientInfo": {"name": "SmartTrailForexBot", "version": "1.0.0"}
-        }, retry_init=False)
-        
-        if not init_res or "error" in init_res:
-            logger.error(f"Initialization failed: {init_res.get('error') if init_res else 'No response'}")
-            return False
-            
-        if not self.session_id:
-            logger.error("No Mcp-Session-Id returned by server during initialize.")
-            return False
+            init_res = self.rpc_call("initialize", {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "SmartTrailForexBot", "version": "1.0.0"}
+            }, endpoint=ep, retry_init=False)
 
-        # Send notifications/initialized notification
-        try:
-            self.session.post(self.base_url, json={
-                "jsonrpc": "2.0",
-                "method": "notifications/initialized"
-            }, timeout=10)
-        except Exception as e:
-            logger.warning(f"Error sending notifications/initialized: {e}")
-            
-        logger.info(f"✅ IQ Option MCP session initialized successfully! Session ID: {self.session_id}")
-        self.fetch_tools()
-        return True
+            if init_res and "error" not in init_res and self.session_ids[ep]:
+                try:
+                    sess.post(self.endpoint_urls[ep], json={
+                        "jsonrpc": "2.0",
+                        "method": "notifications/initialized"
+                    }, timeout=10)
+                except Exception as e:
+                    logger.debug(f"Error sending notifications/initialized to {ep}: {e}")
+                logger.info(f"✅ IQ Option MCP [{ep.upper()}] session initialized! Session ID: {self.session_ids[ep]}")
+                self.fetch_tools(endpoint=ep)
+                any_success = True
+            else:
+                logger.warning(f"⚠️ Could not initialize MCP endpoint [{ep.upper()}]: {init_res.get('error') if isinstance(init_res, dict) else init_res}")
+        return any_success
 
-    def fetch_tools(self) -> Dict[str, Any]:
-        """Query tools/list from server to dynamically inspect available tools."""
-        res = self.rpc_call("tools/list", {})
+    def fetch_tools(self, endpoint: str = "cfd") -> Dict[str, Any]:
+        """Query tools/list from server for specific endpoint."""
+        res = self.rpc_call("tools/list", {}, endpoint=endpoint)
         result = res.get("result", {})
         tools_list = result.get("tools", [])
-        self.tools = {t["name"]: t for t in tools_list}
-        logger.info(f"Available MCP Tools ({len(self.tools)}): {list(self.tools.keys())}")
-        return self.tools
+        self.tools[endpoint] = {t["name"]: t for t in tools_list}
+        return self.tools[endpoint]
 
-    def call_tool(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Execute a specific MCP tool and unpack structuredContent or content JSON.
-        """
+    def call_tool(self, name: str, arguments: Dict[str, Any], endpoint: Optional[str] = None) -> Dict[str, Any]:
+        """Execute a specific MCP tool and unpack structuredContent or content JSON."""
+        if not endpoint:
+            endpoint = self.resolve_endpoint(
+                asset_id=arguments.get("asset_id"),
+                instrument_id=arguments.get("instrument_id")
+            )
+
         res = self.rpc_call("tools/call", {
             "name": name,
             "arguments": arguments
-        })
-        
+        }, endpoint=endpoint)
+
         if "error" in res:
-            logger.error(f"Tool call error [{name}]: {res['error']}")
+            logger.error(f"Tool call error [{name}] on {endpoint}: {res['error']}")
             return {"error": res["error"]}
-            
+
         result = res.get("result", {})
         if result.get("isError"):
             err_msg = ""
             for c in result.get("content", []):
                 if isinstance(c, dict) and "text" in c:
                     err_msg += c["text"] + " "
-            logger.error(f"Tool execution returned error [{name}]: {err_msg.strip()}")
+            logger.error(f"Tool execution returned error [{name}] on {endpoint}: {err_msg.strip()}")
             return {"error": {"message": err_msg.strip()}}
 
         # Extract structuredContent if present
         if "structuredContent" in result and result["structuredContent"]:
             return result["structuredContent"]
-            
+
         # Fallback to parsing content[0].text
         content_items = result.get("content", [])
         if content_items and isinstance(content_items, list):
@@ -210,57 +271,46 @@ class IQForexMCPClient:
         return result
 
     # ==========================================
-    # High-Level Forex API Methods
+    # High-Level Forex, CFD & Crypto API Methods
     # ==========================================
 
     def list_balances(self, types: str = "ALL") -> List[Dict[str, Any]]:
-        """List marginal-forex balances (equity, margin, free_margin, pnl)."""
-        res = self.call_tool("list_balances", {"types": types.upper()})
+        """List marginal balances (equity, margin, free_margin, pnl)."""
+        res = self.call_tool("list_balances", {"types": types.upper()}, endpoint="cfd")
         if isinstance(res, dict) and "balances" in res:
             return res["balances"]
         return []
 
-    def get_training_balance(self) -> Optional[Dict[str, Any]]:
-        """Get the practice/training balance details."""
-        balances = self.list_balances("TRAINING")
-        for b in balances:
-            if b.get("type") == "training":
-                return b
-        # Fallback to ALL
-        for b in self.list_balances("ALL"):
-            if b.get("type") == "training":
-                return b
-        return None
-
     def get_real_balance(self) -> Optional[Dict[str, Any]]:
-        """Get the real/regular balance details."""
-        balances = self.list_balances("NORMAL")
-        for b in balances:
-            if b.get("type") == "regular":
-                return b
-        return None
+        """Retrieve real money marginal balance profile."""
+        balances = self.list_balances("REAL")
+        return balances[0] if balances else None
 
-    def list_assets(self) -> List[Dict[str, Any]]:
-        """List all tradable marginal-forex assets."""
-        if self.asset_cache:
-            return list(self.asset_cache.values())
-            
-        res = self.call_tool("list_assets", {})
-        if isinstance(res, dict) and "assets" in res:
-            for a in res["assets"]:
-                # Key by ticker without slash e.g. EURUSD and with slash EUR/USD
-                clean_name = a.get("name", "").replace("/", "").upper()
-                self.asset_cache[clean_name] = a
-                self.asset_cache[a.get("name", "").upper()] = a
-                self.asset_cache[str(a.get("asset_id"))] = a
-            return res["assets"]
-        return []
+    def get_training_balance(self) -> Optional[Dict[str, Any]]:
+        """Retrieve training practice marginal balance profile."""
+        balances = self.list_balances("TRAINING")
+        return balances[0] if balances else None
+
+    def list_assets(self, endpoint: Optional[str] = None) -> List[Dict[str, Any]]:
+        """List all available tradeable assets across endpoints."""
+        target_eps = [endpoint] if endpoint else ["cfd", "forex", "crypto"]
+        all_assets = []
+        for ep in target_eps:
+            res = self.call_tool("list_assets", {}, endpoint=ep)
+            if isinstance(res, dict) and "assets" in res:
+                for a in res["assets"]:
+                    clean_name = a.get("name", "").replace("/", "").upper()
+                    self.asset_cache[clean_name] = a
+                    self.asset_cache[a.get("name", "").upper()] = a
+                    self.asset_cache[str(a.get("asset_id"))] = a
+                    all_assets.append(a)
+        return all_assets
 
     def get_asset(self, asset_name_or_id: Any) -> Optional[Dict[str, Any]]:
-        """Get asset metadata by name (e.g. 'EURUSD', 'EUR/USD') or asset_id (1)."""
+        """Get asset metadata by name or asset_id."""
         if not self.asset_cache:
             self.list_assets()
-            
+
         key = str(asset_name_or_id).replace("/", "").upper()
         if key in self.asset_cache:
             return self.asset_cache[key]
@@ -269,33 +319,29 @@ class IQForexMCPClient:
         return None
 
     def get_instruments(self, asset_id: int) -> Optional[Dict[str, Any]]:
-        """
-        Get tradable instruments, lot_size, min_quantity, quantity_step, stop_levels, and leverage profiles.
-        """
+        """Get tradable instruments, lot_size, min_quantity, stop_levels, etc."""
         if asset_id in self.instrument_cache:
             return self.instrument_cache[asset_id]
-            
-        res = self.call_tool("get_instruments", {"asset_id": asset_id})
+
+        ep = self.resolve_endpoint(asset_id=asset_id)
+        res = self.call_tool("get_instruments", {"asset_id": asset_id}, endpoint=ep)
         if isinstance(res, dict) and "instruments" in res:
             self.instrument_cache[asset_id] = res
             return res
         return None
 
     def get_candles(self, asset_id: int, size: int = 60, count: int = 100, **kwargs) -> List[Dict[str, Any]]:
-        """
-        Get historical candles directly from MCP server.
-        Candle size in seconds: 60 (1m), 120 (2m), 300 (5m), etc.
-        """
+        """Get historical candles from the appropriate server endpoint."""
         if "period" in kwargs:
             size = kwargs["period"]
-        # Map 180 (3m) which is unsupported by IQ to 120 (2m) or 60 (1m)
         if size == 180:
             size = 120
+        ep = self.resolve_endpoint(asset_id=asset_id)
         res = self.call_tool("get_candles", {
             "asset_id": asset_id,
             "size": size,
             "count": count
-        })
+        }, endpoint=ep)
         if isinstance(res, dict) and "candles" in res:
             return res["candles"] or []
         return []
@@ -303,10 +349,8 @@ class IQForexMCPClient:
     def calculate_order_size(self, asset_id: int, balance_currency: str = "USD",
                              lots: Optional[float] = None, margin: Optional[float] = None,
                              units: Optional[float] = None, leverage: int = 50) -> Dict[str, Any]:
-        """
-        Preview lots, required margin, notional, and current bid/ask prices.
-        Exactly one of lots, margin, or units must be provided.
-        """
+        """Preview lots, required margin, notional, and current prices."""
+        ep = self.resolve_endpoint(asset_id=asset_id)
         args = {
             "asset_id": asset_id,
             "balance_currency": balance_currency.upper(),
@@ -320,89 +364,29 @@ class IQForexMCPClient:
             args["units"] = units
         else:
             raise ValueError("Must provide exactly one of: lots, margin, units")
-            
-        return self.call_tool("calculate_order_size", args)
 
-    def calculate_lot_size(self, asset_id: int, entry_price: float, sl_price: float,
-                           risk_usd: float, balance_currency: str = "USD",
-                           leverage: int = 50, free_margin: float = 100.0) -> Tuple[float, Dict[str, Any]]:
-        """
-        Calculate the exact lot size mathematically based on account risk in USD.
-        Ensures the loss if SL is hit is bounded by risk_usd.
-        Respects min_quantity, quantity_step, and available free margin.
-        """
-        inst_info = self.get_instruments(asset_id)
-        if not inst_info or not inst_info.get("instruments"):
-            logger.error(f"Cannot get instruments for asset_id {asset_id}")
-            return 0.0, {}
-            
-        inst = inst_info["instruments"][0]
-        lot_size = inst.get("lot_size", 100000)
-        min_qty = inst.get("min_quantity", 0.001)
-        qty_step = inst.get("quantity_step", 0.001)
-        
-        # Risk distance in quote currency
-        risk_dist = abs(entry_price - sl_price)
-        if risk_dist <= 0:
-            return 0.0, {}
-            
-        # Preview 1 min-lot to get the exact quote-to-balance exchange conversion
-        preview = self.calculate_order_size(asset_id=asset_id, balance_currency=balance_currency,
-                                            lots=min_qty, leverage=leverage)
-        if "error" in preview:
-            logger.warning(f"Preview failed for asset {asset_id}: {preview['error']}")
-            return min_qty, {}
-            
-        # In Forex: Loss = lots * lot_size * risk_dist (for USD quote currency)
-        # For non-USD quote currency, calculate conversion factor from preview
-        notional_per_lot = (preview.get("notional", entry_price * lot_size * min_qty) / min_qty)
-        loss_per_lot = (lot_size * risk_dist) if "USD" in balance_currency else (risk_dist * notional_per_lot / entry_price)
-        
-        if loss_per_lot <= 0:
-            calculated_lots = min_qty
-        else:
-            raw_lots = risk_usd / loss_per_lot
-            # Step down to nearest quantity_step
-            steps = math.floor(raw_lots / qty_step)
-            calculated_lots = max(min_qty, steps * qty_step)
-            
-        # Double check required margin
-        margin_check = self.calculate_order_size(asset_id=asset_id, balance_currency=balance_currency,
-                                                lots=calculated_lots, leverage=leverage)
-        req_margin = margin_check.get("margin", 0.0)
-        while req_margin > (free_margin * 0.5) and calculated_lots > min_qty:
-            calculated_lots = round(calculated_lots - qty_step, 6)
-            margin_check = self.calculate_order_size(asset_id=asset_id, balance_currency=balance_currency,
-                                                    lots=calculated_lots, leverage=leverage)
-            req_margin = margin_check.get("margin", 0.0)
-            
-        return calculated_lots, margin_check
+        return self.call_tool("calculate_order_size", args, endpoint=ep)
 
     def place_market_order(self, side: str, balance_id: int, instrument_id: str, asset_id: int,
                            lots: float, leverage: int = 50, stop_loss: Optional[float] = None,
                            take_profit: Optional[float] = None, is_margin_isolated: bool = True,
                            keep_position_open: bool = False) -> Dict[str, Any]:
-        """
-        Place an immediate market order on IQ Option Marginal Forex engine.
-        """
-        # Dynamically resolve active instrument_id and enforce min_quantity
-        active_inst_id = instrument_id
-        try:
-            inst_data = self.get_instruments(asset_id)
-            if inst_data and isinstance(inst_data, dict) and "instruments" in inst_data:
-                for inst in inst_data["instruments"]:
-                    if isinstance(inst, dict):
-                        if inst.get("id"):
-                            active_inst_id = inst["id"]
-                        min_q = float(inst.get("min_quantity", 0.0))
-                        if min_q > 0 and lots < min_q:
-                            logger.warning(f"⚠️ [MCP Forex] Adjusted lots from {lots} to instrument minimum quantity {min_q} for asset {asset_id}")
-                            lots = min_q
-                        break
-        except Exception as e:
-            logger.debug(f"[MCP Forex] Error inspecting instrument for asset {asset_id}: {e}")
+        """Place an immediate market order on the appropriate marginal engine."""
+        ep = self.resolve_endpoint(asset_id=asset_id, instrument_id=instrument_id)
 
-        # Dynamically resolve balance_id if not provided
+        # Enforce asset-specific constraints
+        if asset_id == 1487:  # Silver (XAGUSD)
+            lots = max(10.0, float(lots))
+            instrument_id = "mcfd.1487"
+        elif asset_id == 816:  # Bitcoin (BTCUSD)
+            leverage = min(leverage, 20)
+            lots = max(0.001, float(lots))
+            instrument_id = "mcrpt.816"
+        elif asset_id == 1:   # EURUSD
+            instrument_id = "mf.1"
+        elif asset_id == 5:   # GBPUSD
+            instrument_id = "mf.5"
+
         active_bal_id = balance_id
         if not active_bal_id:
             try:
@@ -415,7 +399,7 @@ class IQForexMCPClient:
         args = {
             "side": side.lower(),
             "balance_id": active_bal_id,
-            "instrument_id": active_inst_id,
+            "instrument_id": instrument_id,
             "asset_id": asset_id,
             "lots": lots,
             "leverage": leverage,
@@ -427,86 +411,118 @@ class IQForexMCPClient:
         if take_profit is not None and take_profit > 0:
             args["take_profit"] = round(float(take_profit), 5)
 
-        logger.info(f"🚀 [MCP Forex] Placing {side.upper()} order: Asset={asset_id} ({active_inst_id}), Lots={lots}, Lev={leverage}x, SL={stop_loss}, TP={take_profit}")
-        res = self.call_tool("place_market_order", args)
+        logger.info(f"🚀 [MCP {ep.upper()}] Placing {side.upper()} order: Asset={asset_id} ({instrument_id}), Lots={lots}, Lev={leverage}x, SL={stop_loss}, TP={take_profit}")
+        res = self.call_tool("place_market_order", args, endpoint=ep)
         if ("error" in res or res.get("isError")) and ("stop_loss" in args or "take_profit" in args):
             err_str = str(res.get("error", res))
             if "not_filled" in err_str or "stop_levels" in err_str:
-                logger.warning(f"⚠️ [MCP Forex] Market order fill failed due to SL/TP constraints ({err_str}). Retrying immediately without initial SL/TP for guaranteed market fill...")
+                logger.warning(f"⚠️ [MCP {ep.upper()}] Market order fill failed due to SL/TP constraints ({err_str}). Retrying immediately without initial SL/TP for guaranteed market fill...")
                 clean_args = {k: v for k, v in args.items() if k not in ("stop_loss", "take_profit")}
-                retry_res = self.call_tool("place_market_order", clean_args)
+                retry_res = self.call_tool("place_market_order", clean_args, endpoint=ep)
                 return retry_res
         return res
 
     def change_position_stop_loss(self, position_id: int, level: float, balance_id: Optional[int] = None) -> Dict[str, Any]:
-        """
-        Move or set the Stop Loss trigger price for an open position.
-        Level 0 cancels the existing stop-loss.
-        If balance_id is provided, verifies that the broker backend accepted and updated the SL level.
-        """
-        logger.info(f"🔄 [MCP Forex] Updating SL on Position #{position_id} to {level:.5f}")
-        res = self.call_tool("change_position_stop_loss", {
-            "position_id": int(position_id),
-            "level": round(float(level), 5)
-        })
-        if "error" in res or res.get("isError"):
-            return res
-
-        # Verify against list_positions to detect silent broker drops
-        if balance_id:
+        """Move or set the Stop Loss trigger price for an open position across endpoints."""
+        logger.info(f"🔄 [MCP] Updating SL on Position #{position_id} to {level:.5f}")
+        for ep in ("cfd", "forex", "crypto"):
             try:
-                positions = self.list_positions(balance_id=balance_id)
-                pos = next((p for p in positions if (p.get("position_id") or p.get("id")) == position_id), None)
-                if pos:
-                    actual_sl = pos.get("stop_lose_price")
-                    if level > 0 and (actual_sl is None or abs(float(actual_sl) - float(level)) > 0.15):
-                        logger.warning(f"⚠️ [MCP Forex] Broker silently dropped SL update on #{position_id}! Target was {level}, but broker position still has {actual_sl}")
-                        return {"error": {"message": f"Broker silently dropped SL update (still at {actual_sl})"}}
-            except Exception as e:
-                logger.warning(f"[MCP Forex] Error verifying SL update on #{position_id}: {e}")
-        return res
+                res = self.call_tool("change_position_stop_loss", {
+                    "position_id": int(position_id),
+                    "level": round(float(level), 5)
+                }, endpoint=ep)
+                if res and not res.get("error") and not res.get("isError"):
+                    return res
+            except Exception:
+                pass
+        return {"error": {"message": f"Failed to update SL for position {position_id}"}}
 
     def change_position_take_profit(self, position_id: int, level: float) -> Dict[str, Any]:
-        """
-        Move or set the Take Profit trigger price for an open position.
-        Level 0 cancels the existing take-profit.
-        """
-        logger.info(f"🎯 [MCP Forex] Updating TP on Position #{position_id} to {level:.5f}")
-        return self.call_tool("change_position_take_profit", {
-            "position_id": int(position_id),
-            "level": round(float(level), 5)
-        })
+        """Move or set the Take Profit trigger price for an open position across endpoints."""
+        logger.info(f"🎯 [MCP] Updating TP on Position #{position_id} to {level:.5f}")
+        for ep in ("cfd", "forex", "crypto"):
+            try:
+                res = self.call_tool("change_position_take_profit", {
+                    "position_id": int(position_id),
+                    "level": round(float(level), 5)
+                }, endpoint=ep)
+                if res and not res.get("error") and not res.get("isError"):
+                    return res
+            except Exception:
+                pass
+        return {"error": {"message": f"Failed to update TP for position {position_id}"}}
 
-    def list_positions(self, balance_id: int, skip: int = 0, limit: int = 50) -> List[Dict[str, Any]]:
-        """List currently open marginal-forex positions for a balance."""
-        res = self.call_tool("list_positions", {
-            "balance_id": balance_id,
-            "skip": skip,
-            "limit": limit
-        })
-        if isinstance(res, dict) and "positions" in res:
-            return res["positions"] or []
-        return []
+    def list_positions(self, balance_id: Optional[int] = None, skip: int = 0, limit: int = 50) -> List[Dict[str, Any]]:
+        """List currently open marginal positions across all engines (CFD, Forex, Crypto)."""
+        active_bal_id = balance_id
+        if not active_bal_id:
+            try:
+                bal = self.get_training_balance() or self.get_real_balance()
+                if bal and bal.get("balance_id"):
+                    active_bal_id = bal["balance_id"]
+            except Exception:
+                pass
+
+        all_positions = []
+        seen = set()
+        for ep in ("cfd", "forex", "crypto"):
+            try:
+                args = {"skip": skip, "limit": limit}
+                if active_bal_id:
+                    args["balance_id"] = active_bal_id
+                res = self.call_tool("list_positions", args, endpoint=ep)
+                if isinstance(res, dict) and "positions" in res:
+                    for p in (res["positions"] or []):
+                        pid = p.get("position_id") or p.get("id")
+                        if pid and pid not in seen:
+                            seen.add(pid)
+                            p["_endpoint"] = ep
+                            all_positions.append(p)
+            except Exception as e:
+                logger.debug(f"Error listing positions on {ep}: {e}")
+        return all_positions
 
     def get_orders(self, balance_id: int) -> List[Dict[str, Any]]:
-        """List active pending orders for a balance."""
-        res = self.call_tool("get_orders", {"balance_id": balance_id})
-        if isinstance(res, dict) and "orders" in res:
-            return res["orders"] or []
-        return []
+        """List active pending orders across endpoints."""
+        all_orders = []
+        for ep in ("cfd", "forex", "crypto"):
+            try:
+                res = self.call_tool("get_orders", {"balance_id": balance_id}, endpoint=ep)
+                if isinstance(res, dict) and "orders" in res:
+                    all_orders.extend(res["orders"] or [])
+            except Exception:
+                pass
+        return all_orders
 
     def get_trade_history(self, balance_id: int, skip: int = 0, limit: int = 50) -> List[Dict[str, Any]]:
-        """List closed marginal-forex positions (trade history) with realized PnL and close reasons."""
-        res = self.call_tool("get_trade_history", {
-            "balance_id": balance_id,
-            "skip": skip,
-            "limit": limit
-        })
-        if isinstance(res, dict) and "history" in res:
-            return res["history"] or []
-        return []
+        """List closed marginal positions across all engines."""
+        all_history = []
+        seen = set()
+        for ep in ("cfd", "forex", "crypto"):
+            try:
+                res = self.call_tool("get_trade_history", {
+                    "balance_id": balance_id,
+                    "skip": skip,
+                    "limit": limit
+                }, endpoint=ep)
+                if isinstance(res, dict) and "history" in res:
+                    for h in (res["history"] or []):
+                        hid = h.get("position_id") or h.get("id")
+                        if hid and hid not in seen:
+                            seen.add(hid)
+                            all_history.append(h)
+            except Exception:
+                pass
+        return all_history
 
     def close_position(self, position_id: int) -> Dict[str, Any]:
-        """Close an open marginal-forex position by position_id."""
+        """Close an open marginal position by trying endpoints until accepted."""
         logger.info(f"🔒 [MCP Forex] Closing position #{position_id}")
-        return self.call_tool("close_position", {"position_id": int(position_id)})
+        for ep in ("cfd", "forex", "crypto"):
+            try:
+                res = self.call_tool("close_position", {"position_id": int(position_id)}, endpoint=ep)
+                if res and not res.get("error") and not res.get("isError"):
+                    return res
+            except Exception:
+                pass
+        return self.call_tool("close_position", {"position_id": int(position_id)}, endpoint="cfd")

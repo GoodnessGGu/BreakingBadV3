@@ -49,7 +49,7 @@ INSTRUMENT_PROFILES = {
         "symbol": "BTCUSD",
         "name": "Bitcoin (BTC/USD)",
         "asset_id": 816,
-        "instrument_id": "mcfd.816",
+        "instrument_id": "mcrpt.816",
         "sl_buffer": 50.0,
         "disp_threshold": 160.0,
         "min_fvg_gap": 20.0,
@@ -61,7 +61,7 @@ INSTRUMENT_PROFILES = {
         "symbol": "EURUSD",
         "name": "EUR/USD",
         "asset_id": 1,
-        "instrument_id": "mcfd.1",
+        "instrument_id": "mf.1",
         "sl_buffer": 0.0003,
         "disp_threshold": 0.0004,
         "min_fvg_gap": 0.0001,
@@ -73,7 +73,7 @@ INSTRUMENT_PROFILES = {
         "symbol": "GBPUSD",
         "name": "GBP/USD",
         "asset_id": 5,
-        "instrument_id": "mcfd.5",
+        "instrument_id": "mf.5",
         "sl_buffer": 0.0004,
         "disp_threshold": 0.0005,
         "min_fvg_gap": 0.0001,
@@ -85,7 +85,7 @@ INSTRUMENT_PROFILES = {
         "symbol": "USDJPY",
         "name": "USD/JPY",
         "asset_id": 6,
-        "instrument_id": "mcfd.6",
+        "instrument_id": "mf.6",
         "sl_buffer": 0.04,
         "disp_threshold": 0.05,
         "min_fvg_gap": 0.01,
@@ -97,7 +97,7 @@ INSTRUMENT_PROFILES = {
         "symbol": "AUDUSD",
         "name": "AUD/USD",
         "asset_id": 99,
-        "instrument_id": "mcfd.99",
+        "instrument_id": "mf.99",
         "sl_buffer": 0.0003,
         "disp_threshold": 0.0004,
         "min_fvg_gap": 0.0001,
@@ -110,9 +110,9 @@ INSTRUMENT_PROFILES = {
         "name": "Silver (XAG/USD)",
         "asset_id": 1487,
         "instrument_id": "mcfd.1487",
-        "sl_buffer": 0.08,
-        "disp_threshold": 0.10,
-        "min_fvg_gap": 0.04,
+        "sl_buffer": 0.25,
+        "disp_threshold": 0.15,
+        "min_fvg_gap": 0.06,
         "body_ratio_req": 0.50,
         "default_lots": 10.0,
         "min_lots": 10.0,
@@ -536,6 +536,9 @@ class ICTStrategyEngine:
             risk_dist = abs(exec_px - sl)
             if risk_dist < (min_fvg_gap * 0.5):
                 return
+            if symbol == "XAGUSD" and risk_dist < 0.25:
+                risk_dist = 0.25
+                sl = round(exec_px - risk_dist if side == "BUY" else exec_px + risk_dist, digits)
 
             trade_lots = profile.get("default_lots") or self.lots
             if symbol == "XAGUSD":

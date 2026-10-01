@@ -3,7 +3,7 @@ bot/keyboards.py - Interactive Keyboards for BreakingBad V3 Bot Controller
 """
 
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 
 def persistent_reply_keyboard() -> ReplyKeyboardMarkup:

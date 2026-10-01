@@ -202,6 +202,8 @@ class TelegramTradingBot:
         # ICT Engine
         ict_st = self.ict_engine.get_status()
         ict_icon = "🟢" if ict_st["enabled"] else "🔴"
+        hybrid_on = ict_st.get("use_hybrid_trailing", True)
+        hybrid_icon = "🟢" if hybrid_on else "🔴"
         pause_tag = " [PAUSED]" if self.is_paused else ""
 
         # CRT Engine
@@ -224,6 +226,7 @@ class TelegramTradingBot:
             f"📡 *Signal Copiers*:\n" + "\n".join(copier_lines) + "\n\n"
             f"🤖 *Autonomous ICT Engine (Metals)*:\n"
             f"  • {ict_icon} Master Switch: `{'ON' if ict_st['enabled'] else 'OFF'}`\n"
+            f"  • {hybrid_icon} Hybrid Profit Lock: `{'ON' if hybrid_on else 'OFF'}`\n"
             f"  • 🎯 Active Assets: `{', '.join(ict_st['enabled_symbols']) if ict_st['enabled_symbols'] else 'None'}`\n"
             f"  • 📊 Lots: `{ict_st['lots']:.2f}` | Lev: `{ict_st['leverage']}x`\n"
             f"  • ⚖️ Risk/Reward: `1:{ict_st['rr_ratio']:.1f}`\n\n"
@@ -237,6 +240,51 @@ class TelegramTradingBot:
             f"🕒 Time: `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`"
         )
         return text
+
+    def build_ict_dashboard(self) -> str:
+        """Renders real-time control view for the Autonomous ICT Strategy Engine."""
+        ict_st = self.ict_engine.get_status()
+        enabled = ict_st.get("enabled", False)
+        hybrid_on = ict_st.get("use_hybrid_trailing", True)
+        icon = "🟢" if enabled else "🔴"
+        
+        active_syms = ", ".join(ict_st.get("enabled_symbols", [])) or "None"
+        lots = ict_st.get("lots", 1.0)
+        lev = ict_st.get("leverage", 100)
+        rr = ict_st.get("rr_ratio", 2.2)
+        
+        active_trades = ict_st.get("active_trades", {})
+        trade_lines = []
+        if active_trades:
+            for s, t in active_trades.items():
+                if t:
+                    side = t.get("side", "")
+                    entry = t.get("entry_price", 0.0)
+                    sl = t.get("current_sl", 0.0)
+                    tp = t.get("tp", 0.0)
+                    stg = t.get("trailing_stage", 0)
+                    trade_lines.append(f"  • *{s}* ({side}) @ {entry} | SL: {sl} | TP: {tp} | Stage: {stg}")
+        
+        trades_section = ("\n📊 *Active Positions*:\n" + "\n".join(trade_lines)) if trade_lines else "\n📊 *Active Positions*: None"
+
+        trailing_mode = (
+            "🟢 *Hybrid Trailing: ON*\n"
+            "   _(Locks profit at absolute pip milestones OR R-multiples: e.g. +80p locked @ +180p run-up on Gold)_"
+            if hybrid_on else
+            "🔴 *Hybrid Trailing: OFF*\n"
+            "   _(Pure classic R-multiple scaling: 0.5R, 1.0R, 1.5R, 2.0R only)_"
+        )
+
+        return (
+            f"🤖 *Autonomous Gold & Forex ICT Strategy Engine*\n\n"
+            f"• Master Switch: {icon} `{'ON' if enabled else 'OFF'}`\n"
+            f"• Active Assets: `{active_syms}`\n"
+            f"• Lots: `{lots:.2f}` | Leverage: `{lev}x` | Target RR: `1:{rr:.1f}`\n\n"
+            f"🛡️ *Profit Protection Mode*:\n"
+            f"{trailing_mode}\n"
+            f"{trades_section}\n\n"
+            f"Tap buttons below to toggle assets, settings, or trailing mode:"
+        )
 
     def build_mission_text(self) -> str:
         """Renders the comprehensive, beautifully styled Mission and Strategy Description card."""
@@ -1109,7 +1157,7 @@ class TelegramTradingBot:
             return
         ict_st = self.ict_engine.get_status()
         await update.message.reply_text(
-            "🤖 *Autonomous Gold & Forex ICT Strategy Engine*\nAdjust instrument, lot size, leverage, and RR ratio:",
+            self.build_ict_dashboard(),
             reply_markup=ict_menu_keyboard(ict_st),
             parse_mode="Markdown"
         )
@@ -1266,7 +1314,7 @@ class TelegramTradingBot:
         elif data == "btn_ict_menu":
             ict_st = self.ict_engine.get_status()
             await query.edit_message_text(
-                "🤖 *Autonomous Gold & Forex ICT Strategy Engine*\nConfigure active instrument and strategy settings:",
+                self.build_ict_dashboard(),
                 reply_markup=ict_menu_keyboard(ict_st),
                 parse_mode="Markdown"
             )
@@ -1275,7 +1323,18 @@ class TelegramTradingBot:
             self.ict_engine.toggle()
             ict_st = self.ict_engine.get_status()
             await query.edit_message_text(
-                "🤖 *Autonomous Gold & Forex ICT Strategy Engine*\nConfigure active instrument and strategy settings:",
+                self.build_ict_dashboard(),
+                reply_markup=ict_menu_keyboard(ict_st),
+                parse_mode="Markdown"
+            )
+
+        elif data == "toggle_ict_hybrid_trail":
+            is_on = self.ict_engine.toggle_hybrid_trailing()
+            ict_st = self.ict_engine.get_status()
+            status_desc = "ON (Locks profit @ pip milestones + R)" if is_on else "OFF (Pure R-Multiples)"
+            await query.answer(f"Hybrid Pip Trailing: {status_desc}")
+            await query.edit_message_text(
+                self.build_ict_dashboard(),
                 reply_markup=ict_menu_keyboard(ict_st),
                 parse_mode="Markdown"
             )
@@ -1285,7 +1344,7 @@ class TelegramTradingBot:
             self.ict_engine.toggle_symbol(sym_raw)
             ict_st = self.ict_engine.get_status()
             await query.edit_message_text(
-                "🤖 *Autonomous Multi-Asset ICT Strategy Engine*\nToggle assets ON/OFF or adjust execution settings:",
+                self.build_ict_dashboard(),
                 reply_markup=ict_menu_keyboard(ict_st),
                 parse_mode="Markdown"
             )
@@ -1295,7 +1354,7 @@ class TelegramTradingBot:
             self.ict_engine.set_lots(new_l)
             ict_st = self.ict_engine.get_status()
             await query.edit_message_text(
-                "🤖 *Autonomous Gold & Forex ICT Strategy Engine*\nAdjust instrument, lot size, leverage, and RR ratio:",
+                self.build_ict_dashboard(),
                 reply_markup=ict_menu_keyboard(ict_st),
                 parse_mode="Markdown"
             )
@@ -1305,7 +1364,7 @@ class TelegramTradingBot:
             self.ict_engine.set_lots(new_l)
             ict_st = self.ict_engine.get_status()
             await query.edit_message_text(
-                "🤖 *Autonomous Gold & Forex ICT Strategy Engine*\nAdjust instrument, lot size, leverage, and RR ratio:",
+                self.build_ict_dashboard(),
                 reply_markup=ict_menu_keyboard(ict_st),
                 parse_mode="Markdown"
             )
@@ -1315,7 +1374,7 @@ class TelegramTradingBot:
             self.ict_engine.set_lots(val)
             ict_st = self.ict_engine.get_status()
             await query.edit_message_text(
-                "🤖 *Autonomous Gold & Forex ICT Strategy Engine*\nAdjust instrument, lot size, leverage, and RR ratio:",
+                self.build_ict_dashboard(),
                 reply_markup=ict_menu_keyboard(ict_st),
                 parse_mode="Markdown"
             )
@@ -1325,7 +1384,7 @@ class TelegramTradingBot:
             self.ict_engine.set_leverage(val)
             ict_st = self.ict_engine.get_status()
             await query.edit_message_text(
-                "🤖 *Autonomous Gold & Forex ICT Strategy Engine*\nAdjust instrument, lot size, leverage, and RR ratio:",
+                self.build_ict_dashboard(),
                 reply_markup=ict_menu_keyboard(ict_st),
                 parse_mode="Markdown"
             )
@@ -1335,7 +1394,7 @@ class TelegramTradingBot:
             self.ict_engine.rr_ratio = rr
             ict_st = self.ict_engine.get_status()
             await query.edit_message_text(
-                f"🤖 Risk/Reward ratio set to: *1:{rr:.1f}*",
+                self.build_ict_dashboard(),
                 reply_markup=ict_menu_keyboard(ict_st),
                 parse_mode="Markdown"
             )

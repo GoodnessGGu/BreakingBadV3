@@ -120,16 +120,91 @@ INSTRUMENT_PROFILES = {
     }
 }
 
+HYBRID_PIP_THRESHOLDS = {
+    "XAUUSD": {
+        "stage1_pips": 80.0,   # Cut risk 50%
+        "stage2_pips": 120.0,  # Move to Breakeven (+buffer)
+        "stage3_pips": 180.0,  # Lock guaranteed profit
+        "stage3_lock": 80.0,   # +80 pips ($8.00/oz) guaranteed green profit
+        "stage4_pips": 250.0,  # Lock deeper profit
+        "stage4_lock": 150.0,  # +150 pips ($15.00/oz) guaranteed
+        "stage5_trail_trigger": 300.0, # Dynamic trailing stop
+        "stage5_trail_distance": 50.0   # Trail 50 pips ($5.00/oz) behind market price
+    },
+    "XAGUSD": {
+        "stage1_pips": 60.0,
+        "stage2_pips": 100.0,
+        "stage3_pips": 150.0,
+        "stage3_lock": 60.0,
+        "stage4_pips": 220.0,
+        "stage4_lock": 120.0,
+        "stage5_trail_trigger": 280.0,
+        "stage5_trail_distance": 50.0
+    },
+    "EURUSD": {
+        "stage1_pips": 15.0,
+        "stage2_pips": 25.0,
+        "stage3_pips": 40.0,
+        "stage3_lock": 15.0,
+        "stage4_pips": 60.0,
+        "stage4_lock": 30.0,
+        "stage5_trail_trigger": 80.0,
+        "stage5_trail_distance": 20.0
+    },
+    "GBPUSD": {
+        "stage1_pips": 18.0,
+        "stage2_pips": 30.0,
+        "stage3_pips": 45.0,
+        "stage3_lock": 20.0,
+        "stage4_pips": 70.0,
+        "stage4_lock": 35.0,
+        "stage5_trail_trigger": 90.0,
+        "stage5_trail_distance": 25.0
+    },
+    "USDJPY": {
+        "stage1_pips": 20.0,
+        "stage2_pips": 35.0,
+        "stage3_pips": 50.0,
+        "stage3_lock": 20.0,
+        "stage4_pips": 80.0,
+        "stage4_lock": 40.0,
+        "stage5_trail_trigger": 100.0,
+        "stage5_trail_distance": 25.0
+    },
+    "AUDUSD": {
+        "stage1_pips": 15.0,
+        "stage2_pips": 25.0,
+        "stage3_pips": 40.0,
+        "stage3_lock": 15.0,
+        "stage4_pips": 60.0,
+        "stage4_lock": 30.0,
+        "stage5_trail_trigger": 80.0,
+        "stage5_trail_distance": 20.0
+    },
+    "BTCUSD": {
+        "stage1_pips": 5000.0,
+        "stage2_pips": 10000.0,
+        "stage3_pips": 16000.0,
+        "stage3_lock": 7000.0,
+        "stage4_pips": 24000.0,
+        "stage4_lock": 14000.0,
+        "stage5_trail_trigger": 30000.0,
+        "stage5_trail_distance": 6000.0
+    }
+}
+
 class ICTStrategyEngine:
     def __init__(self, mcp_client: IQForexMCPClient, symbol: Optional[str] = None,
                  account_type: str = "training", lots: float = 1.0,
-                 leverage: int = 100, rr_ratio: float = 2.2, enabled: bool = True):
+                 leverage: int = 100, rr_ratio: float = 2.2, enabled: bool = True,
+                 use_hybrid_trailing: bool = True):
         self.mcp = mcp_client
         self.account_type = account_type.lower()
         self.lots = lots
         self.leverage = leverage
         self.rr_ratio = rr_ratio
         self.is_enabled = enabled
+        self.use_hybrid_trailing = use_hybrid_trailing
 
         # Multi-asset state: Defaults to Gold (XAUUSD) and Silver (XAGUSD) active
         self.enabled_symbols: Set[str] = {"XAUUSD", "XAGUSD"}
@@ -236,6 +311,15 @@ class ICTStrategyEngine:
         self.is_enabled = not self.is_enabled
         logger.info(f"🔄 [ICTEngine] Toggled -> {'ENABLED' if self.is_enabled else 'DISABLED'}")
         return self.is_enabled
+
+    def toggle_hybrid_trailing(self) -> bool:
+        self.use_hybrid_trailing = not self.use_hybrid_trailing
+        logger.info(f"🔄 [ICTEngine] Hybrid Trailing -> {'ENABLED' if self.use_hybrid_trailing else 'DISABLED'}")
+        return self.use_hybrid_trailing
+
+    def set_hybrid_trailing(self, enabled: bool):
+        self.use_hybrid_trailing = enabled
+        logger.info(f"🔄 [ICTEngine] Hybrid Trailing set to: {'ENABLED' if self.use_hybrid_trailing else 'DISABLED'}")
 
     def get_market_price(self, symbol: str) -> Dict[str, float]:
         profile = INSTRUMENT_PROFILES.get(symbol)
@@ -570,7 +654,7 @@ class ICTStrategyEngine:
             self.active_trades.pop(symbol, None)
             return
 
-        # Multi-stage R-Multiple Trailing Logic
+        # Multi-stage Trailing Logic (R-Multiples + Hybrid Pip Milestones)
         mid = cur_prices.get("mid", 0.0)
         if mid <= 0:
             return
@@ -586,22 +670,28 @@ class ICTStrategyEngine:
         r_mult = gain / risk_dist
         stage = trade.get("trailing_stage", 0)
 
-        # Stage 1: +0.5R -> Cut initial risk by 50%
-        if r_mult >= 0.5 and stage < 1:
+        pip_multiplier = 10 ** (digits - 1)
+        gain_pips = gain * pip_multiplier
+        pip_cfg = HYBRID_PIP_THRESHOLDS.get(symbol) if self.use_hybrid_trailing else None
+
+        # Stage 1: +0.5R or pip threshold -> Cut initial risk by 50%
+        trigger_stage1 = (r_mult >= 0.5) or (pip_cfg is not None and gain_pips >= pip_cfg["stage1_pips"])
+        if trigger_stage1 and stage < 1:
             half_risk_sl = round(entry - (risk_dist * 0.5) if side == "BUY" else entry + (risk_dist * 0.5), digits)
             res = self.mcp.change_position_stop_loss(position_id=pos_id, level=half_risk_sl)
             if not res.get("error"):
                 trade["current_sl"] = half_risk_sl
                 trade["trailing_stage"] = 1
-                logger.info(f"🛡️ [ICT +0.5R] Risk cut 50% on {symbol} #{pos_id}! SL: {half_risk_sl}")
+                logger.info(f"🛡️ [ICT Risk Defense] Risk cut 50% on {symbol} #{pos_id}! SL: {half_risk_sl} (Gain: +{gain_pips:.1f}p / +{r_mult:.2f}R)")
                 await self.notify(
-                    f"🛡️ **[ICT RISK DEFENSE +0.5R] {symbol} #{pos_id}**\n\n"
-                    f"• Side: `{side}`\n"
+                    f"🛡️ **[ICT RISK DEFENSE] {symbol} #{pos_id}**\n\n"
+                    f"• Side: `{side}` | Gain: `+{gain_pips:.1f} pips` (`+{r_mult:.2f}R`)\n"
                     f"• Risk reduced by 50% | New SL: `{half_risk_sl:.{digits}f}`"
                 )
 
-        # Stage 2: +1.0R -> Move to Breakeven (+ buffer)
-        if r_mult >= 1.0 and stage < 2:
+        # Stage 2: +1.0R or pip threshold -> Move to Breakeven (+ buffer)
+        trigger_stage2 = (r_mult >= 1.0) or (pip_cfg is not None and gain_pips >= pip_cfg["stage2_pips"])
+        if trigger_stage2 and stage < 2:
             be_buf = profile["min_fvg_gap"] * 0.5
             be_level = round(entry + be_buf if side == "BUY" else entry - be_buf, digits)
             res = self.mcp.change_position_stop_loss(position_id=pos_id, level=be_level)
@@ -609,7 +699,7 @@ class ICTStrategyEngine:
                 trade["current_sl"] = be_level
                 trade["moved_to_be"] = True
                 trade["trailing_stage"] = 2
-                logger.info(f"🛡️ [ICT +1.0R] Breakeven activated on {symbol} #{pos_id}! SL: {be_level}")
+                logger.info(f"🛡️ [ICT Breakeven] Breakeven activated on {symbol} #{pos_id}! SL: {be_level} (Gain: +{gain_pips:.1f}p / +{r_mult:.2f}R)")
                 
                 candles = self.mcp.get_candles(profile["instrument_id"], count=40)
                 chart_bytes = generate_breakeven_chart(
@@ -625,56 +715,98 @@ class ICTStrategyEngine:
                     timeframe="15M" if CANDLE_SIZE == 900 else "M1"
                 )
                 caption = (
-                    f"ICT Breakeven Locked (+1.0R) | {symbol} #{pos_id}\n\n"
+                    f"ICT Breakeven Locked | {symbol} #{pos_id}\n\n"
                     f"• Side: {'BUY' if side == 'BUY' else 'SELL'}\n"
-                    f"• Status: Risk-Free\n"
-                    f"• Breakeven SL: {be_level:.{digits}f}\n"
+                    f"• Gain: +{gain_pips:.1f} pips (+{r_mult:.2f}R)\n"
+                    f"• Status: Risk-Free (Breakeven SL: {be_level:.{digits}f})\n"
                     f"• Current Price: {mid:.{digits}f} (Target: {trade.get('tp', 0.0):.{digits}f})"
                 )
                 await self.notify_photo(chart_bytes, caption)
 
-        # Stage 3: +1.5R -> Lock in +0.75R guaranteed profit
-        if r_mult >= 1.5 and stage < 3:
-            lock_075_level = round(entry + (risk_dist * 0.75) if side == "BUY" else entry - (risk_dist * 0.75), digits)
-            res = self.mcp.change_position_stop_loss(position_id=pos_id, level=lock_075_level)
-            if not res.get("error"):
-                trade["current_sl"] = lock_075_level
-                trade["trailing_stage"] = 3
-                logger.info(f"💰 [ICT +1.5R] Locked +0.75R profit on {symbol} #{pos_id}! SL: {lock_075_level}")
-                await self.notify(
-                    f"ICT Profit Lock (+1.5R) | {symbol} #{pos_id}\n\n"
-                    f"• Side: {side}\n"
-                    f"• Secured +0.75R profit. New SL: {lock_075_level:.{digits}f}"
-                )
+        # Stage 3: +1.5R or pip threshold -> Lock in guaranteed profit
+        trigger_stage3 = (r_mult >= 1.5) or (pip_cfg is not None and gain_pips >= pip_cfg["stage3_pips"])
+        if trigger_stage3 and stage < 3:
+            if pip_cfg is not None:
+                pip_lock_dist = pip_cfg["stage3_lock"] / pip_multiplier
+                r_lock_dist = (risk_dist * 0.75) if r_mult >= 1.5 else 0.0
+                lock_dist = max(pip_lock_dist, r_lock_dist)
+            else:
+                lock_dist = risk_dist * 0.75
 
-        # Stage 4: +2.0R -> Lock in +1.25R guaranteed profit
-        if r_mult >= 2.0 and stage < 4:
-            lock_125_level = round(entry + (risk_dist * 1.25) if side == "BUY" else entry - (risk_dist * 1.25), digits)
-            res = self.mcp.change_position_stop_loss(position_id=pos_id, level=lock_125_level)
-            if not res.get("error"):
-                trade["current_sl"] = lock_125_level
-                trade["trailing_stage"] = 4
-                logger.info(f"💰 [ICT +2.0R] Locked +1.25R profit on {symbol} #{pos_id}! SL: {lock_125_level}")
-                await self.notify(
-                    f"ICT Profit Lock (+2.0R) | {symbol} #{pos_id}\n\n"
-                    f"• Side: {side}\n"
-                    f"• Secured +1.25R profit. New SL: {lock_125_level:.{digits}f}"
-                )
-
-        # Stage 5: +2.5R+ -> Dynamic Trailing Stop (Ratchets 0.75R behind market price)
-        if r_mult >= 2.5:
-            trail_sl = round(mid - (risk_dist * 0.75) if side == "BUY" else mid + (risk_dist * 0.75), digits)
+            lock_075_level = round(entry + lock_dist if side == "BUY" else entry - lock_dist, digits)
             current_sl = trade.get("current_sl", initial_sl)
-            should_update = (side == "BUY" and trail_sl > current_sl + (profile["min_fvg_gap"] * 0.2)) or \
-                            (side == "SELL" and trail_sl < current_sl - (profile["min_fvg_gap"] * 0.2))
+            is_improvement = (side == "BUY" and lock_075_level > current_sl) or (side == "SELL" and lock_075_level < current_sl)
+
+            if is_improvement:
+                res = self.mcp.change_position_stop_loss(position_id=pos_id, level=lock_075_level)
+                if not res.get("error"):
+                    trade["current_sl"] = lock_075_level
+                    trade["trailing_stage"] = 3
+                    locked_pips = lock_dist * pip_multiplier
+                    logger.info(f"💰 [ICT Profit Lock Stage 3] Locked +{locked_pips:.1f} pips profit on {symbol} #{pos_id}! SL: {lock_075_level}")
+                    await self.notify(
+                        f"💰 **ICT Profit Lock (Stage 3) | {symbol} #{pos_id}**\n\n"
+                        f"• Side: `{side}` | Gain: `+{gain_pips:.1f} pips` (`+{r_mult:.2f}R`)\n"
+                        f"• Secured guaranteed green profit: `+{locked_pips:.1f} pips`\n"
+                        f"• New Protected SL: `{lock_075_level:.{digits}f}`"
+                    )
+            else:
+                trade["trailing_stage"] = 3
+
+        # Stage 4: +2.0R or pip threshold -> Lock in deeper guaranteed profit
+        trigger_stage4 = (r_mult >= 2.0) or (pip_cfg is not None and gain_pips >= pip_cfg["stage4_pips"])
+        if trigger_stage4 and stage < 4:
+            if pip_cfg is not None:
+                pip_lock_dist = pip_cfg["stage4_lock"] / pip_multiplier
+                r_lock_dist = (risk_dist * 1.25) if r_mult >= 2.0 else 0.0
+                lock_dist = max(pip_lock_dist, r_lock_dist)
+            else:
+                lock_dist = risk_dist * 1.25
+
+            lock_125_level = round(entry + lock_dist if side == "BUY" else entry - lock_dist, digits)
+            current_sl = trade.get("current_sl", initial_sl)
+            is_improvement = (side == "BUY" and lock_125_level > current_sl) or (side == "SELL" and lock_125_level < current_sl)
+
+            if is_improvement:
+                res = self.mcp.change_position_stop_loss(position_id=pos_id, level=lock_125_level)
+                if not res.get("error"):
+                    trade["current_sl"] = lock_125_level
+                    trade["trailing_stage"] = 4
+                    locked_pips = lock_dist * pip_multiplier
+                    logger.info(f"💰 [ICT Profit Lock Stage 4] Locked +{locked_pips:.1f} pips profit on {symbol} #{pos_id}! SL: {lock_125_level}")
+                    await self.notify(
+                        f"💰 **ICT Profit Lock (Stage 4) | {symbol} #{pos_id}**\n\n"
+                        f"• Side: `{side}` | Gain: `+{gain_pips:.1f} pips` (`+{r_mult:.2f}R`)\n"
+                        f"• Secured deep green profit: `+{locked_pips:.1f} pips`\n"
+                        f"• New Protected SL: `{lock_125_level:.{digits}f}`"
+                    )
+            else:
+                trade["trailing_stage"] = 4
+
+        # Stage 5: +2.5R+ or pip threshold -> Dynamic Trailing Stop (Ratchets behind market price)
+        trigger_stage5 = (r_mult >= 2.5) or (pip_cfg is not None and gain_pips >= pip_cfg["stage5_trail_trigger"])
+        if trigger_stage5:
+            if pip_cfg is not None:
+                pip_trail_dist = pip_cfg["stage5_trail_distance"] / pip_multiplier
+                trail_dist = min(risk_dist * 0.75, pip_trail_dist)
+            else:
+                trail_dist = risk_dist * 0.75
+
+            trail_sl = round(mid - trail_dist if side == "BUY" else mid + trail_dist, digits)
+            current_sl = trade.get("current_sl", initial_sl)
+            step_buf = profile["min_fvg_gap"] * 0.2
+            should_update = (side == "BUY" and trail_sl > current_sl + step_buf) or \
+                            (side == "SELL" and trail_sl < current_sl - step_buf)
             if should_update:
                 res = self.mcp.change_position_stop_loss(position_id=pos_id, level=trail_sl)
                 if not res.get("error"):
                     trade["current_sl"] = trail_sl
-                    logger.info(f"🚀 [ICT Trailing 0.75R] Ratchet SL on {symbol} #{pos_id}! SL: {trail_sl}")
+                    trade["trailing_stage"] = 5
+                    logger.info(f"🚀 [ICT Dynamic Trailing] Ratchet SL on {symbol} #{pos_id}! SL: {trail_sl} (trailing {trail_dist * pip_multiplier:.1f} pips behind)")
                     await self.notify(
-                        f"ICT Dynamic Trailing | {symbol} #{pos_id}\n\n"
-                        f"• SL ratcheted to: {trail_sl:.{digits}f} (Market: {mid:.{digits}f})"
+                        f"🚀 **ICT Dynamic Trailing | {symbol} #{pos_id}**\n\n"
+                        f"• Side: `{side}` | Current Price: `{mid:.{digits}f}`\n"
+                        f"• SL ratcheted to: `{trail_sl:.{digits}f}` (Trailing {trail_dist * pip_multiplier:.1f} pips behind market)"
                     )
 
     async def _log_trade_closure(self, symbol: str, pos_id: int):
@@ -778,6 +910,7 @@ class ICTStrategyEngine:
     def get_status(self) -> Dict[str, Any]:
         return {
             "enabled": self.is_enabled,
+            "use_hybrid_trailing": self.use_hybrid_trailing,
             "enabled_symbols": list(self.enabled_symbols),
             "symbol": ", ".join(self.enabled_symbols) if self.enabled_symbols else "None",
             "name": f"Multi-Asset ({len(self.enabled_symbols)} Active)",

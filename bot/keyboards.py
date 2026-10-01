@@ -99,6 +99,9 @@ def ict_menu_keyboard(ict_status: Dict[str, Any]) -> InlineKeyboardMarkup:
     enabled = ict_status.get("enabled", False)
     icon = "🟢" if enabled else "🔴"
     status_txt = "ON" if enabled else "OFF"
+    hybrid_on = ict_status.get("use_hybrid_trailing", True)
+    hybrid_icon = "🟢" if hybrid_on else "🔴"
+    hybrid_txt = "ON" if hybrid_on else "OFF"
     active_syms = set(ict_status.get("enabled_symbols", []))
     cur_rr = ict_status.get("rr_ratio", 2.2)
     cur_lots = ict_status.get("lots", 1.0)
@@ -112,6 +115,12 @@ def ict_menu_keyboard(ict_status: Dict[str, Any]) -> InlineKeyboardMarkup:
             InlineKeyboardButton(
                 f"{icon} ICT Master Switch: {status_txt}",
                 callback_data="toggle_ict_engine"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                f"{hybrid_icon} Hybrid Profit Lock: {hybrid_txt}",
+                callback_data="toggle_ict_hybrid_trail"
             )
         ],
         [

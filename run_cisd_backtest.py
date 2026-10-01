@@ -22,11 +22,20 @@ PROFILES = {
     "XAUUSD": {
         "ticker": "GC=F",
         "name": "Gold (XAU/USD)",
-        "sl_buffer": 2.5,
-        "disp_threshold": 1.8,
+        "sl_buffer": 3.0,
+        "disp_threshold": 2.0,
         "min_fvg_gap": 0.3,
         "digits": 2,
         "pip_mult": 10.0
+    },
+    "XAGUSD": {
+        "ticker": "SI=F",
+        "name": "Silver (XAG/USD)",
+        "sl_buffer": 0.08,
+        "disp_threshold": 0.10,
+        "min_fvg_gap": 0.04,
+        "digits": 3,
+        "pip_mult": 100.0
     },
     "EURUSD": {
         "ticker": "EURUSD=X",
@@ -81,7 +90,7 @@ def fetch_asset_data(ticker: str, period: str = "60d", interval: str = "15m") ->
         print(f"Error fetching {ticker}: {e}")
         return None
 
-def backtest_cisd_ict(df: pd.DataFrame, profile: dict, rr_ratio: float = 2.0, 
+def backtest_cisd_ict(df: pd.DataFrame, profile: dict, rr_ratio: float = 2.2, 
                       use_cisd: bool = True, use_pd_filter: bool = True,
                       use_session_filter: bool = False, risk_usd: float = 50.0) -> pd.DataFrame:
     sl_buffer = profile["sl_buffer"]

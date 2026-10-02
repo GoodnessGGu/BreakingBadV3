@@ -310,6 +310,11 @@ class GoldPipsCopier(BaseCopier):
 
         logger.info(f"🛡️ [GoldPips] Monitoring position #{pos_id} for settlement.")
 
+        # If a breakeven instruction was received before position_id resolved, execute immediately
+        if pos.get("pending_be") and not pos.get("moved_to_be"):
+            logger.info(f"⚡ [GoldPips] Executing pending Breakeven for newly resolved position #{pos_id}")
+            await self.apply_breakeven()
+
         while order_id in self.open_positions:
             await asyncio.sleep(15)
             try:
@@ -418,34 +423,38 @@ class GoldPipsCopier(BaseCopier):
 
         for order_id, pos in list(self.open_positions.items()):
             pos_id = pos.get("position_id")
-            if not pos_id or pos.get("moved_to_be"):
+            if not pos_id:
+                pos["pending_be"] = True
+                continue
+            if pos.get("moved_to_be"):
                 continue
 
             side = pos["side"]
             entry = pos["entry_price"]
 
-            # Broker requires minimum stop_levels distance of 1.0 on Gold.
-            # Require at least 1.80 profit distance so SL can be set at entry +- buffer without rejection or spread chop.
-            min_broker_dist = 1.80
+            # Broker requires minimum stop_levels distance (~0.50 on Gold).
+            # Require at least 0.80 profit distance (8 pips) so SL can be set safely without rejection.
+            min_broker_dist = 0.80
             profit_dist = (mid - entry) if side == "BUY" else (entry - mid)
 
             if profit_dist < min_broker_dist:
                 if not pos.get("pending_be"):
-                    logger.info(f"⏳ [GoldPips] Position #{pos_id} profit distance (${profit_dist:.2f}) < required broker distance (${min_broker_dist:.2f}). Arming pending BE.")
+                    logger.info(f"⏳ [GoldPips] Position #{pos_id} profit distance (${profit_dist:.2f}) < required distance (${min_broker_dist:.2f}). Arming pending BE.")
                     pos["pending_be"] = True
                 continue
 
-            be_buf = 0.80
+            # +0.25 buffer covers broker spread/commissions while staying well clear of market price
+            be_buf = 0.25
             be_level = round(entry + be_buf if side == "BUY" else entry - be_buf, 2)
 
             # Double-check distance from current market price
             dist_to_market = abs(mid - be_level)
-            if dist_to_market < 1.05:
-                logger.info(f"⏳ [GoldPips] Distance to current price (${dist_to_market:.2f}) < 1.05. Waiting for deeper profit expansion.")
+            if dist_to_market < 0.50:
+                logger.info(f"⏳ [GoldPips] Distance to current price (${dist_to_market:.2f}) < 0.50. Waiting for profit expansion.")
                 pos["pending_be"] = True
                 continue
 
-            res = self.mcp.change_position_stop_loss(position_id=pos_id, level=be_level, balance_id=self.balance_id)
+            res = self.mcp.change_position_stop_loss(position_id=pos_id, level=be_level, balance_id=self.balance_id, endpoint="cfd")
             if not res.get("error"):
                 pos["sl"] = be_level
                 pos["moved_to_be"] = True

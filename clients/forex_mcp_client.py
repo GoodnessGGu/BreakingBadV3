@@ -455,36 +455,62 @@ class IQForexMCPClient:
             logger.debug(f"Could not resolve position_id: {e}")
         return candidate_id
 
-    def change_position_stop_loss(self, position_id: int, level: float, balance_id: Optional[int] = None) -> Dict[str, Any]:
+    def change_position_stop_loss(self, position_id: int, level: float, balance_id: Optional[int] = None, endpoint: Optional[str] = None) -> Dict[str, Any]:
         """Move or set the Stop Loss trigger price for an open position across endpoints."""
-        actual_pid = self._resolve_actual_position_id(int(position_id))
-        logger.info(f"🔄 [MCP] Updating SL on Position #{actual_pid} (input: #{position_id}) to {level:.5f}")
-        for ep in ("cfd", "forex", "crypto"):
+        actual_pid = int(position_id)
+        logger.info(f"🔄 [MCP] Updating SL on Position #{actual_pid} to {level:.5f}")
+        endpoints = [endpoint] if endpoint else ["cfd", "forex", "crypto"]
+        for ep in endpoints:
             try:
                 res = self.call_tool("change_position_stop_loss", {
-                    "position_id": int(actual_pid),
+                    "position_id": actual_pid,
                     "level": round(float(level), 5)
                 }, endpoint=ep)
                 if res and not res.get("error") and not res.get("isError"):
                     return res
-            except Exception:
-                pass
+                # Broker specification: if replacing an existing stop-loss fails, cancel first (level=0) then set new level
+                err_msg = str(res.get("error") or res.get("message") or "")
+                if "internal_error" in err_msg or "error" in res or res.get("isError"):
+                    logger.debug(f"[MCP] Attempting cancel-and-replace SL fallback on #{actual_pid} ({ep})...")
+                    self.call_tool("change_position_stop_loss", {"position_id": actual_pid, "level": 0}, endpoint=ep)
+                    time.sleep(0.25)
+                    retry_res = self.call_tool("change_position_stop_loss", {
+                        "position_id": actual_pid,
+                        "level": round(float(level), 5)
+                    }, endpoint=ep)
+                    if retry_res and not retry_res.get("error") and not retry_res.get("isError"):
+                        return retry_res
+            except Exception as e:
+                logger.debug(f"[MCP] SL update exception on {ep}: {e}")
         return {"error": {"message": f"Failed to update SL for position {actual_pid}"}}
 
-    def change_position_take_profit(self, position_id: int, level: float) -> Dict[str, Any]:
+    def change_position_take_profit(self, position_id: int, level: float, endpoint: Optional[str] = None) -> Dict[str, Any]:
         """Move or set the Take Profit trigger price for an open position across endpoints."""
-        actual_pid = self._resolve_actual_position_id(int(position_id))
-        logger.info(f"🎯 [MCP] Updating TP on Position #{actual_pid} (input: #{position_id}) to {level:.5f}")
-        for ep in ("cfd", "forex", "crypto"):
+        actual_pid = int(position_id)
+        logger.info(f"🎯 [MCP] Updating TP on Position #{actual_pid} to {level:.5f}")
+        endpoints = [endpoint] if endpoint else ["cfd", "forex", "crypto"]
+        for ep in endpoints:
             try:
                 res = self.call_tool("change_position_take_profit", {
-                    "position_id": int(actual_pid),
+                    "position_id": actual_pid,
                     "level": round(float(level), 5)
                 }, endpoint=ep)
                 if res and not res.get("error") and not res.get("isError"):
                     return res
-            except Exception:
-                pass
+                # Fallback: cancel first (level=0) then set new TP
+                err_msg = str(res.get("error") or res.get("message") or "")
+                if "internal_error" in err_msg or "error" in res or res.get("isError"):
+                    logger.debug(f"[MCP] Attempting cancel-and-replace TP fallback on #{actual_pid} ({ep})...")
+                    self.call_tool("change_position_take_profit", {"position_id": actual_pid, "level": 0}, endpoint=ep)
+                    time.sleep(0.25)
+                    retry_res = self.call_tool("change_position_take_profit", {
+                        "position_id": actual_pid,
+                        "level": round(float(level), 5)
+                    }, endpoint=ep)
+                    if retry_res and not retry_res.get("error") and not retry_res.get("isError"):
+                        return retry_res
+            except Exception as e:
+                logger.debug(f"[MCP] TP update exception on {ep}: {e}")
         return {"error": {"message": f"Failed to update TP for position {actual_pid}"}}
 
     def list_positions(self, balance_id: Optional[int] = None, skip: int = 0, limit: int = 50) -> List[Dict[str, Any]]:

@@ -337,6 +337,7 @@ class CallistoCopier(BaseCopier):
         for order_id, pos in list(self.open_positions.items()):
             pos_id = pos.get("position_id")
             if not pos_id:
+                pos["pending_be"] = True
                 continue
             if pos.get("moved_to_be"):
                 continue
@@ -344,32 +345,39 @@ class CallistoCopier(BaseCopier):
             side = pos["side"]
             entry = pos["entry_price"]
 
-            # Require at least +20.0 pips ($2.00 on Gold) profit distance before moving SL to BE
+            # Require at least +8.0 pips ($0.80 on Gold) profit distance before moving SL to BE
             profit_dist = (mid - entry) if side == "BUY" else (entry - mid)
-            if mid > 0 and profit_dist < 2.00:
-                logger.warning(f"⚠️ [Callisto] Position #{pos_id} profit distance (${profit_dist:.2f} / {profit_dist*10:.1f} pips) < $2.00 (20 pips). Skipping premature BE.")
+            if mid > 0 and profit_dist < 0.80:
+                logger.info(f"⏳ [Callisto] Position #{pos_id} profit distance (${profit_dist:.2f} / {profit_dist*10:.1f} pips) < $0.80 (8 pips). Arming pending BE.")
+                pos["pending_be"] = True
                 continue
 
-            be_buf = 0.80
+            # +0.25 buffer covers broker spread/commissions while staying clear of market price
+            be_buf = 0.25
             be_level = round(entry + be_buf if side == "BUY" else entry - be_buf, 2)
 
-            # Ensure distance to current price is at least 1.00 to avoid immediate broker stopout / stop-level rejection
+            # Ensure distance to current price is at least 0.50 to avoid immediate broker stopout / stop-level rejection
             dist_to_market = abs(mid - be_level)
-            if dist_to_market < 1.00:
+            if dist_to_market < 0.50:
                 logger.info(f"⏳ [Callisto] Distance to market price (${dist_to_market:.2f}) too close to new SL. Waiting for profit expansion.")
+                pos["pending_be"] = True
                 continue
 
             logger.info(f"🛡️ [Callisto BREAKEVEN] ({reason}) Moving SL to {be_level} for #{pos_id}")
-            res = self.mcp.change_position_stop_loss(position_id=pos_id, level=be_level, balance_id=self.balance_id)
+            res = self.mcp.change_position_stop_loss(position_id=pos_id, level=be_level, balance_id=self.balance_id, endpoint="cfd")
             if not res.get("error"):
                 pos["sl"] = be_level
                 pos["moved_to_be"] = True
+                pos["pending_be"] = False
                 pos["trailing_stage"] = max(pos.get("trailing_stage", 0), 2)
                 await self.notify(
                     f"🛡️ [CALLISTO BREAKEVEN] #{pos_id} ({side})\n\n"
                     f"• Trigger: {reason}\n"
                     f"• Trade is now Risk-Free! SL shifted to: {be_level:.2f}"
                 )
+            else:
+                logger.warning(f"⚠️ [Callisto] Failed to set BE on #{pos_id}: {res.get('error')}. Retrying when price progresses.")
+                pos["pending_be"] = True
 
     async def _monitor_position(self, order_id: int):
         """Monitors active Callisto trade with pip milestone scaling, breakeven, and profit trailing."""
@@ -422,13 +430,18 @@ class CallistoCopier(BaseCopier):
         if pos_id:
             try:
                 if sl and sl > 0:
-                    self.mcp.change_position_stop_loss(position_id=pos_id, level=sl)
+                    self.mcp.change_position_stop_loss(position_id=pos_id, level=sl, endpoint="cfd")
                 if tp and tp > 0:
-                    self.mcp.change_position_take_profit(position_id=pos_id, level=tp)
+                    self.mcp.change_position_take_profit(position_id=pos_id, level=tp, endpoint="cfd")
             except Exception as e:
                 logger.warning(f"[Callisto] Notice setting post-fill SL/TP on #{pos_id}: {e}")
 
         logger.info(f"🛡️ [Callisto] Monitoring position #{pos_id or order_id} ({tag}) with milestone trailing & Breakeven.")
+
+        # If a breakeven instruction was received before position_id resolved, execute immediately
+        if pos.get("pending_be") and not pos.get("moved_to_be"):
+            logger.info(f"⚡ [Callisto] Executing pending Breakeven for newly resolved position #{pos_id}")
+            await self.trigger_manual_breakeven("Pending Channel BE")
 
         while order_id in self.open_positions:
             await asyncio.sleep(self.poll_interval)
@@ -449,6 +462,10 @@ class CallistoCopier(BaseCopier):
                 self.open_positions.pop(order_id, None)
                 break
 
+            # Check if pending channel breakeven can now be satisfied
+            if pos.get("pending_be") and not pos.get("moved_to_be"):
+                await self.trigger_manual_breakeven("Pending Channel BE")
+
             # Multi-tier Milestone Trailing and Breakeven
             if pos_id:
                 prices = self.get_market_price()
@@ -461,7 +478,7 @@ class CallistoCopier(BaseCopier):
                     # Stage 1: +30 Pips ($3.00) -> Cut risk by 50%
                     if gain_pips >= 30.0 and stage < 1:
                         half_risk_sl = round(entry - (risk_dist * 0.5) if side == "BUY" else entry + (risk_dist * 0.5), 2)
-                        res = self.mcp.change_position_stop_loss(position_id=pos_id, level=half_risk_sl)
+                        res = self.mcp.change_position_stop_loss(position_id=pos_id, level=half_risk_sl, endpoint="cfd")
                         if not res.get("error"):
                             pos["sl"] = half_risk_sl
                             pos["trailing_stage"] = 1
@@ -471,11 +488,11 @@ class CallistoCopier(BaseCopier):
                                 f"• Risk reduced by 50% | New SL: `{half_risk_sl:.2f}`"
                             )
 
-                    # Stage 2: +50 Pips ($5.00) or 1.0R -> Move to Breakeven (+0.80 buffer)
+                    # Stage 2: +50 Pips ($5.00) or 1.0R -> Move to Breakeven (+0.25 buffer)
                     if (gain_pips >= 50.0 or gain >= risk_dist) and stage < 2:
-                        be_buf = 0.80
+                        be_buf = 0.25
                         be_level = round(entry + be_buf if side == "BUY" else entry - be_buf, 2)
-                        res = self.mcp.change_position_stop_loss(position_id=pos_id, level=be_level)
+                        res = self.mcp.change_position_stop_loss(position_id=pos_id, level=be_level, endpoint="cfd")
                         if not res.get("error"):
                             pos["sl"] = be_level
                             pos["moved_to_be"] = True

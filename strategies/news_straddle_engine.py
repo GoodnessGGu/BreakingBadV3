@@ -336,45 +336,74 @@ class NewsStraddleEngine:
             await self.notify_photo(chart_bytes, caption)
 
     async def _monitor_straddle_trade(self, order_id: int):
-        """High-frequency trade monitoring with rapid Breakeven lock & dynamic trailing."""
-        await asyncio.sleep(2)
+        """Trade monitoring with rapid Breakeven lock, dynamic trailing & respectful CFD-only polling."""
+        await asyncio.sleep(3)
         trade = self.active_trade
         if not trade:
             return
 
-        # Resolve position_id
-        for _ in range(8):
+        # 1. Resolve position_id specifically on CFD endpoint without hammering other endpoints
+        pos_id = None
+        for attempt in range(6):
             if trade.get("position_id"):
+                pos_id = trade["position_id"]
                 break
             try:
-                positions = self.mcp.list_positions(balance_id=self.balance_id)
-                for p in positions:
-                    if p.get("asset_id") == self.asset_id:
-                        trade["position_id"] = p.get("position_id") or p.get("id")
-                        break
+                args = {"limit": 20}
+                if self.balance_id:
+                    args["balance_id"] = self.balance_id
+                res = self.mcp.call_tool("list_positions", args, endpoint="cfd")
+                if isinstance(res, dict) and "positions" in res:
+                    for p in (res.get("positions") or []):
+                        if p.get("asset_id") == self.asset_id:
+                            pos_id = p.get("position_id") or p.get("id")
+                            trade["position_id"] = pos_id
+                            break
             except Exception as e:
                 logger.warning(f"[NewsStraddle] Position lookup error: {e}")
-            if not trade.get("position_id"):
-                await asyncio.sleep(1)
+            if pos_id:
+                break
+            await asyncio.sleep(2)
 
-        pos_id = trade.get("position_id")
+        if not pos_id:
+            logger.warning(f"⚠️ [NewsStraddle] Order #{order_id} could not be resolved to active position. Monitoring by order.")
+
         side = trade["side"]
         entry = trade["entry_price"]
 
         logger.info(f"🛡️ [NewsStraddle] Monitoring trade #{pos_id or order_id} with rapid BE & spike trailing.")
 
+        start_time = time.time()
         while self.active_trade and self.active_trade.get("order_id") == order_id:
-            await asyncio.sleep(1)  # Sub-second / 1s fast tick loop
+            await asyncio.sleep(4)  # 4s respectful cadence to avoid hitting 60 rpm rate limit
 
-            # Check if still open
+            # Safety timeout: if 30 mins have elapsed, conclude trade monitoring
+            if time.time() - start_time > 1800:
+                logger.info("⏰ [NewsStraddle] Trade monitoring timed out after 30 mins.")
+                await self._log_trade_closure(order_id)
+                self.active_trade = None
+                break
+
+            # Check if still open using cfd endpoint only
+            is_still_open = False
             try:
-                open_positions = self.mcp.list_positions(balance_id=self.balance_id)
-                is_still_open = any((p.get("position_id") or p.get("id")) == pos_id for p in open_positions) if pos_id else True
-            except Exception:
+                args = {"limit": 20}
+                if self.balance_id:
+                    args["balance_id"] = self.balance_id
+                res = self.mcp.call_tool("list_positions", args, endpoint="cfd")
+                if isinstance(res, dict) and "positions" in res:
+                    positions = res.get("positions") or []
+                    if pos_id:
+                        is_still_open = any(str(p.get("position_id") or p.get("id")) == str(pos_id) for p in positions)
+                    else:
+                        is_still_open = any(p.get("asset_id") == self.asset_id for p in positions)
+            except Exception as e:
+                logger.debug(f"[NewsStraddle] Poll error: {e}")
+                await asyncio.sleep(5)
                 continue
 
             if not is_still_open:
-                logger.info(f"📊 [NewsStraddle] Position #{pos_id} closed! Resolving settlement...")
+                logger.info(f"📊 [NewsStraddle] Position #{pos_id or order_id} closed! Resolving settlement...")
                 await self._log_trade_closure(order_id)
                 self.active_trade = None
                 break
@@ -392,7 +421,10 @@ class NewsStraddleEngine:
                     if gain >= self.be_trigger_distance and not trade["moved_to_be"]:
                         be_buf = 0.30
                         be_level = round(entry + be_buf if side == "BUY" else entry - be_buf, 2)
-                        res = self.mcp.change_position_stop_loss(position_id=pos_id, level=be_level)
+                        res = self.mcp.call_tool("change_position_stop_loss", {
+                            "position_id": int(pos_id),
+                            "level": be_level
+                        }, endpoint="cfd")
                         if not res.get("error"):
                             trade["current_sl"] = be_level
                             trade["moved_to_be"] = True
@@ -425,7 +457,10 @@ class NewsStraddleEngine:
                         cur_sl = trade.get("current_sl", 0.0)
                         should_update = (trail_sl > cur_sl + 0.60) if side == "BUY" else (trail_sl < cur_sl - 0.60)
                         if should_update:
-                            res = self.mcp.change_position_stop_loss(position_id=pos_id, level=trail_sl)
+                            res = self.mcp.call_tool("change_position_stop_loss", {
+                                "position_id": int(pos_id),
+                                "level": trail_sl
+                            }, endpoint="cfd")
                             if not res.get("error"):
                                 trade["current_sl"] = trail_sl
                                 logger.info(f"🚀 [NewsStraddle Trailing] SL ratcheted to {trail_sl} on #{pos_id}")

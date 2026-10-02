@@ -259,10 +259,11 @@ class SNDStrategyEngine:
                     for symbol in list(self.enabled_symbols):
                         if symbol in SND_INSTRUMENT_PROFILES:
                             await self._evaluate_symbol_cycle(symbol)
+                            await asyncio.sleep(2.5)  # Stagger requests between assets
             except Exception as e:
                 logger.error(f"[SNDEngine] Error in execution cycle: {e}", exc_info=True)
 
-            await asyncio.sleep(15)
+            await asyncio.sleep(45)  # 15M candles only need checking every 45-60s
 
     async def _evaluate_symbol_cycle(self, symbol: str):
         if time.time() < self.unavailable_cooldown.get(symbol, 0.0):
@@ -271,16 +272,14 @@ class SNDStrategyEngine:
         profile = SND_INSTRUMENT_PROFILES[symbol]
         asset_id = profile["asset_id"]
 
-        cur_px = self.get_market_price(symbol)
-        if not cur_px or cur_px.get("mid", 0.0) <= 0:
-            return
-
-        # 1. Manage Active Trade if any
+        # 1. Manage Active Trade if any (Fast price check)
         if self.active_trades.get(symbol):
-            await self._manage_active_trade(symbol, cur_px)
+            cur_px = self.get_market_price(symbol)
+            if cur_px and cur_px.get("mid", 0.0) > 0:
+                await self._manage_active_trade(symbol, cur_px)
             return
 
-        # 2. Fetch 15M candles (120 bars = ~30 hours)
+        # 2. Fetch 15M candles (120 bars = ~30 hours) - 1 single API call for price + candles
         raw_candles = self.mcp.get_candles(asset_id=asset_id, count=120, size=CANDLE_SIZE)
         if not raw_candles or len(raw_candles) < 30:
             return
@@ -291,6 +290,9 @@ class SNDStrategyEngine:
             "Low": float(c.get("min") or c.get("low", 0.0)),
             "Close": float(c.get("close") or c.get("to", 0.0))
         } for c in raw_candles])
+
+        latest_close = float(df['Close'].iloc[-1])
+        cur_px = {"buy": latest_close, "sell": latest_close, "mid": latest_close}
 
         df['ATR'] = calculate_atr(df, period=14)
         df['EMA100'] = df['Close'].ewm(span=100, adjust=False).mean()

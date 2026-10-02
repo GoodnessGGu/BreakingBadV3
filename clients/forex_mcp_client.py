@@ -99,7 +99,7 @@ class IQForexMCPClient:
             s = str(symbol).upper().replace("/", "").replace("-", "")
             if s in ("BTCUSD", "BTC", "ETHUSD", "ETH", "BCHUSD"):
                 return "crypto"
-            if s in ("EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "EURGBP", "EURJPY", "GBPJPY", "EURCAD", "EURAUD", "EURNZD", "EURCHF"):
+            if s in ("EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "EURGBP", "EURJPY", "GBPJPY", "EURCAD", "EURAUD", "EURNZD", "EURCHF", "NZDUSD", "USDCAD"):
                 return "forex"
             if s in ("XAUUSD", "GOLD", "XAGUSD", "SILVER", "XAU", "XAG"):
                 return "cfd"
@@ -108,7 +108,7 @@ class IQForexMCPClient:
                 aid = int(asset_id)
                 if aid in (816, 824, 836, 886, 1979):
                     return "crypto"
-                if aid in (1, 2, 4, 5, 6, 99, 105, 108, 212, 946, 951, 955, 1011):
+                if aid in (1, 2, 4, 5, 6, 8, 99, 100, 105, 108, 212, 946, 951, 955, 1011):
                     return "forex"
                 return "cfd"
             except (ValueError, TypeError):

@@ -31,12 +31,13 @@ from bot.keyboards import (
     ict_menu_keyboard, settings_menu_keyboard, close_all_confirm_keyboard,
     persistent_reply_keyboard, history_menu_keyboard, active_setups_keyboard,
     news_menu_keyboard, crt_menu_keyboard, mission_menu_keyboard,
-    individual_close_keyboard
+    individual_close_keyboard, snd_menu_keyboard
 )
 from bot.session_notifier import MarketSessionNotifier
 from bot.news_engine import EconomicNewsEngine
 from strategies.news_straddle_engine import NewsStraddleEngine
 from strategies.crt_engine import CRTStrategyEngine
+from strategies.snd_engine import SNDStrategyEngine, SND_INSTRUMENT_PROFILES
 
 logger = logging.getLogger("TelegramController")
 
@@ -45,7 +46,8 @@ class TelegramTradingBot:
                  ict_engine: ICTStrategyEngine, forex_mcp: IQForexMCPClient, blitz_mcp: IQBlitzMCPClient,
                  lots: float = 1.0, leverage: int = 100, blitz_stake: float = 2.0,
                  straddle_engine: Optional[NewsStraddleEngine] = None,
-                 crt_engine: Optional[CRTStrategyEngine] = None):
+                 crt_engine: Optional[CRTStrategyEngine] = None,
+                 snd_engine: Optional[SNDStrategyEngine] = None):
         self.token = token
         self.admin_id = int(admin_id)
         self.channel_mgr = channel_mgr
@@ -74,6 +76,16 @@ class TelegramTradingBot:
         )
         self.crt_engine.set_notification_callback(self.broadcast_alert)
 
+        # Autonomous Supply & Demand + Imbalance Engine (Config E: NZDUSD, USDJPY, AUDUSD, USDCAD)
+        self.snd_engine = snd_engine or SNDStrategyEngine(
+            mcp_client=self.forex_mcp,
+            symbols=["NZDUSD", "USDJPY", "AUDUSD", "USDCAD"],
+            account_type="training",
+            lots=lots,
+            leverage=leverage
+        )
+        self.snd_engine.set_notification_callback(self.broadcast_alert)
+
         self.account_type = "training"
         self.lots = float(lots)
         self.leverage = int(leverage)
@@ -90,6 +102,8 @@ class TelegramTradingBot:
             self.straddle_engine.set_photo_notification_callback(self.broadcast_photo)
         if hasattr(self.crt_engine, "set_photo_notification_callback"):
             self.crt_engine.set_photo_notification_callback(self.broadcast_photo)
+        if hasattr(self.snd_engine, "set_photo_notification_callback"):
+            self.snd_engine.set_photo_notification_callback(self.broadcast_photo)
 
     def is_admin(self, user_id: int) -> bool:
         return int(user_id) == self.admin_id
@@ -103,6 +117,8 @@ class TelegramTradingBot:
             self.straddle_engine.set_lots(clean_lots)
         if self.crt_engine:
             self.crt_engine.set_lots(clean_lots)
+        if self.snd_engine:
+            self.snd_engine.set_lots(clean_lots)
         for c in self.channel_mgr.copiers.values():
             if hasattr(c, "set_lots"):
                 c.set_lots(clean_lots)
@@ -118,6 +134,8 @@ class TelegramTradingBot:
             self.straddle_engine.set_leverage(clean_lev)
         if self.crt_engine:
             self.crt_engine.set_leverage(clean_lev)
+        if self.snd_engine:
+            self.snd_engine.set_leverage(clean_lev)
         for c in self.channel_mgr.copiers.values():
             if hasattr(c, "set_leverage"):
                 c.set_leverage(clean_lev)
@@ -215,6 +233,10 @@ class TelegramTradingBot:
         crt_st = self.crt_engine.get_status() if self.crt_engine else {"enabled": False, "enabled_symbols": []}
         crt_icon = "🟢" if crt_st.get("enabled") else "🔴"
 
+        # S&D Imbalance Engine (Config E)
+        snd_st = self.snd_engine.get_status() if self.snd_engine else {"enabled": False, "enabled_symbols": []}
+        snd_icon = "🟢" if snd_st.get("enabled") else "🔴"
+
         # News Straddle Engine
         straddle_st = self.straddle_engine.get_status() if self.straddle_engine else {"enabled": False, "is_armed": False}
         straddle_icon = "🟢" if straddle_st.get("enabled") else "🔴"
@@ -239,6 +261,11 @@ class TelegramTradingBot:
             f"  • {crt_icon} Master Switch: `{'ON' if crt_st.get('enabled') else 'OFF'}`\n"
             f"  • 🎯 Active Assets: `{', '.join(crt_st.get('enabled_symbols', [])) if crt_st.get('enabled_symbols') else 'None'}`\n"
             f"  • 📊 Lots: `{crt_st.get('lots', self.lots):.2f}` | Lev: `{crt_st.get('leverage', self.leverage)}x`\n\n"
+            f"🏛️ *Autonomous S&D Engine (Config E Forex)*:\n"
+            f"  • {snd_icon} Master Switch: `{'ON' if snd_st.get('enabled') else 'OFF'}`\n"
+            f"  • 🎯 Active Pairs: `{', '.join(snd_st.get('enabled_symbols', [])) if snd_st.get('enabled_symbols') else 'None'}`\n"
+            f"  • 📊 Lots: `{snd_st.get('lots', self.lots):.2f}` | Lev: `{snd_st.get('leverage', self.leverage)}x`\n"
+            f"  • ⚖️ Target R:R: `1:2.0` | Breakeven: `+1.0R`\n\n"
             f"⚡ *News Straddle Spike Engine*:\n"
             f"  • {straddle_icon} Status: `{'ON' if straddle_st.get('enabled') else 'OFF'}`{straddle_arm_icon}\n"
             f"  • 🎯 Asset: `XAUUSD (Gold)` | Lots: `{self.straddle_engine.lots if self.straddle_engine else self.lots:.2f}`\n\n"
@@ -308,12 +335,17 @@ class TelegramTradingBot:
             "• *Core Logic*: Exploits time-based candle ranges. Utilizes the **Asian Judas Protocol** (00:00–06:00 UTC) during London Open (07:00–10:00 UTC) and H1 candle expansions, catching manipulation wicks before the true body expansion unfolds.\n"
             "• *Targets*: 50% Equilibrium Midpoint Breakeven Lock + Opposite Boundary Full Expansion.\n\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            "⚡ *3. High-Impact News Straddle Spike Engine*\n"
+            "🏛️ *3. S&D Imbalance Engine (Config E Forex Specialist)*\n"
+            "• *Focus Assets*: `NZD/USD (+27.0R)`, `USD/JPY (+17.0R)`, `AUD/USD (+15.0R)`, `USD/CAD (+7.0R)`\n"
+            "• *Core Logic*: Identifies institutional Drop-Base-Rally (Demand) & Rally-Base-Drop (Supply) zones on 15M candles with displacement bodies >= 1.2x ATR leaving confirmed Fair Value Gaps (BISI/SIBI), filtered by macro EMA100.\n"
+            "• *Risk Model*: 1:2.0 Fixed Target Payout with Dynamic Breakeven Ratchet locked at +1.0R displacement.\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "⚡ *4. High-Impact News Straddle Spike Engine*\n"
             "• *Focus Assets*: `US Non-Farm Payrolls (NFP)`, `CPI`, `FOMC Decisions`\n"
             "• *Core Logic*: Calculates the tight pre-news consolidation range 60 seconds prior to release and places dual breakout triggers (±$1.50) to capture explosive multi-dollar volatility spikes.\n"
             "• *Targets*: **+$15.00** Expansion Take Profit with rapid **+$4.00** Breakeven lock.\n\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            "📡 *4. Signal Copiers & Blitz Options*\n"
+            "📡 *5. Signal Copiers & Blitz Options*\n"
             "• *CFD Copiers*: CallistoFx, Gold Pips Hunter, GSociety, Kingmahn.\n"
             "• *Polycarp VIP*: High-frequency Blitz Binary Options with a controlled 2-step Martingale recovery buffer.\n\n"
             "🛡️ *Golden Rule*: Capital preservation first. Never trade without invalidation."
@@ -1154,6 +1186,8 @@ class TelegramTradingBot:
             await self.cmd_ict(update, context)
         elif text in ["🕯️ CRT Engine", "CRT Engine", "CRT", "🕯️ CRT"]:
             await self.cmd_crt(update, context)
+        elif text in ["🏛️ S&D Engine", "S&D Engine", "SND Engine", "S&D", "SND", "🏛️ SND"]:
+            await self.cmd_snd(update, context)
         elif text in ["🎯 Mission & Strategies", "🎯 Mission", "Mission", "Strategies"]:
             await self.cmd_mission(update, context)
         elif text in ["📡 Channels", "Channels"]:
@@ -1190,6 +1224,18 @@ class TelegramTradingBot:
         await update.message.reply_text(
             "🕯️ *Autonomous Candle Range Theory (CRT) Engine*\nConfigure active Forex / Crypto instruments & sizing:",
             reply_markup=crt_menu_keyboard(crt_st),
+            parse_mode="Markdown"
+        )
+
+    async def cmd_snd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.is_admin(update.effective_user.id):
+            return
+        snd_st = self.snd_engine.get_status() if self.snd_engine else {"enabled": False, "enabled_symbols": []}
+        await update.message.reply_text(
+            "🏛️ *Autonomous Supply & Demand + Imbalance Engine (Config E)*\n"
+            "Trading top-performing pairs: NZD/USD (+27.0R), USD/JPY (+17.0R), AUD/USD (+15.0R), USD/CAD (+7.0R):\n\n"
+            "Configure active pairs, lots, and leverage:",
+            reply_markup=snd_menu_keyboard(snd_st),
             parse_mode="Markdown"
         )
 
@@ -1302,7 +1348,20 @@ class TelegramTradingBot:
                     self.crt_engine.active_trades.pop(s, None)
                     logger.info(f"[Cleanup] Cleared CRT trade for {s} (#{pos_id})")
 
-        # 4. Fallback for manual broker positions not tracked in any engine
+        # 4. SND Engine
+        if hasattr(self.snd_engine, "active_trades"):
+            for s, t in list(self.snd_engine.active_trades.items()):
+                if t and (str(t.get("position_id")) == pid_str or str(t.get("order_id")) == pid_str or (symbol and s == symbol)):
+                    handled = True
+                    try:
+                        if hasattr(self.snd_engine, "_log_trade_closure"):
+                            await self.snd_engine._log_trade_closure(s, t, reason_override=close_reason)
+                    except Exception as sne:
+                        logger.warning(f"Error logging SND trade closure #{pos_id}: {sne}")
+                    self.snd_engine.active_trades[s] = None
+                    logger.info(f"[Cleanup] Cleared SND trade for {s} (#{pos_id})")
+
+        # 5. Fallback for manual broker positions not tracked in any engine
         if not handled:
             try:
                 bid = self.get_active_balance_id()
@@ -1684,6 +1743,84 @@ class TelegramTradingBot:
                 parse_mode="Markdown"
             )
 
+        # S&D Engine Menu (Config E)
+        elif data == "btn_snd_menu":
+            snd_st = self.snd_engine.get_status() if self.snd_engine else {"enabled": False, "enabled_symbols": []}
+            await query.edit_message_text(
+                "🏛️ *Autonomous Supply & Demand + Imbalance Engine (Config E)*\n"
+                "Trading top-performing pairs: NZD/USD (+27.0R), USD/JPY (+17.0R), AUD/USD (+15.0R), USD/CAD (+7.0R):\n\n"
+                "Configure active pairs, lots, and leverage:",
+                reply_markup=snd_menu_keyboard(snd_st),
+                parse_mode="Markdown"
+            )
+
+        elif data == "toggle_snd_master":
+            if self.snd_engine:
+                self.snd_engine.toggle()
+            snd_st = self.snd_engine.get_status() if self.snd_engine else {"enabled": False, "enabled_symbols": []}
+            await query.edit_message_text(
+                "🏛️ *Autonomous Supply & Demand + Imbalance Engine (Config E)*\n"
+                "Trading top-performing pairs: NZD/USD (+27.0R), USD/JPY (+17.0R), AUD/USD (+15.0R), USD/CAD (+7.0R):\n\n"
+                "Configure active pairs, lots, and leverage:",
+                reply_markup=snd_menu_keyboard(snd_st),
+                parse_mode="Markdown"
+            )
+
+        elif data.startswith("toggle_snd_"):
+            sym = data.replace("toggle_snd_", "").upper()
+            if self.snd_engine:
+                self.snd_engine.toggle_symbol(sym)
+            snd_st = self.snd_engine.get_status() if self.snd_engine else {"enabled": False, "enabled_symbols": []}
+            await query.edit_message_text(
+                "🏛️ *Autonomous Supply & Demand + Imbalance Engine (Config E)*\n"
+                "Trading top-performing pairs: NZD/USD (+27.0R), USD/JPY (+17.0R), AUD/USD (+15.0R), USD/CAD (+7.0R):\n\n"
+                "Configure active pairs, lots, and leverage:",
+                reply_markup=snd_menu_keyboard(snd_st),
+                parse_mode="Markdown"
+            )
+
+        elif data == "snd_lots_minus":
+            if self.snd_engine:
+                self.snd_engine.set_lots(self.snd_engine.lots - 0.1)
+            snd_st = self.snd_engine.get_status() if self.snd_engine else {"enabled": False, "enabled_symbols": []}
+            await query.edit_message_text(
+                "🏛️ *Autonomous Supply & Demand + Imbalance Engine (Config E)*\nAdjust instrument, lot size, and leverage:",
+                reply_markup=snd_menu_keyboard(snd_st),
+                parse_mode="Markdown"
+            )
+
+        elif data == "snd_lots_plus":
+            if self.snd_engine:
+                self.snd_engine.set_lots(self.snd_engine.lots + 0.1)
+            snd_st = self.snd_engine.get_status() if self.snd_engine else {"enabled": False, "enabled_symbols": []}
+            await query.edit_message_text(
+                "🏛️ *Autonomous Supply & Demand + Imbalance Engine (Config E)*\nAdjust instrument, lot size, and leverage:",
+                reply_markup=snd_menu_keyboard(snd_st),
+                parse_mode="Markdown"
+            )
+
+        elif data.startswith("set_snd_lots_"):
+            val = float(data.replace("set_snd_lots_", ""))
+            if self.snd_engine:
+                self.snd_engine.set_lots(val)
+            snd_st = self.snd_engine.get_status() if self.snd_engine else {"enabled": False, "enabled_symbols": []}
+            await query.edit_message_text(
+                "🏛️ *Autonomous Supply & Demand + Imbalance Engine (Config E)*\nAdjust instrument, lot size, and leverage:",
+                reply_markup=snd_menu_keyboard(snd_st),
+                parse_mode="Markdown"
+            )
+
+        elif data.startswith("set_snd_lev_"):
+            val = int(data.replace("set_snd_lev_", ""))
+            if self.snd_engine:
+                self.snd_engine.set_leverage(val)
+            snd_st = self.snd_engine.get_status() if self.snd_engine else {"enabled": False, "enabled_symbols": []}
+            await query.edit_message_text(
+                "🏛️ *Autonomous Supply & Demand + Imbalance Engine (Config E)*\nAdjust instrument, lot size, and leverage:",
+                reply_markup=snd_menu_keyboard(snd_st),
+                parse_mode="Markdown"
+            )
+
         # Mission & Strategy Description
         elif data == "btn_mission_strategies":
             text = self.build_mission_text()
@@ -1946,6 +2083,8 @@ class TelegramTradingBot:
         self.app.add_handler(CommandHandler("ict", self.cmd_ict))
         self.app.add_handler(CommandHandler("crt", self.cmd_crt))
         self.app.add_handler(CommandHandler("candlerange", self.cmd_crt))
+        self.app.add_handler(CommandHandler("snd", self.cmd_snd))
+        self.app.add_handler(CommandHandler("supplydemand", self.cmd_snd))
         self.app.add_handler(CommandHandler("mission", self.cmd_mission))
         self.app.add_handler(CommandHandler("strategies", self.cmd_mission))
         self.app.add_handler(CommandHandler("about", self.cmd_mission))
@@ -1987,6 +2126,8 @@ class TelegramTradingBot:
             self.straddle_engine.set_notification_callback(self.broadcast_alert)
         if self.crt_engine:
             self.crt_engine.set_notification_callback(self.broadcast_alert)
+        if self.snd_engine:
+            self.snd_engine.set_notification_callback(self.broadcast_alert)
 
     async def start(self):
         await self.initialize()

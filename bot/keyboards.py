@@ -10,10 +10,10 @@ def persistent_reply_keyboard() -> ReplyKeyboardMarkup:
     keyboard = [
         [KeyboardButton("📊 Status"), KeyboardButton("💰 Balance")],
         [KeyboardButton("🤖 Gold ICT"), KeyboardButton("🕯️ CRT Engine")],
-        [KeyboardButton("📡 Channels"), KeyboardButton("🎯 Mission & Strategies")],
-        [KeyboardButton("📜 History"), KeyboardButton("📋 Active Setups")],
+        [KeyboardButton("🏛️ S&D Engine"), KeyboardButton("🎯 Mission & Strategies")],
+        [KeyboardButton("📡 Channels"), KeyboardButton("📋 Active Setups")],
+        [KeyboardButton("📜 History"), KeyboardButton("⚙️ Risk & Sizing")],
         [KeyboardButton("🌐 Market Sessions"), KeyboardButton("📰 Economic News")],
-        [KeyboardButton("⚙️ Risk & Sizing"), KeyboardButton("ℹ️ Help")],
         [KeyboardButton("⏸ Pause"), KeyboardButton("▶ Resume")],
         [KeyboardButton("🛑 Close All")]
     ]
@@ -31,15 +31,18 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("🕯️ CRT Engine", callback_data="btn_crt_menu")
         ],
         [
-            InlineKeyboardButton("🎯 Mission & Strategies", callback_data="btn_mission_strategies"),
-            InlineKeyboardButton("⚙️ Risk & Sizing", callback_data="btn_settings_menu")
+            InlineKeyboardButton("🏛️ S&D Imbalance Engine", callback_data="btn_snd_menu"),
+            InlineKeyboardButton("🎯 Mission & Strategies", callback_data="btn_mission_strategies")
         ],
         [
             InlineKeyboardButton("📋 Active Setups", callback_data="btn_active_trades"),
             InlineKeyboardButton("📜 Trade History", callback_data="history_cat_all")
         ],
         [
-            InlineKeyboardButton("🌐 Market Sessions", callback_data="btn_sessions"),
+            InlineKeyboardButton("⚙️ Risk & Sizing", callback_data="btn_settings_menu"),
+            InlineKeyboardButton("🌐 Market Sessions", callback_data="btn_sessions")
+        ],
+        [
             InlineKeyboardButton("📰 Economic News", callback_data="btn_news")
         ],
         [
@@ -273,6 +276,60 @@ def crt_menu_keyboard(crt_status: Dict[str, Any]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
 
 
+def snd_menu_keyboard(snd_status: Dict[str, Any]) -> InlineKeyboardMarkup:
+    """Dedicated interactive keyboard for Supply & Demand Imbalance Engine (Config E)."""
+    enabled = snd_status.get("enabled", False)
+    icon = "🟢" if enabled else "🔴"
+    status_txt = "ON" if enabled else "OFF"
+    active_syms = set(snd_status.get("enabled_symbols", []))
+    cur_lots = snd_status.get("lots", 1.0)
+    cur_lev = snd_status.get("leverage", 100)
+
+    def s_icon(sym: str) -> str:
+        return "🟢" if sym in active_syms else "⚪"
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                f"{icon} S&D Master Switch: {status_txt}",
+                callback_data="toggle_snd_master"
+            )
+        ],
+        [
+            InlineKeyboardButton(f"{s_icon('NZDUSD')} NZD/USD (+27.0R)", callback_data="toggle_snd_nzdusd"),
+            InlineKeyboardButton(f"{s_icon('USDJPY')} USD/JPY (+17.0R)", callback_data="toggle_snd_usdjpy")
+        ],
+        [
+            InlineKeyboardButton(f"{s_icon('AUDUSD')} AUD/USD (+15.0R)", callback_data="toggle_snd_audusd"),
+            InlineKeyboardButton(f"{s_icon('USDCAD')} USD/CAD (+7.0R)", callback_data="toggle_snd_usdcad")
+        ],
+        [
+            InlineKeyboardButton(f"📊 Lot Size: {cur_lots:.2f}", callback_data="noop_snd_lots")
+        ],
+        [
+            InlineKeyboardButton("➖ 0.1", callback_data="snd_lots_minus"),
+            InlineKeyboardButton("0.1", callback_data="set_snd_lots_0.1"),
+            InlineKeyboardButton("0.5", callback_data="set_snd_lots_0.5"),
+            InlineKeyboardButton("1.0", callback_data="set_snd_lots_1.0"),
+            InlineKeyboardButton("2.0", callback_data="set_snd_lots_2.0"),
+            InlineKeyboardButton("➕ 0.1", callback_data="snd_lots_plus")
+        ],
+        [
+            InlineKeyboardButton(f"⚡ Leverage: {cur_lev}x", callback_data="noop_snd_lev")
+        ],
+        [
+            InlineKeyboardButton(f"{'✅ ' if cur_lev == 20 else ''}20x", callback_data="set_snd_lev_20"),
+            InlineKeyboardButton(f"{'✅ ' if cur_lev == 50 else ''}50x", callback_data="set_snd_lev_50"),
+            InlineKeyboardButton(f"{'✅ ' if cur_lev == 100 else ''}100x", callback_data="set_snd_lev_100")
+        ],
+        [
+            InlineKeyboardButton("🎯 Strategy Mission & Rules", callback_data="btn_mission_strategies"),
+            InlineKeyboardButton("🔙 Back to Main Menu", callback_data="btn_main_menu")
+        ]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
 def mission_menu_keyboard() -> InlineKeyboardMarkup:
     """Navigation keyboard for the Mission & Strategy Description Center."""
     keyboard = [
@@ -281,10 +338,11 @@ def mission_menu_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("🕯️ CRT Engine (Forex/BTC)", callback_data="btn_crt_menu")
         ],
         [
-            InlineKeyboardButton("⚡ News Straddle (NFP)", callback_data="btn_news"),
-            InlineKeyboardButton("📊 Balance & Status", callback_data="btn_status")
+            InlineKeyboardButton("🏛️ S&D Engine (Config E)", callback_data="btn_snd_menu"),
+            InlineKeyboardButton("⚡ News Straddle (NFP)", callback_data="btn_news")
         ],
         [
+            InlineKeyboardButton("📊 Balance & Status", callback_data="btn_status"),
             InlineKeyboardButton("🔙 Back to Main Menu", callback_data="btn_main_menu")
         ]
     ]

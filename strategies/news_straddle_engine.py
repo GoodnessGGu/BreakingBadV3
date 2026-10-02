@@ -28,7 +28,7 @@ from utils.chart_generator import (
 
 logger = logging.getLogger("NewsStraddle")
 
-GOLD_INSTRUMENT = "front.marginal-cfd.instrument.xauusd"
+GOLD_INSTRUMENT = "mcfd.74"
 GOLD_ASSET_ID = 74
 
 class NewsStraddleEngine:
@@ -121,10 +121,29 @@ class NewsStraddleEngine:
 
     def _get_market_price(self) -> Dict[str, float]:
         try:
-            return self.mcp.get_market_price(self.instrument_id)
+            candles = self.mcp.get_candles(asset_id=self.asset_id, size=60, count=2)
+            if candles and len(candles) > 0:
+                last_c = candles[-1]
+                px = float(last_c.get("close", last_c.get("c", 0.0)))
+                if px > 0:
+                    return {"buy": px, "sell": px, "mid": px}
         except Exception as e:
-            logger.debug(f"[NewsStraddle] Error fetching market price: {e}")
-            return {"buy": 0.0, "sell": 0.0, "mid": 0.0}
+            logger.debug(f"[NewsStraddle] Candle price fetch error: {e}")
+
+        try:
+            p = self.mcp.calculate_order_size(
+                asset_id=self.asset_id, balance_currency="USD",
+                lots=self.lots, leverage=self.leverage
+            )
+            if isinstance(p, dict) and "buy_price" in p and "sell_price" in p:
+                buy = float(p.get("buy_price", 0.0))
+                sell = float(p.get("sell_price", 0.0))
+                if buy > 0 and sell > 0:
+                    return {"buy": buy, "sell": sell, "mid": (buy + sell) / 2}
+        except Exception:
+            pass
+
+        return {"buy": 0.0, "sell": 0.0, "mid": 0.0}
 
     async def check_upcoming_events_to_arm(self):
         """Checks for High-Impact USD news scheduled in ~2 minutes (120 seconds)."""
@@ -154,7 +173,7 @@ class NewsStraddleEngine:
         logger.info(f"⚡ [NewsStraddle] Arming NFP/News Straddle for {event['title']} (In {int(seconds_to_news)}s)...")
 
         # Fetch recent M1 candles to find consolidation bounds
-        candles = self.mcp.get_candles(self.instrument_id, count=15)
+        candles = self.mcp.get_candles(asset_id=self.asset_id, size=60, count=15)
         prices = self._get_market_price()
         cur_mid = prices.get("mid", 0.0)
 
@@ -271,7 +290,7 @@ class NewsStraddleEngine:
             keep_position_open=False
         )
 
-        candles = self.mcp.get_candles(self.instrument_id, count=35)
+        candles = self.mcp.get_candles(asset_id=self.asset_id, size=60, count=35)
         side_tag = "BUY / LONG" if side == "BUY" else "SELL / SHORT"
         chart_bytes = generate_trade_execution_chart(
             df=candles,

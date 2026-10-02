@@ -252,30 +252,26 @@ class CallistoCopier(BaseCopier):
         if self.lots >= (min_qty * 2.0):
             lot1 = round(self.lots / 2, 2)
             lot2 = round(self.lots - lot1, 2)
-            tp1 = round(exec_price + 4.50 if side == "BUY" else exec_price - 4.50, 2)
-            orders_to_place.append({
-                "tag": "TP1 Scalper (50%)",
-                "lots": lot1,
-                "sl": sl,
-                "tp": tp1,
-                "is_tp1": True
-            })
-            orders_to_place.append({
-                "tag": "Macro Runner (50%)",
-                "lots": lot2,
-                "sl": sl,
-                "tp": macro_tp,
-                "is_tp1": False
-            })
         else:
-            trade_lots = max(min_qty, self.lots)
-            orders_to_place.append({
-                "tag": "Standard Position (100%)",
-                "lots": trade_lots,
-                "sl": sl,
-                "tp": macro_tp,
-                "is_tp1": False
-            })
+            # Enforce min_qty per leg so partial TP can always execute on broker
+            lot1 = min_qty
+            lot2 = min_qty
+
+        tp1 = round(exec_price + 4.50 if side == "BUY" else exec_price - 4.50, 2)
+        orders_to_place.append({
+            "tag": "TP1 Scalper (50%)",
+            "lots": lot1,
+            "sl": sl,
+            "tp": tp1,
+            "is_tp1": True
+        })
+        orders_to_place.append({
+            "tag": "Macro Runner (50%)",
+            "lots": lot2,
+            "sl": sl,
+            "tp": macro_tp,
+            "is_tp1": False
+        })
 
         plan_desc = "\n".join([f"  • {o['tag']}: `{o['lots']}`L | TP: `{o['tp']:.2f}`" for o in orders_to_place])
         msg = (
@@ -458,8 +454,17 @@ class CallistoCopier(BaseCopier):
 
             if not is_still_open:
                 logger.info(f"📊 [Callisto] Position #{pos_id or order_id} ({tag}) closed! Resolving settlement...")
+                is_tp1 = pos.get("is_tp1", False)
                 await self._log_trade_closure(order_id)
                 self.open_positions.pop(order_id, None)
+
+                # IF TP1 SCALPER CLOSED: Automatically move runner(s) to Breakeven
+                if is_tp1:
+                    for sibling_oid, sibling_pos in list(self.open_positions.items()):
+                        if not sibling_pos.get("is_tp1") and not sibling_pos.get("moved_to_be"):
+                            logger.info(f"🏆 [Callisto TP1 Banked] Moving sibling Runner #{sibling_pos.get('position_id') or sibling_oid} to Breakeven!")
+                            sibling_pos["pending_be"] = True
+                            await self.trigger_manual_breakeven("TP1 Scalper Closed — Shift Runner to Breakeven")
                 break
 
             # Check if pending channel breakeven can now be satisfied

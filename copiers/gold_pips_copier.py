@@ -205,61 +205,99 @@ class GoldPipsCopier(BaseCopier):
                 await self.notify(f"⚠️ [Gold Pips] SELL skipped — Price slipped too far ({cur_mid:.2f} vs {zone_low:.2f})")
                 return
 
-        # Determine TP
-        tp = None
-        if self.tp_target == 1 and sig.get("tp1"):
-            tp = sig["tp1"]
-        elif self.tp_target == 2 and sig.get("tp2"):
-            tp = sig["tp2"]
-        elif self.tp_target == 3 and sig.get("tp3"):
-            tp = sig["tp3"]
-        elif sig.get("tp1"):
-            tp = sig["tp1"]
-
         sl = sig.get("sl")
         exec_price = prices["buy"] if side == "BUY" else prices["sell"]
 
+        # Determine TP levels
+        tp1 = sig.get("tp1")
+        macro_tp = sig.get("tp2") if self.tp_target == 2 else (sig.get("tp3") or sig.get("tp2") or tp1)
+        if not macro_tp:
+            macro_tp = tp1
+
+        orders_to_place = []
+        min_qty = 1.0
+        try:
+            inst = self.mcp.get_instruments(GOLD_ASSET_ID)
+            if inst and isinstance(inst, dict) and "instruments" in inst and len(inst["instruments"]) > 0:
+                min_qty = float(inst["instruments"][0].get("min_quantity", 1.0))
+        except Exception:
+            min_qty = 1.0
+
+        if tp1 and macro_tp and macro_tp != tp1:
+            if self.lots >= (min_qty * 2.0):
+                lot1 = round(self.lots / 2, 2)
+                lot2 = round(self.lots - lot1, 2)
+            else:
+                lot1 = min_qty
+                lot2 = min_qty
+            orders_to_place.append({
+                "tag": "TP1 Scalper (50%)",
+                "lots": lot1,
+                "sl": sl,
+                "tp": tp1,
+                "is_tp1": True
+            })
+            orders_to_place.append({
+                "tag": "Macro Runner (50%)",
+                "lots": lot2,
+                "sl": sl,
+                "tp": macro_tp,
+                "is_tp1": False
+            })
+        else:
+            trade_lots = max(min_qty, self.lots)
+            orders_to_place.append({
+                "tag": "Standard Position (100%)",
+                "lots": trade_lots,
+                "sl": sl,
+                "tp": macro_tp or tp1,
+                "is_tp1": False
+            })
+
+        plan_desc = "\n".join([f"  • {o['tag']}: `{o['lots']}`L | TP: `{o['tp']:.2f}`" if o.get("tp") else f"  • {o['tag']}: `{o['lots']}`L" for o in orders_to_place])
         await self.notify(
             f"⚡ [GOLD PIPS SIGNAL] {side} @ ~{exec_price:.2f}\n\n"
             f"• Side: {side}\n"
             f"• Entry: ~{exec_price:.2f}\n"
             f"• SL: {sl if sl else 'None'}\n"
-            f"• TP: {tp if tp else 'None'} (Target {self.tp_target})\n"
-            f"• Lots: {self.lots} (Lev {self.leverage}x)"
+            f"• Orders:\n{plan_desc}"
         )
 
-        res = self.mcp.place_market_order(
-            side=side.lower(),
-            balance_id=self.balance_id,
-            instrument_id=GOLD_INSTRUMENT,
-            asset_id=GOLD_ASSET_ID,
-            lots=self.lots,
-            leverage=self.leverage,
-            stop_loss=sl,
-            take_profit=tp,
-            is_margin_isolated=True,
-            keep_position_open=False
-        )
+        for o in orders_to_place:
+            res = self.mcp.place_market_order(
+                side=side.lower(),
+                balance_id=self.balance_id,
+                instrument_id=GOLD_INSTRUMENT,
+                asset_id=GOLD_ASSET_ID,
+                lots=o["lots"],
+                leverage=self.leverage,
+                stop_loss=o["sl"],
+                take_profit=o["tp"],
+                is_margin_isolated=True,
+                keep_position_open=False
+            )
 
-        if "order_id" in res:
-            order_id = res["order_id"]
-            logger.info(f"✅ [GoldPips] Order placed! ID: #{order_id}")
-            self.open_positions[order_id] = {
-                "order_id": order_id,
-                "position_id": None,
-                "side": side,
-                "entry_price": exec_price,
-                "sl": sl,
-                "initial_sl": sl,
-                "tp": tp,
-                "moved_to_be": False,
-                "opened_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            }
-            await self.notify(f"✅ [GOLD PIPS FILLED] #{order_id} {side} @ {exec_price:.2f}")
-            asyncio.create_task(self._monitor_position(order_id))
-        else:
-            logger.error(f"❌ [GoldPips] Order failed: {res}")
-            await self.notify(f"❌ [GOLD PIPS FAILED]: {res.get('error', res)}")
+            if "order_id" in res:
+                order_id = res["order_id"]
+                logger.info(f"✅ [GoldPips] {o['tag']} placed! ID: #{order_id}")
+                self.open_positions[order_id] = {
+                    "order_id": order_id,
+                    "position_id": None,
+                    "tag": o["tag"],
+                    "is_tp1": o["is_tp1"],
+                    "lots": o["lots"],
+                    "side": side,
+                    "entry_price": exec_price,
+                    "sl": o["sl"],
+                    "initial_sl": o["sl"],
+                    "tp": o["tp"],
+                    "moved_to_be": False,
+                    "opened_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                }
+                asyncio.create_task(self._monitor_position(order_id))
+            else:
+                logger.error(f"❌ [GoldPips] {o['tag']} failed: {res}")
+                await self.notify(f"❌ [GOLD PIPS FAILED]: {o['tag']} {res.get('error', res)}")
 
     async def _monitor_position(self, order_id: int):
         """Monitors active Gold Pips trade and logs settlement."""
@@ -326,8 +364,17 @@ class GoldPipsCopier(BaseCopier):
 
             if not is_still_open:
                 logger.info(f"📊 [GoldPips] Position #{pos_id} closed! Resolving settlement...")
+                is_tp1 = pos.get("is_tp1", False)
                 await self._log_trade_closure(order_id)
                 self.open_positions.pop(order_id, None)
+
+                # IF TP1 SCALPER CLOSED: Automatically move runner(s) to Breakeven
+                if is_tp1:
+                    for sibling_oid, sibling_pos in list(self.open_positions.items()):
+                        if not sibling_pos.get("is_tp1") and not sibling_pos.get("moved_to_be"):
+                            logger.info(f"🏆 [GoldPips TP1 Banked] Moving sibling Runner #{sibling_pos.get('position_id') or sibling_oid} to Breakeven!")
+                            sibling_pos["pending_be"] = True
+                            await self.apply_breakeven()
                 break
 
             # If BE is pending and not yet confirmed, retry applying BE as price progresses into profit

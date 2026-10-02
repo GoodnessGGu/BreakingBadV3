@@ -75,7 +75,7 @@ logger = logging.getLogger("MasterLauncher")
 async def main():
     parser = argparse.ArgumentParser(description="BreakingBad V3 Master Bot Launcher")
     parser.add_argument("--account", default=os.getenv("ACCOUNT_TYPE", "training"), choices=["training", "regular"])
-    parser.add_argument("--lots", type=float, default=float(os.getenv("DEFAULT_LOTS", "1.0")))
+    parser.add_argument("--lots", type=float, default=float(os.getenv("DEFAULT_LOTS", "2.0")))
     parser.add_argument("--leverage", type=int, default=int(os.getenv("DEFAULT_LEVERAGE", "100")))
     parser.add_argument("--blitz-stake", type=float, default=float(os.getenv("BLITZ_STAKE", "2.0")))
     parser.add_argument("--enable-polycarp", action="store_true", default=os.getenv("ENABLE_POLYCARP", "false").lower() == "true")

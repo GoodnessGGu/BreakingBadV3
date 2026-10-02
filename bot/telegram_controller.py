@@ -1325,7 +1325,7 @@ class TelegramTradingBot:
         # 2. ICT Engine
         if hasattr(self.ict_engine, "active_trades"):
             for s, t in list(self.ict_engine.active_trades.items()):
-                if t and (str(t.get("position_id")) == pid_str or str(t.get("order_id")) == pid_str or (symbol and s == symbol)):
+                if t and (str(t.get("position_id")) == pid_str or str(t.get("order_id")) == pid_str or any(str(tk.get("position_id")) == pid_str or str(tk.get("order_id")) == pid_str for tk in t.get("tickets", [])) or (symbol and s == symbol)):
                     handled = True
                     try:
                         if hasattr(self.ict_engine, "_log_trade_closure"):

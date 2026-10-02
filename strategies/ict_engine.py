@@ -42,7 +42,8 @@ INSTRUMENT_PROFILES = {
         "disp_threshold": 2.0,
         "min_fvg_gap": 0.3,
         "body_ratio_req": 0.50,
-        "default_lots": 1.0,
+        "default_lots": 2.0,
+        "min_lots": 1.0,
         "digits": 2
     },
     "BTCUSD": {
@@ -540,35 +541,68 @@ class ICTStrategyEngine:
                 risk_dist = 0.25
                 sl = round(exec_px - risk_dist if side == "BUY" else exec_px + risk_dist, digits)
 
+            # Calculate dual-take-profit targets:
+            # Leg 1: +1.0R (Stage 2 Partial Profit Bank)
+            # Leg 2: 1:self.rr_ratio (Macro Runner Target)
+            tp1 = round(exec_px + risk_dist if side == "BUY" else exec_px - risk_dist, digits)
+            tp2 = round(exec_px + (risk_dist * self.rr_ratio) if side == "BUY" else exec_px - (risk_dist * self.rr_ratio), digits)
+
+            # Determine lot sizes respecting broker minimum quantity rules
+            min_l = profile.get("min_lots", 0.001)
             trade_lots = profile.get("default_lots") or self.lots
             if symbol == "XAGUSD":
+                min_l = 10.0
                 trade_lots = max(10.0, float(trade_lots))
+            elif symbol == "XAUUSD":
+                min_l = 1.0
+                trade_lots = max(1.0, float(trade_lots))
             elif symbol == "BTCUSD":
-                trade_lots = profile.get("default_lots", 0.01)
+                min_l = 0.001
+                trade_lots = max(min_l, float(trade_lots))
+
+            if trade_lots >= (min_l * 2.0):
+                lot_tp1 = round(trade_lots / 2.0, 4 if min_l < 1 else 2)
+                lot_runner = round(trade_lots - lot_tp1, 4 if min_l < 1 else 2)
             else:
-                trade_lots = self.lots
-            min_l = profile.get("min_lots", 0.01)
-            trade_lots = max(min_l, round(float(trade_lots), 4))
-            tp = round(exec_px + (risk_dist * self.rr_ratio) if side == "BUY" else exec_px - (risk_dist * self.rr_ratio), digits)
+                lot_tp1 = min_l
+                lot_runner = min_l
+
+            total_lots = round(lot_tp1 + lot_runner, 4)
+            trade_lev = min(self.leverage, 20 if symbol == "BTCUSD" else self.leverage)
 
             await self.notify(
                 f"⚡ **[ICT EXECUTION] {symbol} {side} @ {exec_px}**\n\n"
                 f"• Entry : `{exec_px}` (FVG Retest)\n"
-                f"• SL    : `{sl}`\n"
-                f"• TP    : `{tp}` (1:{self.rr_ratio:.1f} RR)\n"
-                f"• Lots  : `{trade_lots}`"
+                f"• Stop Loss : `{sl}`\n"
+                f"• Leg 1 (50% TP1)    : `{tp1}` (+1.0R | {lot_tp1} Lots)\n"
+                f"• Leg 2 (50% Runner) : `{tp2}` (1:{self.rr_ratio:.1f} RR | {lot_runner} Lots)\n"
+                f"• Total Exposure     : `{total_lots}` Lots ({trade_lev}x)"
             )
 
-            trade_lev = min(self.leverage, 20 if symbol == "BTCUSD" else self.leverage)
-            res = self.mcp.place_market_order(
+            # Leg 1: TP1 Partial Order (50%)
+            res1 = self.mcp.place_market_order(
                 side=side.lower(),
                 balance_id=self.balance_id,
                 instrument_id=profile["instrument_id"],
                 asset_id=profile["asset_id"],
-                lots=trade_lots,
+                lots=lot_tp1,
                 leverage=trade_lev,
                 stop_loss=sl,
-                take_profit=tp,
+                take_profit=tp1,
+                is_margin_isolated=True,
+                keep_position_open=False
+            )
+
+            # Leg 2: Macro Runner Order (50%)
+            res2 = self.mcp.place_market_order(
+                side=side.lower(),
+                balance_id=self.balance_id,
+                instrument_id=profile["instrument_id"],
+                asset_id=profile["asset_id"],
+                lots=lot_runner,
+                leverage=trade_lev,
+                stop_loss=sl,
+                take_profit=tp2,
                 is_margin_isolated=True,
                 keep_position_open=False
             )
@@ -580,44 +614,89 @@ class ICTStrategyEngine:
                 side=side,
                 entry_px=exec_px,
                 sl=sl,
-                tp=tp,
+                tp=tp2,
                 engine_name="ICT",
                 event_title=f"FVG Retest Entry [{fvg_l} - {fvg_h}]",
                 timeframe="15M" if CANDLE_SIZE == 900 else "M1"
             )
 
-            if "order_id" in res:
-                order_id = res["order_id"]
-                logger.info(f"✅ [ICTEngine] {symbol} Order filled! ID: #{order_id}")
+            tickets = []
+            if "order_id" in res1:
+                oid1 = res1["order_id"]
+                logger.info(f"✅ [ICTEngine] {symbol} Leg 1 (TP1) placed! ID: #{oid1}")
+                tickets.append({
+                    "tag": "TP1 Partial (50%)",
+                    "order_id": oid1,
+                    "position_id": None,
+                    "lots": lot_tp1,
+                    "side": side,
+                    "entry_price": exec_px,
+                    "sl": sl,
+                    "initial_sl": sl,
+                    "tp": tp1,
+                    "is_tp1": True,
+                    "is_open": True,
+                    "moved_to_be": False,
+                    "trailing_stage": 0
+                })
+            else:
+                logger.warning(f"⚠️ [ICTEngine] {symbol} Leg 1 (TP1) order failed: {res1}")
+
+            if "order_id" in res2:
+                oid2 = res2["order_id"]
+                logger.info(f"✅ [ICTEngine] {symbol} Leg 2 (Runner) placed! ID: #{oid2}")
+                tickets.append({
+                    "tag": "Macro Runner (50%)",
+                    "order_id": oid2,
+                    "position_id": None,
+                    "lots": lot_runner,
+                    "side": side,
+                    "entry_price": exec_px,
+                    "sl": sl,
+                    "initial_sl": sl,
+                    "tp": tp2,
+                    "is_tp1": False,
+                    "is_open": True,
+                    "moved_to_be": False,
+                    "trailing_stage": 0
+                })
+            else:
+                logger.warning(f"⚠️ [ICTEngine] {symbol} Leg 2 (Runner) order failed: {res2}")
+
+            if tickets:
+                self.pending_fvgs.pop(symbol, None)
+                primary_oid = tickets[-1]["order_id"]
                 self.active_trades[symbol] = {
-                    "order_id": order_id,
+                    "order_id": primary_oid,
                     "position_id": None,
                     "symbol": symbol,
                     "side": side,
                     "entry_price": exec_px,
                     "initial_sl": sl,
                     "current_sl": sl,
-                    "tp": tp,
-                    "lots": trade_lots,
+                    "tp": tp2,
+                    "tp1": tp1,
+                    "tp2": tp2,
+                    "lots": total_lots,
                     "moved_to_be": False,
                     "trailing_stage": 0,
-                    "opened_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    "opened_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "tickets": tickets
                 }
-                self.pending_fvgs.pop(symbol, None)
                 caption = (
-                    f"ICT Order Filled | #{order_id} {symbol} ({'BUY' if side == 'BUY' else 'SELL'})\n\n"
+                    f"ICT Dual-Ticket Order Filled | {symbol} ({'BUY' if side == 'BUY' else 'SELL'})\n\n"
                     f"• Entry: {exec_px}\n"
                     f"• Stop Loss: {sl}\n"
-                    f"• Target TP: {tp} (1:{self.rr_ratio:.1f} RR)\n"
-                    f"• Size: {trade_lots} Lots ({trade_lev}x)"
+                    f"• Leg 1 (TP1): {tp1} (+1.0R | {lot_tp1}L)\n"
+                    f"• Leg 2 (Runner): {tp2} (1:{self.rr_ratio:.1f} RR | {lot_runner}L)\n"
+                    f"• Total Exposure: {total_lots} Lots ({trade_lev}x)"
                 )
                 await self.notify_photo(chart_bytes, caption)
             else:
-                logger.error(f"[ICTEngine] {symbol} Order placement failed: {res}")
-                # Clear pending FVG to avoid infinite error loops on the same setup
+                logger.error(f"[ICTEngine] {symbol} Order placement failed: Leg1={res1}, Leg2={res2}")
                 self.pending_fvgs.pop(symbol, None)
-                err_dict = res.get('error', {})
-                err_msg = err_dict.get('message', str(err_dict)) if isinstance(err_dict, dict) else str(res)
+                err_dict = res1.get('error', {}) or res2.get('error', {})
+                err_msg = err_dict.get('message', str(err_dict)) if isinstance(err_dict, dict) else str(res1)
                 if "not_available" in err_msg.lower():
                     logger.warning(f"[ICTEngine] Instrument {symbol} is not tradeable on broker. Disabling {symbol}.")
                     if symbol != "XAUUSD":
@@ -637,27 +716,101 @@ class ICTStrategyEngine:
         digits = profile["digits"]
         asset_id = profile["asset_id"]
 
-        if not trade["position_id"]:
-            positions = self.mcp.list_positions(balance_id=self.balance_id)
-            for p in positions:
-                if p.get("asset_id") == asset_id:
-                    trade["position_id"] = p.get("position_id") or p.get("id")
-                    break
+        tickets = trade.get("tickets", [])
+        if not tickets:
+            tickets = [{
+                "tag": "Standard Position (100%)",
+                "order_id": trade.get("order_id"),
+                "position_id": trade.get("position_id"),
+                "lots": trade.get("lots", self.lots),
+                "side": trade.get("side"),
+                "entry_price": trade.get("entry_price"),
+                "sl": trade.get("current_sl", trade.get("initial_sl")),
+                "initial_sl": trade.get("initial_sl"),
+                "tp": trade.get("tp"),
+                "is_tp1": False,
+                "is_open": True,
+                "moved_to_be": trade.get("moved_to_be", False),
+                "trailing_stage": trade.get("trailing_stage", 0)
+            }]
+            trade["tickets"] = tickets
 
-        pos_id = trade["position_id"]
-        if not pos_id:
-            return
-
+        # 1. Resolve missing position_ids from open broker positions
         open_positions = self.mcp.list_positions(balance_id=self.balance_id)
-        is_still_open = any((p.get("position_id") or p.get("id")) == pos_id for p in open_positions)
+        assigned_pids = {t["position_id"] for t in tickets if t.get("position_id")}
 
-        if not is_still_open:
-            logger.info(f"ICT {symbol} Trade #{pos_id} closed! Syncing Google Sheets...")
-            await self._log_trade_closure(symbol, pos_id)
+        for t in tickets:
+            if not t.get("position_id") and t.get("is_open"):
+                for p in open_positions:
+                    if p.get("asset_id") == asset_id:
+                        p_id = p.get("position_id") or p.get("id")
+                        if p_id in assigned_pids:
+                            continue
+                        p_tp = float(p.get("take_profit", 0) or p.get("tp", 0) or 0)
+                        if p_tp > 0 and abs(p_tp - t["tp"]) < 0.2:
+                            t["position_id"] = p_id
+                            assigned_pids.add(p_id)
+                            break
+                        elif not t.get("position_id"):
+                            t["position_id"] = p_id
+                            assigned_pids.add(p_id)
+
+        # Sync top-level position_id to runner for backwards compatibility
+        runner_tk = next((t for t in tickets if not t["is_tp1"]), tickets[0])
+        trade["position_id"] = runner_tk.get("position_id")
+
+        # 2. Check open / closed status of each ticket
+        for t in tickets:
+            if not t.get("is_open"):
+                continue
+            pos_id = t.get("position_id")
+            if not pos_id:
+                continue
+
+            is_still_open = any((p.get("position_id") or p.get("id")) == pos_id for p in open_positions)
+            if not is_still_open:
+                t["is_open"] = False
+                logger.info(f"📊 [ICTEngine] {symbol} {t['tag']} #{pos_id} closed! Syncing Google Sheets...")
+                await self._log_ticket_closure(symbol, t)
+
+                # IF TP1 CLOSED: Immediately shift the Runner leg to Breakeven
+                if t.get("is_tp1"):
+                    for r_tk in tickets:
+                        if not r_tk.get("is_tp1") and r_tk.get("is_open") and not r_tk.get("moved_to_be"):
+                            r_pid = r_tk.get("position_id")
+                            if r_pid:
+                                be_buf = profile["min_fvg_gap"] * 0.5
+                                if symbol == "XAUUSD":
+                                    be_buf = 0.25
+                                be_level = round(trade["entry_price"] + be_buf if trade["side"] == "BUY" else trade["entry_price"] - be_buf, digits)
+                                logger.info(f"🛡️ [ICT Partial Protection] TP1 closed. Shifting Runner #{r_pid} to Breakeven @ {be_level}")
+                                res_be = self.mcp.change_position_stop_loss(position_id=r_pid, level=be_level, endpoint="cfd" if symbol == "XAUUSD" else None)
+                                if not res_be.get("error"):
+                                    r_tk["sl"] = be_level
+                                    r_tk["moved_to_be"] = True
+                                    r_tk["trailing_stage"] = max(r_tk.get("trailing_stage", 0), 2)
+                                    trade["current_sl"] = be_level
+                                    trade["moved_to_be"] = True
+                                    trade["trailing_stage"] = max(trade.get("trailing_stage", 0), 2)
+                                    await self.notify(
+                                        f"🛡️ **[ICT RUNNER RISK-FREE] {symbol} #{r_pid}**\n\n"
+                                        f"• Trigger : TP1 Partial Banked!\n"
+                                        f"• Runner SL shifted to Breakeven: `{be_level:.{digits}f}`\n"
+                                        f"• Target  : `{r_tk['tp']:.{digits}f}` (Risk-Free Run)"
+                                    )
+
+        # If all tickets closed, cleanup trade
+        if all(not t.get("is_open") for t in tickets):
+            logger.info(f"🏁 [ICTEngine] {symbol} all legs closed. Trade completed.")
             self.active_trades.pop(symbol, None)
             return
 
-        # Multi-stage Trailing Logic (R-Multiples + Hybrid Pip Milestones)
+        # 3. Multi-stage Trailing Logic for the active Runner ticket
+        active_runner = next((t for t in tickets if not t["is_tp1"] and t.get("is_open")), None)
+        if not active_runner or not active_runner.get("position_id"):
+            return
+
+        pos_id = active_runner["position_id"]
         mid = cur_prices.get("mid", 0.0)
         if mid <= 0:
             return
@@ -671,7 +824,7 @@ class ICTStrategyEngine:
         side = trade["side"]
         gain = (mid - entry) if side == "BUY" else (entry - mid)
         r_mult = gain / risk_dist
-        stage = trade.get("trailing_stage", 0)
+        stage = active_runner.get("trailing_stage", 0)
 
         pip_multiplier = 10 ** (digits - 1)
         gain_pips = gain * pip_multiplier
@@ -681,8 +834,10 @@ class ICTStrategyEngine:
         trigger_stage1 = (r_mult >= 0.5) or (pip_cfg is not None and gain_pips >= pip_cfg["stage1_pips"])
         if trigger_stage1 and stage < 1:
             half_risk_sl = round(entry - (risk_dist * 0.5) if side == "BUY" else entry + (risk_dist * 0.5), digits)
-            res = self.mcp.change_position_stop_loss(position_id=pos_id, level=half_risk_sl)
+            res = self.mcp.change_position_stop_loss(position_id=pos_id, level=half_risk_sl, endpoint="cfd" if symbol == "XAUUSD" else None)
             if not res.get("error"):
+                active_runner["sl"] = half_risk_sl
+                active_runner["trailing_stage"] = 1
                 trade["current_sl"] = half_risk_sl
                 trade["trailing_stage"] = 1
                 logger.info(f"🛡️ [ICT Risk Defense] Risk cut 50% on {symbol} #{pos_id}! SL: {half_risk_sl} (Gain: +{gain_pips:.1f}p / +{r_mult:.2f}R)")
@@ -692,13 +847,18 @@ class ICTStrategyEngine:
                     f"• Risk reduced by 50% | New SL: `{half_risk_sl:.{digits}f}`"
                 )
 
-        # Stage 2: +1.0R or pip threshold -> Move to Breakeven (+ buffer)
+        # Stage 2: +1.0R or pip threshold -> Move Runner to Breakeven (+ buffer)
         trigger_stage2 = (r_mult >= 1.0) or (pip_cfg is not None and gain_pips >= pip_cfg["stage2_pips"])
         if trigger_stage2 and stage < 2:
             be_buf = profile["min_fvg_gap"] * 0.5
+            if symbol == "XAUUSD":
+                be_buf = 0.25
             be_level = round(entry + be_buf if side == "BUY" else entry - be_buf, digits)
-            res = self.mcp.change_position_stop_loss(position_id=pos_id, level=be_level)
+            res = self.mcp.change_position_stop_loss(position_id=pos_id, level=be_level, endpoint="cfd" if symbol == "XAUUSD" else None)
             if not res.get("error"):
+                active_runner["sl"] = be_level
+                active_runner["moved_to_be"] = True
+                active_runner["trailing_stage"] = 2
                 trade["current_sl"] = be_level
                 trade["moved_to_be"] = True
                 trade["trailing_stage"] = 2
@@ -712,7 +872,7 @@ class ICTStrategyEngine:
                     entry_px=entry,
                     be_sl=be_level,
                     initial_sl=initial_sl,
-                    tp=trade.get("tp", 0.0),
+                    tp=active_runner.get("tp", 0.0),
                     cur_px=mid,
                     engine_name="ICT",
                     timeframe="15M" if CANDLE_SIZE == 900 else "M1"
@@ -722,7 +882,7 @@ class ICTStrategyEngine:
                     f"• Side: {'BUY' if side == 'BUY' else 'SELL'}\n"
                     f"• Gain: +{gain_pips:.1f} pips (+{r_mult:.2f}R)\n"
                     f"• Status: Risk-Free (Breakeven SL: {be_level:.{digits}f})\n"
-                    f"• Current Price: {mid:.{digits}f} (Target: {trade.get('tp', 0.0):.{digits}f})"
+                    f"• Current Price: {mid:.{digits}f} (Runner Target: {active_runner.get('tp', 0.0):.{digits}f})"
                 )
                 await self.notify_photo(chart_bytes, caption)
 
@@ -737,12 +897,14 @@ class ICTStrategyEngine:
                 lock_dist = risk_dist * 0.75
 
             lock_075_level = round(entry + lock_dist if side == "BUY" else entry - lock_dist, digits)
-            current_sl = trade.get("current_sl", initial_sl)
+            current_sl = active_runner.get("sl", initial_sl)
             is_improvement = (side == "BUY" and lock_075_level > current_sl) or (side == "SELL" and lock_075_level < current_sl)
 
             if is_improvement:
-                res = self.mcp.change_position_stop_loss(position_id=pos_id, level=lock_075_level)
+                res = self.mcp.change_position_stop_loss(position_id=pos_id, level=lock_075_level, endpoint="cfd" if symbol == "XAUUSD" else None)
                 if not res.get("error"):
+                    active_runner["sl"] = lock_075_level
+                    active_runner["trailing_stage"] = 3
                     trade["current_sl"] = lock_075_level
                     trade["trailing_stage"] = 3
                     locked_pips = lock_dist * pip_multiplier
@@ -754,6 +916,7 @@ class ICTStrategyEngine:
                         f"• New Protected SL: `{lock_075_level:.{digits}f}`"
                     )
             else:
+                active_runner["trailing_stage"] = 3
                 trade["trailing_stage"] = 3
 
         # Stage 4: +2.0R or pip threshold -> Lock in deeper guaranteed profit
@@ -767,12 +930,14 @@ class ICTStrategyEngine:
                 lock_dist = risk_dist * 1.25
 
             lock_125_level = round(entry + lock_dist if side == "BUY" else entry - lock_dist, digits)
-            current_sl = trade.get("current_sl", initial_sl)
+            current_sl = active_runner.get("sl", initial_sl)
             is_improvement = (side == "BUY" and lock_125_level > current_sl) or (side == "SELL" and lock_125_level < current_sl)
 
             if is_improvement:
-                res = self.mcp.change_position_stop_loss(position_id=pos_id, level=lock_125_level)
+                res = self.mcp.change_position_stop_loss(position_id=pos_id, level=lock_125_level, endpoint="cfd" if symbol == "XAUUSD" else None)
                 if not res.get("error"):
+                    active_runner["sl"] = lock_125_level
+                    active_runner["trailing_stage"] = 4
                     trade["current_sl"] = lock_125_level
                     trade["trailing_stage"] = 4
                     locked_pips = lock_dist * pip_multiplier
@@ -784,6 +949,7 @@ class ICTStrategyEngine:
                         f"• New Protected SL: `{lock_125_level:.{digits}f}`"
                     )
             else:
+                active_runner["trailing_stage"] = 4
                 trade["trailing_stage"] = 4
 
         # Stage 5: +2.5R+ or pip threshold -> Dynamic Trailing Stop (Ratchets behind market price)
@@ -796,13 +962,15 @@ class ICTStrategyEngine:
                 trail_dist = risk_dist * 0.75
 
             trail_sl = round(mid - trail_dist if side == "BUY" else mid + trail_dist, digits)
-            current_sl = trade.get("current_sl", initial_sl)
+            current_sl = active_runner.get("sl", initial_sl)
             step_buf = profile["min_fvg_gap"] * 0.2
             should_update = (side == "BUY" and trail_sl > current_sl + step_buf) or \
                             (side == "SELL" and trail_sl < current_sl - step_buf)
             if should_update:
-                res = self.mcp.change_position_stop_loss(position_id=pos_id, level=trail_sl)
+                res = self.mcp.change_position_stop_loss(position_id=pos_id, level=trail_sl, endpoint="cfd" if symbol == "XAUUSD" else None)
                 if not res.get("error"):
+                    active_runner["sl"] = trail_sl
+                    active_runner["trailing_stage"] = 5
                     trade["current_sl"] = trail_sl
                     trade["trailing_stage"] = 5
                     logger.info(f"🚀 [ICT Dynamic Trailing] Ratchet SL on {symbol} #{pos_id}! SL: {trail_sl} (trailing {trail_dist * pip_multiplier:.1f} pips behind)")
@@ -812,16 +980,16 @@ class ICTStrategyEngine:
                         f"• SL ratcheted to: `{trail_sl:.{digits}f}` (Trailing {trail_dist * pip_multiplier:.1f} pips behind market)"
                     )
 
-    async def _log_trade_closure(self, symbol: str, pos_id: int, reason_override: Optional[str] = None):
-        trade = self.active_trades.get(symbol)
-        if not trade:
+    async def _log_ticket_closure(self, symbol: str, ticket: Dict[str, Any], reason_override: Optional[str] = None):
+        pos_id = ticket.get("position_id") or ticket.get("order_id")
+        if not pos_id:
             return
         profile = INSTRUMENT_PROFILES[symbol]
         digits = profile["digits"]
         try:
             pnl = 0.0
             exit_px = 0.0
-            reason = reason_override or "closed"
+            reason = reason_override or ("TP1 Partial Hit" if ticket.get("is_tp1") else "closed")
 
             for attempt in range(3):
                 try:
@@ -843,7 +1011,7 @@ class ICTStrategyEngine:
                 if attempt < 2:
                     await asyncio.sleep(0.8)
 
-            entry_px = trade["entry_price"]
+            entry_px = ticket["entry_price"]
             if exit_px == 0.0:
                 candles = self.mcp.get_candles(profile["asset_id"], count=2)
                 if candles and len(candles) > 0:
@@ -853,16 +1021,18 @@ class ICTStrategyEngine:
                     exit_px = entry_px
 
             pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
+            tag = ticket.get("tag", "Position")
             if pnl > 0:
-                header_line = f"🏆 [ICT WON] {symbol} {pnl_str}"
+                header_line = f"🏆 [ICT WON - {tag.upper()}] {symbol} {pnl_str}"
             elif pnl == 0:
-                header_line = f"🛡️ [ICT BREAKEVEN] {symbol} $0.00"
+                header_line = f"🛡️ [ICT BREAKEVEN - {tag.upper()}] {symbol} $0.00"
             else:
-                header_line = f"❌ [ICT CLOSED] {symbol} {pnl_str}"
+                header_line = f"❌ [ICT CLOSED - {tag.upper()}] {symbol} {pnl_str}"
 
             caption = (
                 f"{header_line}\n\n"
-                f"• Side: {trade['side']} ({self.lots} Lots)\n"
+                f"• Leg: {tag} ({ticket.get('lots', self.lots)} Lots)\n"
+                f"• Side: {ticket['side']}\n"
                 f"• Entry: {entry_px:.{digits}f}\n"
                 f"• Exit: {exit_px:.{digits}f}\n"
                 f"• Net PnL: {pnl_str}\n"
@@ -875,15 +1045,15 @@ class ICTStrategyEngine:
                 chart_bytes = generate_trade_close_chart(
                     df=candles,
                     symbol=symbol,
-                    side=trade["side"],
+                    side=ticket["side"],
                     entry_px=entry_px,
                     exit_px=exit_px,
-                    tp=trade.get("tp", 0.0),
-                    sl=trade.get("current_sl", 0.0),
+                    tp=ticket.get("tp", 0.0),
+                    sl=ticket.get("sl", 0.0),
                     pnl=pnl,
                     reason=reason,
                     engine_name="ICT",
-                    event_title=f"1:{self.rr_ratio:.1f} Target",
+                    event_title=f"{tag} - 1:{self.rr_ratio:.1f} Plan",
                     timeframe="15M" if CANDLE_SIZE == 900 else "M1"
                 )
                 await self.notify_photo(chart_bytes, caption)
@@ -897,16 +1067,16 @@ class ICTStrategyEngine:
                 eq = bal.get("equity", 0.0) if bal else 0.0
                 trade_payload = {
                     "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "asset": f"ICT {symbol}",
-                    "side": trade["side"],
-                    "lots": self.lots,
+                    "asset": f"ICT {symbol} ({tag})",
+                    "side": ticket["side"],
+                    "lots": ticket.get("lots", self.lots),
                     "entry_price": entry_px,
-                    "stop_loss": trade["current_sl"],
-                    "take_profit": trade["tp"],
+                    "stop_loss": ticket.get("sl", 0.0),
+                    "take_profit": ticket.get("tp", 0.0),
                     "exit_price": exit_px,
                     "pnl": pnl,
                     "pips": round(abs(exit_px - entry_px) * (10 ** (digits - 1)), 1),
-                    "risk_reward": f"1:{self.rr_ratio:.1f} (ICT Autonomous)",
+                    "risk_reward": f"{tag} (1:{self.rr_ratio:.1f} Plan)",
                     "exit_reason": reason,
                     "position_id": pos_id,
                     "balance_equity": eq
@@ -916,6 +1086,28 @@ class ICTStrategyEngine:
                 logger.warning(f"[ICTEngine] GSheet background dispatch error: {ge}")
         except Exception as e:
             logger.error(f"[ICTEngine] Error logging trade closure for {symbol}: {e}")
+
+    async def _log_trade_closure(self, symbol: str, pos_id: int, reason_override: Optional[str] = None):
+        trade = self.active_trades.get(symbol)
+        if not trade:
+            return
+        ticket = next((t for t in trade.get("tickets", []) if str(t.get("position_id")) == str(pos_id) or str(t.get("order_id")) == str(pos_id)), None)
+        if ticket:
+            ticket["is_open"] = False
+            await self._log_ticket_closure(symbol, ticket, reason_override)
+        else:
+            dummy_ticket = {
+                "tag": "Standard Position (100%)",
+                "order_id": trade.get("order_id"),
+                "position_id": pos_id,
+                "lots": trade.get("lots", self.lots),
+                "side": trade.get("side"),
+                "entry_price": trade.get("entry_price"),
+                "sl": trade.get("current_sl"),
+                "tp": trade.get("tp"),
+                "is_tp1": False
+            }
+            await self._log_ticket_closure(symbol, dummy_ticket, reason_override)
 
     async def run_loop(self):
         self.is_running = True

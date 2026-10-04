@@ -9,7 +9,7 @@ from typing import Dict, Any, List, Optional
 def persistent_reply_keyboard() -> ReplyKeyboardMarkup:
     keyboard = [
         [KeyboardButton("📊 Status"), KeyboardButton("💰 Balance")],
-        [KeyboardButton("🤖 Gold ICT"), KeyboardButton("🕯️ CRT Engine")],
+        [KeyboardButton("🤖 Gold ICT"), KeyboardButton("🕯️ CRT Engine"), KeyboardButton("📐 Trendlines")],
         [KeyboardButton("🏛️ S&D Engine"), KeyboardButton("🎯 Mission & Strategies")],
         [KeyboardButton("📡 Channels"), KeyboardButton("📋 Active Setups")],
         [KeyboardButton("📜 History"), KeyboardButton("⚙️ Risk & Sizing")],
@@ -31,18 +31,19 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("🕯️ CRT Engine", callback_data="btn_crt_menu")
         ],
         [
-            InlineKeyboardButton("🏛️ S&D Imbalance Engine", callback_data="btn_snd_menu"),
-            InlineKeyboardButton("🎯 Mission & Strategies", callback_data="btn_mission_strategies")
+            InlineKeyboardButton("📐 Trendline Engine", callback_data="btn_trendline_menu"),
+            InlineKeyboardButton("🏛️ S&D Imbalance Engine", callback_data="btn_snd_menu")
         ],
         [
-            InlineKeyboardButton("📋 Active Setups", callback_data="btn_active_trades"),
-            InlineKeyboardButton("📜 Trade History", callback_data="history_cat_all")
+            InlineKeyboardButton("🎯 Mission & Strategies", callback_data="btn_mission_strategies"),
+            InlineKeyboardButton("📋 Active Setups", callback_data="btn_active_trades")
         ],
         [
-            InlineKeyboardButton("⚙️ Risk & Sizing", callback_data="btn_settings_menu"),
-            InlineKeyboardButton("🌐 Market Sessions", callback_data="btn_sessions")
+            InlineKeyboardButton("📜 Trade History", callback_data="history_cat_all"),
+            InlineKeyboardButton("⚙️ Risk & Sizing", callback_data="btn_settings_menu")
         ],
         [
+            InlineKeyboardButton("🌐 Market Sessions", callback_data="btn_sessions"),
             InlineKeyboardButton("📰 Economic News", callback_data="btn_news")
         ],
         [
@@ -56,11 +57,15 @@ def history_menu_keyboard(category: str = "all") -> InlineKeyboardMarkup:
     keyboard = [
         [
             InlineKeyboardButton(f"{'✅ ' if category == 'all' else ''}📊 All Trades", callback_data="history_cat_all"),
-            InlineKeyboardButton(f"{'✅ ' if category == 'blitz' else ''}⚡ Blitz Options", callback_data="history_cat_blitz")
+            InlineKeyboardButton(f"{'✅ ' if category == 'cfd' else ''}📈 CFD Copiers", callback_data="history_cat_cfd")
         ],
         [
-            InlineKeyboardButton(f"{'✅ ' if category == 'cfd' else ''}📈 CFD Copiers", callback_data="history_cat_cfd"),
-            InlineKeyboardButton(f"{'✅ ' if category == 'ict' else ''}🤖 ICT Engine", callback_data="history_cat_ict")
+            InlineKeyboardButton(f"{'✅ ' if category == 'ict' else ''}🤖 ICT Engine", callback_data="history_cat_ict"),
+            InlineKeyboardButton(f"{'✅ ' if category == 'crt' else ''}🕯️ CRT Engine", callback_data="history_cat_crt")
+        ],
+        [
+            InlineKeyboardButton(f"{'✅ ' if category == 'trendline' else ''}📐 Trendlines", callback_data="history_cat_trendline"),
+            InlineKeyboardButton(f"{'✅ ' if category == 'blitz' else ''}⚡ Blitz Options", callback_data="history_cat_blitz")
         ],
         [
             InlineKeyboardButton("🔄 Refresh", callback_data=f"history_cat_{category}"),
@@ -271,6 +276,45 @@ def crt_menu_keyboard(crt_status: Dict[str, Any]) -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton("🎯 Mission & Logic", callback_data="btn_mission_strategies"),
             InlineKeyboardButton("🔙 Back to Main Menu", callback_data="btn_main_menu")
+        ]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def trendline_menu_keyboard(trendline_status: Dict[str, Any]) -> InlineKeyboardMarkup:
+    """Dedicated interactive keyboard for 15M Trendline Bounce Engine."""
+    enabled = trendline_status.get("enabled", False)
+    icon = "🟢" if enabled else "🔴"
+    status_txt = "ON" if enabled else "OFF"
+    active_syms = set(trendline_status.get("enabled_symbols", []))
+    cur_lots = trendline_status.get("lots", 2.0)
+    cur_lev = trendline_status.get("leverage", 100)
+
+    def s_icon(sym: str) -> str:
+        return "🟢" if sym in active_syms else "⚪"
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                f"{icon} Trendline Master Switch: {status_txt}",
+                callback_data="toggle_trendline_master"
+            )
+        ],
+        [
+            InlineKeyboardButton(f"{s_icon('XAUUSD')} Gold (XAUUSD)", callback_data="toggle_trendline_xauusd"),
+            InlineKeyboardButton(f"{s_icon('NAS100')} US Tech 100 (NAS100)", callback_data="toggle_trendline_nas100")
+        ],
+        [
+            InlineKeyboardButton(f"{s_icon('BTCUSD')} Bitcoin (BTCUSD)", callback_data="toggle_trendline_btcusd"),
+            InlineKeyboardButton(f"{s_icon('EURUSD')} EUR/USD", callback_data="toggle_trendline_eurusd")
+        ],
+        [
+            InlineKeyboardButton(f"⚙️ Lot Sizing: {cur_lots} Lots (Dual)", callback_data="btn_settings_menu"),
+            InlineKeyboardButton(f"⚡ Lev: {cur_lev}x", callback_data="btn_settings_menu")
+        ],
+        [
+            InlineKeyboardButton("🔄 Refresh", callback_data="btn_trendline_menu"),
+            InlineKeyboardButton("🔙 Main Menu", callback_data="btn_main_menu")
         ]
     ]
     return InlineKeyboardMarkup(keyboard)

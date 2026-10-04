@@ -107,7 +107,8 @@ class ChannelManager:
             try:
                 chat_id = event.chat_id
                 copier = self.channel_to_copier.get(chat_id)
-                if not copier:
+                # Optimization: if copier is missing or disabled, drop immediately with ZERO logs or processing
+                if not copier or not getattr(copier, 'is_enabled', True):
                     return
 
                 msg_text = getattr(event.message, 'message', None) or getattr(event.message, 'text', '')

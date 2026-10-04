@@ -39,6 +39,7 @@ from strategies.ict_engine import ICTStrategyEngine
 from strategies.news_straddle_engine import NewsStraddleEngine
 from strategies.crt_engine import CRTStrategyEngine
 from strategies.snd_engine import SNDStrategyEngine
+from strategies.trendline_engine import TrendlineStrategyEngine
 from bot.telegram_controller import TelegramTradingBot
 
 class SensitiveTokenFilter(logging.Filter):
@@ -79,6 +80,8 @@ async def main():
     parser.add_argument("--leverage", type=int, default=int(os.getenv("DEFAULT_LEVERAGE", "100")))
     parser.add_argument("--blitz-stake", type=float, default=float(os.getenv("BLITZ_STAKE", "2.0")))
     parser.add_argument("--enable-polycarp", action="store_true", default=os.getenv("ENABLE_POLYCARP", "false").lower() == "true")
+    parser.add_argument("--enable-trendline", action="store_true", default=os.getenv("ENABLE_TRENDLINE", "true").lower() == "true")
+    parser.add_argument("--trendline-symbol", default=os.getenv("TRENDLINE_SYMBOL", "XAUUSD"))
     parser.add_argument("--ict-symbol", default=os.getenv("ICT_SYMBOL", "XAUUSD"))
     parser.add_argument("--gold-pips-tp", type=int, default=int(os.getenv("GOLD_PIPS_TP", "2")), choices=[1, 2, 3])
     parser.add_argument("--lookback-mins", type=int, default=int(os.getenv("LOOKBACK_MINS", "240")))
@@ -197,7 +200,19 @@ async def main():
     )
     snd_engine.set_balance(fx_bid, args.account)
 
-    # 8. Create Telegram Bot Controller
+    # 8. Create Trendline Strategy Engine (15M 3rd Touch Bounce on Gold & NAS100)
+    trendline_engine = TrendlineStrategyEngine(
+        mcp_client=forex_mcp,
+        symbol=args.trendline_symbol,
+        account_type=args.account,
+        lots=args.lots,
+        leverage=args.leverage
+    )
+    trendline_engine.set_balance(fx_bid, args.account)
+    if not args.enable_trendline:
+        trendline_engine.is_enabled = False
+
+    # 9. Create Telegram Bot Controller
     tg_bot = TelegramTradingBot(
         token=token,
         admin_id=admin_id,
@@ -209,7 +224,8 @@ async def main():
         leverage=args.leverage,
         blitz_stake=args.blitz_stake,
         crt_engine=crt_engine,
-        snd_engine=snd_engine
+        snd_engine=snd_engine,
+        trendline_engine=trendline_engine
     )
     tg_bot.account_type = args.account
     if tg_bot.straddle_engine:
@@ -224,11 +240,13 @@ async def main():
     crt_engine.set_photo_notification_callback(tg_bot.broadcast_photo)
     snd_engine.set_notification_callback(tg_bot.broadcast_alert)
     snd_engine.set_photo_notification_callback(tg_bot.broadcast_photo)
+    trendline_engine.set_notification_callback(tg_bot.broadcast_alert)
+    trendline_engine.set_photo_notification_callback(tg_bot.broadcast_photo)
     if tg_bot.straddle_engine:
         tg_bot.straddle_engine.set_notification_callback(tg_bot.broadcast_alert)
         tg_bot.straddle_engine.set_photo_notification_callback(tg_bot.broadcast_photo)
 
-    # 9. Start Concurrent Execution
+    # 10. Start Concurrent Execution
     logger.info("=" * 65)
     logger.info("🟢 ALL MODULES INITIALIZED — STARTING MASTER EVENT LOOP")
     logger.info("=" * 65)
@@ -239,7 +257,8 @@ async def main():
             channel_mgr.start(),
             ict_engine.run_loop(),
             crt_engine.run_loop(),
-            snd_engine.run_loop()
+            snd_engine.run_loop(),
+            trendline_engine.run_loop()
         )
     except (asyncio.CancelledError, KeyboardInterrupt):
         logger.info("Shutting down master bot...")

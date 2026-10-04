@@ -1,15 +1,12 @@
 """
 strategies/crt_engine.py - Autonomous Institutional Candle Range Theory (CRT) Engine
-
-Dedicated autonomous strategy engine specialized for:
-- EUR/USD & GBP/USD: Asian Session Range (00:00 - 06:00 UTC) London Judas Protocol
-- Bitcoin (BTCUSD): H1/H4 Anchor Candle Range Expansions
-
-Features:
-1. Multi-Tiered Anchor Range tracking (Asian Range + H1 Candle Range).
+Upgraded for:
+1. Real Multi-Timeframe Anchor Range Tracking (TRUE 1-Hour candles for H1_ANCHOR mode).
 2. Institutional Killzone Timing (London Open 07:00-10:00 UTC | NY Open 12:30-16:00 UTC).
-3. Displacement & FVG Retest Validation before execution.
-4. Dynamic Breakeven Ratchet when price reaches 50% Equilibrium / +1.0R.
+3. Trend Filter: 50 EMA on 1-Hour candles.
+4. Dual-Ticket Partial Take-Profit Execution:
+   - Leg 1 (50% size): Takes profit at +1.0R (banks guaranteed profit).
+   - Leg 2 (50% size): Automatically moves SL to Breakeven when Leg 1 hits TP1, targets +2.2R runner.
 5. High-resolution TradingView Pro graphical Telegram alerts.
 """
 
@@ -41,8 +38,9 @@ CRT_INSTRUMENT_PROFILES: Dict[str, Dict[str, Any]] = {
         "max_sweep": 0.0035,
         "sl_buffer": 0.0003,
         "default_lots": 0.1,
+        "min_lots": 0.001,
         "contract_size": 100000,
-        "target_rr": 2.5,
+        "target_rr": 2.2,
         "digits": 5,
         "mode": "ASIAN_JUDAS"
     },
@@ -55,8 +53,9 @@ CRT_INSTRUMENT_PROFILES: Dict[str, Dict[str, Any]] = {
         "max_sweep": 0.0040,
         "sl_buffer": 0.0004,
         "default_lots": 0.1,
+        "min_lots": 0.001,
         "contract_size": 100000,
-        "target_rr": 2.5,
+        "target_rr": 2.2,
         "digits": 5,
         "mode": "ASIAN_JUDAS"
     },
@@ -65,10 +64,11 @@ CRT_INSTRUMENT_PROFILES: Dict[str, Dict[str, Any]] = {
         "name": "Bitcoin (BTC/USD)",
         "asset_id": 816,
         "instrument_id": "mcrpt.816",
-        "min_sweep": 50.0,
-        "max_sweep": 800.0,
-        "sl_buffer": 40.0,
-        "default_lots": 0.01,
+        "min_sweep": 120.0,
+        "max_sweep": 1500.0,
+        "sl_buffer": 150.0,      # Realistic buffer matching BTC volatility
+        "default_lots": 0.02,     # Split into two 0.01 micro-lots
+        "min_lots": 0.001,
         "contract_size": 1,
         "target_rr": 2.2,
         "digits": 2,
@@ -81,19 +81,20 @@ CRT_INSTRUMENT_PROFILES: Dict[str, Dict[str, Any]] = {
         "instrument_id": "mcfd.74",
         "min_sweep": 3.0,
         "max_sweep": 35.0,
-        "sl_buffer": 3.0,
-        "default_lots": 1.0,
+        "sl_buffer": 2.5,
+        "default_lots": 2.0,      # Two 1.0-lot tickets
+        "min_lots": 1.0,
         "contract_size": 100,
-        "target_rr": 2.5,
+        "target_rr": 2.2,
         "digits": 2,
-        "mode": "ASIAN_JUDAS"
+        "mode": "H1_ANCHOR"
     }
 }
 
 
 class CRTStrategyEngine:
     """
-    Autonomous Candle Range Theory (CRT) Execution Engine.
+    Autonomous Institutional Candle Range Theory (CRT) Execution Engine.
     Specialized for Forex (EURUSD, GBPUSD), Crypto (BTCUSD), and Metals.
     """
 
@@ -104,68 +105,55 @@ class CRTStrategyEngine:
         account_type: str = "training",
         lots: float = 1.0,
         leverage: int = 100,
-        enabled: bool = True
+        notify_callback: Optional[Callable] = None,
+        notify_photo_callback: Optional[Callable] = None
     ):
         self.mcp = mcp_client
-        self.account_type = account_type.lower()
+        self.symbols = symbols or ["EURUSD", "BTCUSD"]
+        self.account_type = account_type
         self.lots = lots
         self.leverage = leverage
-        self.is_enabled = enabled
+        self.notify_cb = notify_callback
+        self.notify_photo_cb = notify_photo_callback
 
-        # Active CRT symbols
-        self.enabled_symbols: Set[str] = set(symbols) if symbols else {"EURUSD", "BTCUSD"}
+        self.is_enabled: bool = True
+        self.is_running: bool = False
         self.balance_id: Optional[int] = None
-        self.notify_cb: Optional[Callable] = None
-        self.notify_photo_cb: Optional[Callable] = None
-        self.is_running = False
-
-        # State storage per symbol
-        self.asian_ranges: Dict[str, Dict[str, Any]] = {}
-        self.h1_anchors: Dict[str, Dict[str, Any]] = {}
-        self.pending_setups: Dict[str, Optional[Dict[str, Any]]] = {}
-        self.active_trades: Dict[str, Optional[Dict[str, Any]]] = {}
+        self.active_trades: Dict[str, Optional[Dict[str, Any]]] = {s: None for s in self.symbols}
+        self.enabled_symbols: Set[str] = set(self.symbols)
         self.unavailable_cooldown: Dict[str, float] = {}
+        self.placed_position_ids: Set[str] = set()
 
     def set_balance(self, balance_id: int, account_type: str = "training"):
         self.balance_id = balance_id
-        self.account_type = account_type.lower()
-
-    def set_lots(self, lots: float):
-        self.lots = max(0.01, round(float(lots), 2))
-
-    def set_leverage(self, leverage: int):
-        self.leverage = int(leverage)
+        self.account_type = account_type
+        logger.info(f"⚡ [CRTEngine] Balance ID set to: {balance_id} ({account_type.upper()})")
 
     def toggle(self) -> bool:
         self.is_enabled = not self.is_enabled
-        logger.info(f"[CRTEngine] Master switch toggled: {'ENABLED' if self.is_enabled else 'DISABLED'}")
+        logger.info(f"🔄 [CRTEngine] Master Switch: {'ENABLED' if self.is_enabled else 'DISABLED'}")
         return self.is_enabled
 
     def toggle_symbol(self, symbol: str) -> bool:
-        sym_clean = symbol.upper().replace("/", "").replace("-", "")
-        if sym_clean in self.enabled_symbols:
-            self.enabled_symbols.remove(sym_clean)
-            logger.info(f"[CRTEngine] Disabled symbol: {sym_clean}")
-            return False
+        if symbol in self.enabled_symbols:
+            self.enabled_symbols.remove(symbol)
+            state = False
         else:
-            self.enabled_symbols.add(sym_clean)
-            logger.info(f"[CRTEngine] Enabled symbol: {sym_clean}")
-            return True
+            self.enabled_symbols.add(symbol)
+            state = True
+        logger.info(f"🔄 [CRTEngine] Asset {symbol}: {'ENABLED' if state else 'DISABLED'}")
+        return state
 
     def get_status(self) -> Dict[str, Any]:
         return {
             "enabled": self.is_enabled,
+            "running": self.is_running,
+            "account_type": self.account_type,
             "enabled_symbols": list(self.enabled_symbols),
             "lots": self.lots,
             "leverage": self.leverage,
-            "active_trades_count": len([t for t in self.active_trades.values() if t])
+            "active_trades": self.active_trades
         }
-
-    def set_notification_callback(self, cb: Callable):
-        self.notify_cb = cb
-
-    def set_photo_notification_callback(self, cb: Callable):
-        self.notify_photo_cb = cb
 
     async def notify_text(self, text: str):
         if self.notify_cb:
@@ -184,8 +172,10 @@ class CRTStrategyEngine:
         else:
             await self.notify_text(caption)
 
-    def is_killzone_active(self) -> Tuple[bool, str]:
-        """Returns True if within London (07:00-10:00 UTC) or NY (12:30-16:00 UTC)."""
+    def is_killzone_active(self, symbol: str) -> Tuple[bool, str]:
+        """Returns True if within active trading killzones. Crypto is 24/7."""
+        if symbol == "BTCUSD":
+            return True, "CRYPTO_24_7"
         now = datetime.now(timezone.utc)
         mins = now.hour * 60 + now.minute
         if 420 <= mins <= 600:
@@ -199,7 +189,6 @@ class CRTStrategyEngine:
         if not profile:
             return {"buy": 0.0, "sell": 0.0, "mid": 0.0}
 
-        # 1. Fetch latest candle for instant live pricing
         try:
             candles = self.mcp.get_candles(asset_id=profile["asset_id"], size=60, count=2)
             if candles and len(candles) > 0:
@@ -210,7 +199,6 @@ class CRTStrategyEngine:
         except Exception as e:
             logger.debug(f"[CRTEngine] Candle price fetch error for {symbol}: {e}")
 
-        # 2. Fallback to calculate_order_size if candle is unavailable
         lev = min(self.leverage, 20 if symbol == "BTCUSD" else self.leverage)
         try:
             p = self.mcp.calculate_order_size(
@@ -244,41 +232,25 @@ class CRTStrategyEngine:
             await asyncio.sleep(15)
 
     async def _evaluate_symbol_cycle(self, symbol: str):
-        # 0. Check if symbol is in temporary unavailable cooldown
         if time.time() < self.unavailable_cooldown.get(symbol, 0.0):
             return
 
         profile = CRT_INSTRUMENT_PROFILES[symbol]
         asset_id = profile["asset_id"]
 
-        # 1. Fetch current price
         cur_px = self.get_market_price(symbol)
         if not cur_px or cur_px.get("mid", 0.0) <= 0:
             return
 
-        # 2. Manage active trade if any
+        # Manage active dual-ticket trade if open
         if self.active_trades.get(symbol):
             await self._manage_active_trade(symbol, cur_px)
             return
 
-        # 3. Check killzones
-        in_kz, kz_name = self.is_killzone_active()
+        in_kz, kz_name = self.is_killzone_active(symbol)
         if not in_kz:
             return
 
-        # 4. Fetch candles for analysis
-        raw_candles = self.mcp.get_candles(asset_id=asset_id, count=40, size=300)
-        if not raw_candles or len(raw_candles) < 15:
-            return
-
-        df = pd.DataFrame([{
-            "Open": float(c.get("open") or c.get("from", 0.0)),
-            "High": float(c.get("max") or c.get("high", 0.0)),
-            "Low": float(c.get("min") or c.get("low", 0.0)),
-            "Close": float(c.get("close") or c.get("to", 0.0))
-        } for c in raw_candles])
-
-        # 5. Evaluate CRT Setup
         mode = profile["mode"]
         digits = profile["digits"]
         min_sweep = profile["min_sweep"]
@@ -286,184 +258,185 @@ class CRTStrategyEngine:
         sl_buffer = profile["sl_buffer"]
         target_rr = profile["target_rr"]
 
-        recent_low = float(df['Low'].tail(6).min())
-        recent_high = float(df['High'].tail(6).max())
-        last_c = float(df['Close'].iloc[-1])
-        last_o = float(df['Open'].iloc[-1])
-        last_h = float(df['High'].iloc[-1])
-        last_l = float(df['Low'].iloc[-1])
+        # Fetch 5-Minute Execution Candles
+        raw_5m = self.mcp.get_candles(asset_id=asset_id, count=30, size=300)
+        if not raw_5m or len(raw_5m) < 15:
+            return
 
-        # Reference anchor: previous 12-bar high/low (or Asian session range)
-        anchor_high = float(df['High'].iloc[-24:-6].max()) if len(df) >= 24 else float(df['High'].iloc[0:8].max())
-        anchor_low = float(df['Low'].iloc[-24:-6].min()) if len(df) >= 24 else float(df['Low'].iloc[0:8].min())
-        anchor_mid = (anchor_high + anchor_low) / 2.0
+        df_5m = pd.DataFrame([{
+            "Open": float(c.get("open") or c.get("from", 0.0)),
+            "High": float(c.get("max") or c.get("high", 0.0)),
+            "Low": float(c.get("min") or c.get("low", 0.0)),
+            "Close": float(c.get("close") or c.get("to", 0.0))
+        } for c in raw_5m])
 
-        # --- A. Bullish CRT: Sweep Low -> Displacement Reclaim ---
+        recent_low = float(df_5m['Low'].tail(4).min())
+        recent_high = float(df_5m['High'].tail(4).max())
+        last_c = float(df_5m['Close'].iloc[-1])
+        last_o = float(df_5m['Open'].iloc[-1])
+        last_h = float(df_5m['High'].iloc[-1])
+        last_l = float(df_5m['Low'].iloc[-1])
+
+        # ── 1. H1 ANCHOR RANGE MODE (True 1-Hour Candles) ─────────────
+        if mode == "H1_ANCHOR":
+            raw_h1 = self.mcp.get_candles(asset_id=asset_id, count=15, size=3600)
+            if not raw_h1 or len(raw_h1) < 5:
+                return
+
+            df_h1 = pd.DataFrame([{
+                "Open": float(c.get("open") or c.get("from", 0.0)),
+                "High": float(c.get("max") or c.get("high", 0.0)),
+                "Low": float(c.get("min") or c.get("low", 0.0)),
+                "Close": float(c.get("close") or c.get("to", 0.0))
+            } for c in raw_h1])
+
+            # Anchor is the COMPLETED previous 1-Hour candle (-2 because -1 is forming)
+            prev_h1 = df_h1.iloc[-2]
+            anchor_high = float(prev_h1['High'])
+            anchor_low = float(prev_h1['Low'])
+            anchor_mid = (anchor_high + anchor_low) / 2.0
+
+            # Calculate H1 50-EMA for macro trend flow
+            df_h1['ema50'] = df_h1['Close'].ewm(span=max(3, len(df_h1)//2)).mean()
+            h1_trend_up = df_h1['Close'].iloc[-1] >= df_h1['ema50'].iloc[-1]
+            h1_trend_down = df_h1['Close'].iloc[-1] <= df_h1['ema50'].iloc[-1]
+
+        # ── 2. ASIAN JUDAS MODE (EURUSD / GBPUSD) ─────────────────────
+        else:
+            anchor_high = float(df_5m['High'].iloc[-24:-6].max()) if len(df_5m) >= 24 else float(df_5m['High'].iloc[0:8].max())
+            anchor_low = float(df_5m['Low'].iloc[-24:-6].min()) if len(df_5m) >= 24 else float(df_5m['Low'].iloc[0:8].min())
+            anchor_mid = (anchor_high + anchor_low) / 2.0
+            h1_trend_up = True
+            h1_trend_down = True
+
+        # --- A. Bullish CRT: Sweep Anchor Low -> Displacement Reclaim UP ---
         sweep_d = anchor_low - recent_low
-        if min_sweep <= sweep_d <= max_sweep:
+        if min_sweep <= sweep_d <= max_sweep and h1_trend_up:
             body = last_c - last_o
             tot_r = last_h - last_l
-            if last_c > anchor_low and body > 0 and tot_r > 0 and (body / tot_r >= 0.50):
+            if last_c > anchor_low and body > 0 and tot_r > 0 and (body / tot_r >= 0.40):
                 entry = cur_px["buy"]
                 sl = round(recent_low - sl_buffer, digits)
                 risk = abs(entry - sl)
-                if risk > 0:
-                    tp = round(max(anchor_high, entry + (risk * target_rr)), digits)
-                    await self._execute_crt_trade(symbol, "BUY", entry, sl, tp, anchor_mid, kz_name, df)
+                if risk > sl_buffer:
+                    tp1 = round(entry + risk, digits)
+                    tp2 = round(entry + (risk * target_rr), digits)
+                    await self._execute_dual_ticket_crt_trade(symbol, "BUY", entry, sl, tp1, tp2, anchor_mid, kz_name, df_5m)
 
-        # --- B. Bearish CRT: Sweep High -> Displacement Reclaim ---
+        # --- B. Bearish CRT: Sweep Anchor High -> Displacement Reclaim DOWN ---
         sweep_u = recent_high - anchor_high
-        if min_sweep <= sweep_u <= max_sweep:
+        if min_sweep <= sweep_u <= max_sweep and h1_trend_down:
             body = last_o - last_c
             tot_r = last_h - last_l
-            if last_c < anchor_high and body > 0 and tot_r > 0 and (body / tot_r >= 0.50):
+            if last_c < anchor_high and body > 0 and tot_r > 0 and (body / tot_r >= 0.40):
                 entry = cur_px["sell"]
                 sl = round(recent_high + sl_buffer, digits)
                 risk = abs(sl - entry)
-                if risk > 0:
-                    tp = round(min(anchor_low, entry - (risk * target_rr)), digits)
-                    await self._execute_crt_trade(symbol, "SELL", entry, sl, tp, anchor_mid, kz_name, df)
+                if risk > sl_buffer:
+                    tp1 = round(entry - risk, digits)
+                    tp2 = round(entry - (risk * target_rr), digits)
+                    await self._execute_dual_ticket_crt_trade(symbol, "SELL", entry, sl, tp1, tp2, anchor_mid, kz_name, df_5m)
 
-    async def _execute_crt_trade(self, symbol: str, side: str, entry: float, sl: float, tp: float, mid: float, kz_name: str, df: pd.DataFrame):
+    async def _execute_dual_ticket_crt_trade(
+        self, symbol: str, side: str, entry: float, sl: float, tp1: float, tp2: float,
+        mid: float, kz_name: str, df: pd.DataFrame
+    ):
         profile = CRT_INSTRUMENT_PROFILES[symbol]
         instrument_id = profile["instrument_id"]
-        lots = profile.get("default_lots", self.lots)
+        asset_id = profile["asset_id"]
 
-        logger.info(f"⚡ [CRTEngine] Executing {side} on {symbol} @ {entry:.5f} | SL: {sl} | TP: {tp} ({kz_name})")
+        min_l = profile.get("min_lots", 0.001)
+        trade_lots = profile.get("default_lots") or self.lots
+        if symbol == "XAUUSD":
+            min_l = 1.0
+            trade_lots = max(2.0, float(trade_lots))
+        elif symbol == "BTCUSD":
+            min_l = 0.001
+            trade_lots = max(0.02, float(trade_lots))
+
+        if trade_lots >= (min_l * 2.0):
+            lot_tp1 = round(trade_lots / 2.0, 4 if min_l < 1 else 2)
+            lot_runner = round(trade_lots - lot_tp1, 4 if min_l < 1 else 2)
+        else:
+            lot_tp1 = min_l
+            lot_runner = min_l
+
         trade_lev = min(self.leverage, 20 if symbol == "BTCUSD" else self.leverage)
-        res = self.mcp.place_market_order(
+        logger.info(f"⚡ [CRTEngine] Dual-Ticket {side} on {symbol} @ {entry:.5f} | SL: {sl} | TP1: {tp1} (+1.0R) | TP2: {tp2} ({kz_name})")
+
+        # Leg 1: Banks profit at TP1 (+1.0R)
+        res1 = self.mcp.place_market_order(
             side=side.lower(),
             balance_id=self.balance_id,
             instrument_id=instrument_id,
-            asset_id=profile["asset_id"],
-            lots=lots,
+            asset_id=asset_id,
+            lots=lot_tp1,
             leverage=trade_lev,
             stop_loss=sl,
-            take_profit=tp,
+            take_profit=tp1,
             is_margin_isolated=True,
             keep_position_open=False
         )
 
-        if not res or "error" in res or not (res.get("order_id") or res.get("position_id")):
-            err_dict = res.get('error', {}) if isinstance(res, dict) else {}
-            err_msg = err_dict.get('message', str(err_dict)) if isinstance(err_dict, dict) else str(res)
-            logger.error(f"[CRTEngine] {symbol} Order placement rejected by broker: {err_msg}")
-            if "not_available" in str(err_msg).lower():
-                self.unavailable_cooldown[symbol] = time.time() + 3600
-                await self.notify_text(f"CRT Order Failed | {symbol} is currently unavailable for CFD trading on broker (paused for 1h).")
-            else:
-                await self.notify_text(f"CRT Order Failed | {symbol}: {err_msg}")
-            return
+        # Leg 2: Runner to TP2
+        res2 = self.mcp.place_market_order(
+            side=side.lower(),
+            balance_id=self.balance_id,
+            instrument_id=instrument_id,
+            asset_id=asset_id,
+            lots=lot_runner,
+            leverage=trade_lev,
+            stop_loss=sl,
+            take_profit=tp2,
+            is_margin_isolated=True,
+            keep_position_open=False
+        )
 
-        order_id = res.get("order_id")
-        pos_id = res.get("position_id")
-        # Auto-resolve actual position_id from broker if missing or still equal to order_id
-        if not pos_id or pos_id == order_id:
-            try:
-                time.sleep(1.0)
-                open_positions = self.mcp.list_positions(balance_id=self.balance_id)
-                for p in open_positions:
-                    if p.get("asset_id") == profile["asset_id"]:
-                        pos_id = p.get("position_id") or p.get("id")
-                        break
-            except Exception as e:
-                logger.debug(f"[CRTEngine] Error resolving position_id: {e}")
-        pos_id = pos_id or order_id or f"crt_{int(time.time())}"
+        pos1_id = res1.get("position_id") or res1.get("order_id") if isinstance(res1, dict) else None
+        pos2_id = res2.get("position_id") or res2.get("order_id") if isinstance(res2, dict) else None
+        if pos1_id: self.placed_position_ids.add(str(pos1_id))
+        if pos2_id: self.placed_position_ids.add(str(pos2_id))
 
         self.active_trades[symbol] = {
-            "position_id": pos_id,
-            "order_id": order_id or pos_id,
             "symbol": symbol,
             "side": side,
             "entry_price": entry,
             "sl_price": sl,
             "initial_sl": sl,
-            "tp_price": tp,
-            "mid_equilibrium": mid,
-            "risk_points": abs(entry - sl),
-            "lots": lots,
-            "contract_size": profile.get("contract_size", 1.0),
-            "is_breakeven": False,
+            "tp1": tp1,
+            "tp2": tp2,
+            "leg1_pos_id": pos1_id,
+            "leg2_pos_id": pos2_id,
+            "lot_tp1": lot_tp1,
+            "lot_runner": lot_runner,
+            "tp1_closed": False,
+            "runner_at_be": False,
             "opened_at": time.time()
         }
 
-        # Generate TradingView Pro execution chart
+        # Telegram Photo Notification
         chart_bytes = generate_trade_execution_chart(
             df=df,
             symbol=symbol,
             side=side,
             entry_px=entry,
             sl=sl,
-            tp=tp,
+            tp=tp2,
             engine_name="CRT",
-            event_title=f"{kz_name} Judas Expansion"
+            event_title=f"CRT Dual-Ticket Setup ({kz_name})"
         )
 
         caption = (
-            f"CRT {side} Executed | #{pos_id} {symbol}\n\n"
-            f"• Strategy: Candle Range Theory ({kz_name})\n"
-            f"• Entry: {entry:.5f}\n"
-            f"• Stop Loss: {sl:.5f}\n"
-            f"• Target TP: {tp:.5f}\n"
-            f"• Equilibrium: {mid:.5f} (BE Target)\n\n"
-            f"Dynamic Breakeven armed at +1.0R."
+            f"⚡ **CRT Dual-Ticket Execution** | {symbol} {side}\n\n"
+            f"• Strategy: Institutional Candle Range Theory ({kz_name})\n"
+            f"• Entry: `{entry:.5f}`\n"
+            f"• Stop Loss: `{sl:.5f}`\n"
+            f"• Leg 1 (50% TP1): `{tp1:.5f}` (+1.0R guaranteed bank)\n"
+            f"• Leg 2 (50% Runner): `{tp2:.5f}` (+2.2R)\n"
+            f"• Exposure: `{lot_tp1 + lot_runner:.4f}` Lots ({trade_lev}x)\n\n"
+            f"Leg 2 will automatically shift Stop Loss to Breakeven when Leg 1 hits TP1."
         )
         await self.notify_photo(chart_bytes, caption)
-
-    async def _log_trade_closure(self, symbol: str, trade: dict, reason_override: Optional[str] = None):
-        """Broadcast standard trade closure settlement card for CRT trades."""
-        if not trade:
-            return
-        pos_id = trade.get("position_id") or trade.get("order_id")
-        side = trade.get("side", "BUY")
-        entry = float(trade.get("entry_price", 0.0))
-        lots = float(trade.get("lots", self.lots))
-
-        pnl = 0.0
-        exit_px = 0.0
-        reason = reason_override or "closed"
-
-        for attempt in range(3):
-            try:
-                hist = self.mcp.get_trade_history(balance_id=self.balance_id, limit=15) or []
-                matched = next(
-                    (h for h in hist if 
-                     (pos_id and str(h.get("position_id")) == str(pos_id)) or
-                     (pos_id and str(h.get("order_id")) == str(pos_id)) or
-                     (pos_id and str(h.get("id")) == str(pos_id))),
-                    None
-                )
-                if matched:
-                    pnl = float(matched.get("pnl", 0.0))
-                    exit_px = float(matched.get("close_price", matched.get("exit_price", 0.0)))
-                    reason = reason_override or matched.get("close_reason", reason)
-                    break
-            except Exception as e:
-                logger.debug(f"[CRTEngine] Hist lookup error (attempt {attempt+1}): {e}")
-            if attempt < 2:
-                await asyncio.sleep(0.8)
-
-        if exit_px == 0.0:
-            prices = self.get_market_price(symbol)
-            exit_px = prices.get("mid", entry)
-
-        pnl_sign = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
-        if pnl > 0:
-            header_line = f"🏆 [CRT WON] {symbol} {pnl_sign}"
-        elif pnl == 0:
-            header_line = f"🛡️ [CRT BREAKEVEN] {symbol} $0.00"
-        else:
-            header_line = f"❌ [CRT CLOSED] {symbol} {pnl_sign}"
-
-        card = (
-            f"{header_line}\n\n"
-            f"• Side: {side} ({lots} Lots)\n"
-            f"• Entry: {entry:.5f}\n"
-            f"• Exit: {exit_px:.5f}\n"
-            f"• Net PnL: {pnl_sign}\n"
-            f"• Reason: {reason}"
-        )
-        await self.notify_text(card)
 
     async def _manage_active_trade(self, symbol: str, cur_prices: Dict[str, float]):
         trade = self.active_trades.get(symbol)
@@ -471,92 +444,52 @@ class CRTStrategyEngine:
             return
 
         profile = CRT_INSTRUMENT_PROFILES.get(symbol, {})
-        pos_id = trade.get("position_id")
-
-        # 1. Resolve actual position_id from broker if missing or still equal to order_id
-        if not pos_id or pos_id == trade.get("order_id"):
-            try:
-                open_positions = self.mcp.list_positions(balance_id=self.balance_id)
-                for p in open_positions:
-                    if p.get("asset_id") == profile.get("asset_id"):
-                        pos_id = p.get("position_id") or p.get("id")
-                        trade["position_id"] = pos_id
-                        break
-            except Exception as e:
-                logger.debug(f"[CRTEngine] Position ID resolution error: {e}")
-
-        # 2. Check if position was closed on broker directly (broker SL or TP executed)
-        if pos_id and str(pos_id).isdigit():
-            try:
-                open_positions = self.mcp.list_positions(balance_id=self.balance_id)
-                is_still_open = any(str(p.get("position_id") or p.get("id")) == str(pos_id) for p in open_positions)
-                if not is_still_open:
-                    logger.info(f"🏁 [CRTEngine] {symbol} Position #{pos_id} was closed on broker platform!")
-                    await self._log_trade_closure(symbol, trade)
-                    self.active_trades[symbol] = None
-                    return
-            except Exception as e:
-                logger.debug(f"[CRTEngine] Error verifying broker position state: {e}")
-
-        mid = cur_prices["mid"]
         side = trade["side"]
         entry = trade["entry_price"]
         sl = trade["sl_price"]
-        tp = trade["tp_price"]
-        risk = trade["risk_points"]
+        tp1 = trade["tp1"]
+        tp2 = trade["tp2"]
+        mid = cur_prices["mid"]
 
-        # Check Breakeven ratchet
-        if not trade["is_breakeven"]:
-            hit_be = (mid >= entry + (risk * 1.0)) if side == "BUY" else (mid <= entry - (risk * 1.0))
-            if hit_be:
-                trade["sl_price"] = entry
-                trade["is_breakeven"] = True
-                logger.info(f"🛡️ [CRTEngine] {symbol} reached +1.0R Equilibrium. Ratcheting SL to Breakeven @ {entry}!")
-                
-                if pos_id and str(pos_id).isdigit():
+        # Check broker positions
+        open_positions = []
+        try:
+            open_positions = self.mcp.list_positions(balance_id=self.balance_id) or []
+        except Exception:
+            pass
+
+        open_ids = [str(p.get("position_id") or p.get("id")) for p in open_positions]
+
+        leg1_id = str(trade.get("leg1_pos_id"))
+        leg2_id = str(trade.get("leg2_pos_id"))
+        leg1_still_open = leg1_id in open_ids and leg1_id != "None"
+        leg2_still_open = leg2_id in open_ids and leg2_id != "None"
+
+        # 1. Check if Leg 1 (TP1) closed while Leg 2 is still running
+        if not trade["tp1_closed"]:
+            if leg1_id and not leg1_still_open and leg1_id != "None":
+                trade["tp1_closed"] = True
+                logger.info(f"🏆 [CRTEngine] {symbol} Leg 1 (#{leg1_id}) closed! Snapping Leg 2 to Breakeven @ {entry}...")
+
+                # Shift Leg 2 to Breakeven
+                if leg2_still_open:
                     try:
-                        sl_res = self.mcp.change_position_stop_loss(position_id=int(pos_id), level=entry)
-                        if sl_res and not sl_res.get("error"):
-                            logger.info(f"✅ [CRTEngine] Broker SL successfully confirmed at Breakeven @ {entry} on #{pos_id}!")
-                        else:
-                            logger.warning(f"⚠️ [CRTEngine] Broker rejected Breakeven SL update on #{pos_id}: {sl_res}")
+                        be_buf = profile.get("sl_buffer", 1.0) * 0.15
+                        be_price = round(entry + be_buf if side == "BUY" else entry - be_buf, profile["digits"])
+                        self.mcp.change_position_stop_loss(position_id=int(leg2_id), level=be_price)
+                        trade["runner_at_be"] = True
+                        logger.info(f"✅ [CRTEngine] Leg 2 (#{leg2_id}) SL shifted to Breakeven @ {be_price}!")
                     except Exception as e:
-                        logger.error(f"[CRTEngine] Could not update broker SL for #{pos_id}: {e}")
-                
-                chart_bytes = generate_breakeven_chart(
-                    df=None,
-                    symbol=symbol,
-                    side=side,
-                    entry_px=entry,
-                    be_sl=entry,
-                    initial_sl=trade["initial_sl"],
-                    tp=tp,
-                    cur_px=mid,
-                    engine_name="CRT"
+                        logger.error(f"[CRTEngine] Failed to move Leg 2 to BE: {e}")
+
+                await self.notify_text(
+                    f"🛡️ **[CRT PARTIAL PROFIT BANKED] {symbol}**\n\n"
+                    f"• Leg 1 hit TP1 @ `{tp1}`! Profit locked in.\n"
+                    f"• Leg 2 Runner Stop Loss moved to **Breakeven** (`{entry}`).\n"
+                    f"• Position is now **100% Risk-Free** running to `{tp2}`!"
                 )
-                caption = (
-                    f"CRT Breakeven Locked | {symbol}\n\n"
-                    f"• Entry: {entry:.5f}\n"
-                    f"• New SL: {entry:.5f} (Risk-Free)\n"
-                    f"• Target TP: {tp:.5f}\n\n"
-                    f"Trade is now 100% risk-free."
-                )
-                await self.notify_photo(chart_bytes, caption)
 
-        # Check TP or SL Hit locally
-        hit_tp = (mid >= tp) if side == "BUY" else (mid <= tp)
-        hit_sl = (mid <= sl) if side == "BUY" else (mid >= sl)
-
-        if hit_tp or hit_sl:
-            close_reason = "take_profit" if hit_tp else ("breakeven" if trade["is_breakeven"] else "stop_loss")
-
-            # Explicitly liquidate position on broker if still open
-            if pos_id and str(pos_id).isdigit():
-                try:
-                    logger.info(f"🔒 [CRTEngine] Explicitly closing #{pos_id} on broker ({close_reason})...")
-                    self.mcp.close_position(int(pos_id))
-                except Exception as e:
-                    logger.error(f"[CRTEngine] Could not close broker position #{pos_id}: {e}")
-
-            await self._log_trade_closure(symbol, trade, reason_override=close_reason)
+        # 2. Check if all legs are closed
+        if not leg1_still_open and not leg2_still_open:
+            logger.info(f"🏁 [CRTEngine] {symbol} All trade legs closed. Cycle complete.")
             self.active_trades[symbol] = None

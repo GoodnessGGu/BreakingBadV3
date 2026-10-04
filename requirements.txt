@@ -26,5 +26,9 @@ gspread>=6.0.0
 google-auth>=2.20.0
 oauth2client>=4.1.3
 
+# Prop Firm / TradeLocker Execution
+tradelocker>=0.56.0
+
 # Environment
 python-dotenv>=1.0.0
+

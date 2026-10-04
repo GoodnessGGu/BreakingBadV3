@@ -124,6 +124,12 @@ class CRTStrategyEngine:
         self.unavailable_cooldown: Dict[str, float] = {}
         self.placed_position_ids: Set[str] = set()
 
+    def set_notification_callback(self, cb: Callable):
+        self.notify_cb = cb
+
+    def set_photo_notification_callback(self, cb: Callable):
+        self.notify_photo_cb = cb
+
     def set_balance(self, balance_id: int, account_type: str = "training"):
         self.balance_id = balance_id
         self.account_type = account_type

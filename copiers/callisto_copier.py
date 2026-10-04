@@ -249,9 +249,21 @@ class CallistoCopier(BaseCopier):
         except Exception:
             min_qty = 1.0
 
-        if self.lots >= (min_qty * 2.0):
-            lot1 = round(self.lots / 2, 2)
-            lot2 = round(self.lots - lot1, 2)
+        # Prop Firm Guardian Gatekeeper
+        target_lots = self.lots
+        if getattr(self, "prop_guardian", None) and self.prop_guardian.is_enabled:
+            open_pos = self.mcp.list_positions(balance_id=self.balance_id) or []
+            allowed, reason, rec_lots = self.prop_guardian.can_execute_trade("XAUUSD", len(open_pos))
+            if not allowed:
+                logger.warning(f"🛡️ [PropFirm Guard] Callisto trade rejected: {reason}")
+                await self.notify(f"🛡️ **[PROP FIRM GUARD] Callisto Trade Skipped**\n\nReason: {reason}")
+                return
+            if rec_lots > 0:
+                target_lots = rec_lots
+
+        if target_lots >= (min_qty * 2.0):
+            lot1 = round(target_lots / 2, 2)
+            lot2 = round(target_lots - lot1, 2)
         else:
             # Enforce min_qty per leg so partial TP can always execute on broker
             lot1 = min_qty

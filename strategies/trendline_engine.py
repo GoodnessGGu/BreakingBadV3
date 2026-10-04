@@ -287,6 +287,18 @@ class TrendlineStrategyEngine:
 
         min_l = profile.get("min_lots", 0.001)
         trade_lots = profile.get("default_lots") or self.lots
+
+        # Prop Firm Guardian Gatekeeper
+        if getattr(self, "prop_guardian", None) and self.prop_guardian.is_enabled:
+            open_pos = self.mcp.list_positions(balance_id=self.balance_id) or []
+            allowed, reason, rec_lots = self.prop_guardian.can_execute_trade(symbol, len(open_pos))
+            if not allowed:
+                logger.warning(f"🛡️ [PropFirm Guard] Trendline trade rejected for {symbol}: {reason}")
+                await self.notify_text(f"🛡️ **[PROP FIRM GUARD] Trendline Trade Skipped ({symbol})**\n\nReason: {reason}")
+                return
+            if rec_lots > 0:
+                trade_lots = rec_lots
+
         if symbol == "XAUUSD":
             min_l = 1.0
             trade_lots = max(2.0, float(trade_lots))

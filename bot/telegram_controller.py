@@ -13,7 +13,7 @@ import sys
 import logging
 import asyncio
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, Set, Tuple, Union, Callable
 
 from telegram import Update
 from telegram.ext import (
@@ -31,10 +31,12 @@ from bot.keyboards import (
     ict_menu_keyboard, settings_menu_keyboard, close_all_confirm_keyboard,
     persistent_reply_keyboard, history_menu_keyboard, active_setups_keyboard,
     news_menu_keyboard, crt_menu_keyboard, mission_menu_keyboard,
-    individual_close_keyboard, snd_menu_keyboard, trendline_menu_keyboard
+    individual_close_keyboard, snd_menu_keyboard, trendline_menu_keyboard,
+    prop_firm_menu_keyboard
 )
 from bot.session_notifier import MarketSessionNotifier
 from bot.news_engine import EconomicNewsEngine
+from bot.prop_firm_manager import PropFirmGuardian
 from strategies.news_straddle_engine import NewsStraddleEngine
 from strategies.crt_engine import CRTStrategyEngine
 from strategies.snd_engine import SNDStrategyEngine, SND_INSTRUMENT_PROFILES
@@ -118,6 +120,26 @@ class TelegramTradingBot:
             self.snd_engine.set_photo_notification_callback(self.broadcast_photo)
         if hasattr(self.trendline_engine, "set_photo_notification_callback"):
             self.trendline_engine.set_photo_notification_callback(self.broadcast_photo)
+
+        # Institutional 5K Prop Firm Challenge Simulator & Guardian
+        self.prop_guardian = PropFirmGuardian(
+            initial_capital=5000.0,
+            phase=1,
+            broadcast_func=self.broadcast_alert
+        )
+        if hasattr(self.ict_engine, "prop_guardian"):
+            self.ict_engine.prop_guardian = self.prop_guardian
+        if hasattr(self.crt_engine, "prop_guardian"):
+            self.crt_engine.prop_guardian = self.prop_guardian
+        if hasattr(self.snd_engine, "prop_guardian"):
+            self.snd_engine.prop_guardian = self.prop_guardian
+        if hasattr(self.trendline_engine, "prop_guardian"):
+            self.trendline_engine.prop_guardian = self.prop_guardian
+        if hasattr(self.straddle_engine, "prop_guardian"):
+            self.straddle_engine.prop_guardian = self.prop_guardian
+        if hasattr(self.channel_mgr, "copiers"):
+            for copier in self.channel_mgr.copiers.values():
+                setattr(copier, "prop_guardian", self.prop_guardian)
 
     def is_admin(self, user_id: int) -> bool:
         return int(user_id) == self.admin_id
@@ -294,6 +316,9 @@ class TelegramTradingBot:
             f"⚡ *News Straddle Spike Engine*:\n"
             f"  • {straddle_icon} Status: `{'ON' if straddle_st.get('enabled') else 'OFF'}`{straddle_arm_icon}\n"
             f"  • 🎯 Asset: `XAUUSD (Gold)` | Lots: `{self.straddle_engine.lots if self.straddle_engine else self.lots:.2f}`\n\n"
+            f"🏆 *Prop Firm Challenge ($5,000 Sim)*:\n"
+            f"  • {'🟢' if self.prop_guardian.is_enabled else '🔴'} Guard: `{'ON' if self.prop_guardian.is_enabled else 'OFF'}` | Phase: `{self.prop_guardian.phase}`\n"
+            f"  • Status: `{self.prop_guardian.status}` | Equity: `${self.prop_guardian.current_balance:.2f}`\n\n"
             f"🕒 Time: `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`"
         )
         return text
@@ -1154,6 +1179,8 @@ class TelegramTradingBot:
             "• `/channels` - Toggle signal copier channels\n"
             "• `/settings` or `/risk` - Risk & order sizing menu\n"
             "• `/active` - Active zones, FVGs, and open trades\n"
+            "• `/prop` or `/propfirm` - Institutional Prop Firm $5,000 Challenge Simulator\n"
+            "• `/prop_reset` - Reset $5,000 Evaluation challenge\n"
             "• `/history` - View categorized trade & PnL history\n"
             "• `/pause` / `/resume` - Master trading pause/resume\n"
             "• `/close [id|sym]` - Interactively or directly close an open position\n"
@@ -1254,6 +1281,8 @@ class TelegramTradingBot:
             await self.cmd_settings(update, context)
         elif text in ["📋 Active Setups", "Active Setups", "Active", "📈 Active Trades"]:
             await self.cmd_active_trades(update, context)
+        elif text in ["🏆 Prop Firm 5K", "Prop Firm 5K", "🏆 Prop Firm", "Prop Firm"]:
+            await self.cmd_prop(update, context)
         elif text in ["📜 History", "History", "📋 History", "Trade History", "📊 Stats"]:
             await self.cmd_history(update, context)
         elif text in ["⏸ Pause", "Pause"]:
@@ -1373,6 +1402,39 @@ class TelegramTradingBot:
         except ValueError:
             await update.message.reply_text("❌ Invalid number. Example usage: `/stake 2.0`")
 
+    async def cmd_prop(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Displays interactive Prop Firm Challenge $5,000 Simulator Dashboard."""
+        if not self.is_admin(update.effective_user.id):
+            return
+        dash_text = self.prop_guardian.get_dashboard_text()
+        kb = prop_firm_menu_keyboard(
+            is_enabled=self.prop_guardian.is_enabled,
+            phase=self.prop_guardian.phase,
+            risk_pct=self.prop_guardian.risk_per_trade_pct
+        )
+        await update.message.reply_text(
+            dash_text,
+            reply_markup=kb,
+            parse_mode="Markdown"
+        )
+
+    async def cmd_prop_reset(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Resets the Prop Firm challenge to fresh $5,000 evaluation."""
+        if not self.is_admin(update.effective_user.id):
+            return
+        self.prop_guardian.reset_challenge(5000.0, 1)
+        dash_text = self.prop_guardian.get_dashboard_text()
+        kb = prop_firm_menu_keyboard(
+            is_enabled=self.prop_guardian.is_enabled,
+            phase=self.prop_guardian.phase,
+            risk_pct=self.prop_guardian.risk_per_trade_pct
+        )
+        await update.message.reply_text(
+            "🔄 *Prop Firm $5,000 Challenge Reset successfully!*\n\n" + dash_text,
+            reply_markup=kb,
+            parse_mode="Markdown"
+        )
+
     async def _cleanup_closed_trade(self, pos_id: Any, symbol: Optional[str] = None, close_reason: str = "client_close"):
         """Clean up active tracking in ICT, CRT, and Channel copiers when a position is closed, and dispatch closure settlement notification."""
         pid_str = str(pos_id)
@@ -1432,34 +1494,46 @@ class TelegramTradingBot:
                     self.snd_engine.active_trades[s] = None
                     logger.info(f"[Cleanup] Cleared SND trade for {s} (#{pos_id})")
 
-        # 5. Fallback for manual broker positions not tracked in any engine
-        if not handled:
-            try:
-                bid = self.get_active_balance_id()
-                if bid:
-                    matched = None
-                    for attempt in range(3):
-                        hist = self.forex_mcp.get_trade_history(balance_id=bid, limit=15) or []
-                        matched = next(
-                            (h for h in hist if 
-                             str(h.get("position_id")) == pid_str or 
-                             str(h.get("order_id")) == pid_str or 
-                             str(h.get("id")) == pid_str),
-                            None
-                        )
-                        if matched:
-                            break
-                        if attempt < 2:
-                            await asyncio.sleep(0.8)
-
+        # 5. Settlement to Prop Firm Simulator & fallback closure card for manual positions
+        try:
+            bid = self.get_active_balance_id()
+            if bid:
+                matched = None
+                for attempt in range(3):
+                    hist = self.forex_mcp.get_trade_history(balance_id=bid, limit=15) or []
+                    matched = next(
+                        (h for h in hist if 
+                         str(h.get("position_id")) == pid_str or 
+                         str(h.get("order_id")) == pid_str or 
+                         str(h.get("id")) == pid_str),
+                        None
+                    )
                     if matched:
-                        pnl = float(matched.get("pnl", 0.0))
-                        exit_px = float(matched.get("close_price", matched.get("exit_price", 0.0)))
-                        entry_px = float(matched.get("open_price", matched.get("entry_price", 0.0)))
-                        side = str(matched.get("side") or matched.get("direction", "BUY")).upper()
-                        lots = float(matched.get("lots") or matched.get("count", 1.0))
-                        sym = symbol or self.resolve_asset_name(matched.get("asset_id"))
-                        r_name = close_reason or matched.get("close_reason", "client_close")
+                        break
+                    if attempt < 2:
+                        await asyncio.sleep(0.8)
+
+                if matched:
+                    pnl = float(matched.get("pnl", 0.0))
+                    exit_px = float(matched.get("close_price", matched.get("exit_price", 0.0)))
+                    entry_px = float(matched.get("open_price", matched.get("entry_price", 0.0)))
+                    side = str(matched.get("side") or matched.get("direction", "BUY")).upper()
+                    lots = float(matched.get("lots") or matched.get("count", 1.0))
+                    sym = symbol or self.resolve_asset_name(matched.get("asset_id"))
+                    r_name = close_reason or matched.get("close_reason", "client_close")
+
+                    # Settle into Prop Firm Evaluation Simulator
+                    if hasattr(self, "prop_guardian") and self.prop_guardian.is_enabled:
+                        await self.prop_guardian.on_trade_closed(
+                            symbol=sym,
+                            pnl_usd=pnl,
+                            side=side,
+                            lots=lots,
+                            reason=r_name,
+                            trade_id=pid_str
+                        )
+
+                    if not handled:
                         pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
                         if pnl > 0:
                             header_line = f"🏆 [TRADE WON] {sym} {pnl_str}"
@@ -1477,8 +1551,8 @@ class TelegramTradingBot:
                             f"• Reason: {r_name}"
                         )
                         await self.broadcast_alert(card)
-            except Exception as e:
-                logger.warning(f"Fallback closure card lookup error for #{pos_id}: {e}")
+        except Exception as e:
+            logger.warning(f"Closure settlement lookup error for #{pos_id}: {e}")
 
     async def cmd_close(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Close open trades individually by position ID or symbol, or display interactive close menu."""
@@ -1652,6 +1726,78 @@ class TelegramTradingBot:
                     txt,
                     reply_markup=history_menu_keyboard(cat)
                 )
+
+        # Prop Firm Simulator Menu & Callbacks
+        elif data == "btn_prop_menu":
+            dash_text = self.prop_guardian.get_dashboard_text()
+            kb = prop_firm_menu_keyboard(
+                is_enabled=self.prop_guardian.is_enabled,
+                phase=self.prop_guardian.phase,
+                risk_pct=self.prop_guardian.risk_per_trade_pct
+            )
+            await query.edit_message_text(
+                dash_text,
+                reply_markup=kb,
+                parse_mode="Markdown"
+            )
+
+        elif data == "toggle_prop_master":
+            self.prop_guardian.toggle()
+            dash_text = self.prop_guardian.get_dashboard_text()
+            kb = prop_firm_menu_keyboard(
+                is_enabled=self.prop_guardian.is_enabled,
+                phase=self.prop_guardian.phase,
+                risk_pct=self.prop_guardian.risk_per_trade_pct
+            )
+            await query.edit_message_text(
+                dash_text,
+                reply_markup=kb,
+                parse_mode="Markdown"
+            )
+
+        elif data.startswith("set_prop_phase_"):
+            p_val = int(data.replace("set_prop_phase_", ""))
+            self.prop_guardian.set_phase(p_val)
+            dash_text = self.prop_guardian.get_dashboard_text()
+            kb = prop_firm_menu_keyboard(
+                is_enabled=self.prop_guardian.is_enabled,
+                phase=self.prop_guardian.phase,
+                risk_pct=self.prop_guardian.risk_per_trade_pct
+            )
+            await query.edit_message_text(
+                dash_text,
+                reply_markup=kb,
+                parse_mode="Markdown"
+            )
+
+        elif data.startswith("set_prop_risk_"):
+            r_val = float(data.replace("set_prop_risk_", ""))
+            self.prop_guardian.set_risk(r_val)
+            dash_text = self.prop_guardian.get_dashboard_text()
+            kb = prop_firm_menu_keyboard(
+                is_enabled=self.prop_guardian.is_enabled,
+                phase=self.prop_guardian.phase,
+                risk_pct=self.prop_guardian.risk_per_trade_pct
+            )
+            await query.edit_message_text(
+                dash_text,
+                reply_markup=kb,
+                parse_mode="Markdown"
+            )
+
+        elif data == "reset_prop_challenge":
+            self.prop_guardian.reset_challenge(5000.0, 1)
+            dash_text = self.prop_guardian.get_dashboard_text()
+            kb = prop_firm_menu_keyboard(
+                is_enabled=self.prop_guardian.is_enabled,
+                phase=self.prop_guardian.phase,
+                risk_pct=self.prop_guardian.risk_per_trade_pct
+            )
+            await query.edit_message_text(
+                "🔄 *Challenge Reset! Fresh $5,000.00 Evaluation Account Initialized.*\n\n" + dash_text,
+                reply_markup=kb,
+                parse_mode="Markdown"
+            )
 
         # ICT Engine Menu
         elif data == "btn_ict_menu":
@@ -2234,6 +2380,9 @@ class TelegramTradingBot:
         self.app.add_handler(CommandHandler("set_account", self.cmd_account))
         self.app.add_handler(CommandHandler("pause", self.cmd_pause))
         self.app.add_handler(CommandHandler("resume", self.cmd_resume))
+        self.app.add_handler(CommandHandler("prop", self.cmd_prop))
+        self.app.add_handler(CommandHandler("propfirm", self.cmd_prop))
+        self.app.add_handler(CommandHandler("prop_reset", self.cmd_prop_reset))
         self.app.add_handler(CommandHandler("history", self.cmd_history))
         self.app.add_handler(CommandHandler("stats", self.cmd_history))
         self.app.add_handler(CommandHandler("close", self.cmd_close))

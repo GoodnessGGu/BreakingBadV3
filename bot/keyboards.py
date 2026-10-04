@@ -12,7 +12,7 @@ def persistent_reply_keyboard() -> ReplyKeyboardMarkup:
         [KeyboardButton("🤖 Gold ICT"), KeyboardButton("🕯️ CRT Engine"), KeyboardButton("📐 Trendlines")],
         [KeyboardButton("🏛️ S&D Engine"), KeyboardButton("🎯 Mission & Strategies")],
         [KeyboardButton("📡 Channels"), KeyboardButton("📋 Active Setups")],
-        [KeyboardButton("📜 History"), KeyboardButton("⚙️ Risk & Sizing")],
+        [KeyboardButton("🏆 Prop Firm 5K"), KeyboardButton("📜 History"), KeyboardButton("⚙️ Risk & Sizing")],
         [KeyboardButton("🌐 Market Sessions"), KeyboardButton("📰 Economic News")],
         [KeyboardButton("⏸ Pause"), KeyboardButton("▶ Resume")],
         [KeyboardButton("🛑 Close All")]
@@ -39,11 +39,14 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("📋 Active Setups", callback_data="btn_active_trades")
         ],
         [
-            InlineKeyboardButton("📜 Trade History", callback_data="history_cat_all"),
-            InlineKeyboardButton("⚙️ Risk & Sizing", callback_data="btn_settings_menu")
+            InlineKeyboardButton("🏆 Prop Firm 5K Sim", callback_data="btn_prop_menu"),
+            InlineKeyboardButton("📜 Trade History", callback_data="history_cat_all")
         ],
         [
-            InlineKeyboardButton("🌐 Market Sessions", callback_data="btn_sessions"),
+            InlineKeyboardButton("⚙️ Risk & Sizing", callback_data="btn_settings_menu"),
+            InlineKeyboardButton("🌐 Market Sessions", callback_data="btn_sessions")
+        ],
+        [
             InlineKeyboardButton("📰 Economic News", callback_data="btn_news")
         ],
         [
@@ -471,3 +474,32 @@ def close_all_confirm_keyboard() -> InlineKeyboardMarkup:
         ]
     ]
     return InlineKeyboardMarkup(keyboard)
+
+
+def prop_firm_menu_keyboard(is_enabled: bool = False, phase: int = 1, risk_pct: float = 0.75) -> InlineKeyboardMarkup:
+    status_icon = "🟢" if is_enabled else "🔴"
+    status_text = "ENABLED" if is_enabled else "DISABLED"
+    
+    keyboard = [
+        [
+            InlineKeyboardButton(f"{status_icon} Prop Firm Guard: {status_text}", callback_data="toggle_prop_master")
+        ],
+        [
+            InlineKeyboardButton(f"{'✅ ' if phase == 1 else ''}Phase 1 (+8%)", callback_data="set_prop_phase_1"),
+            InlineKeyboardButton(f"{'✅ ' if phase == 2 else ''}Phase 2 (+5%)", callback_data="set_prop_phase_2")
+        ],
+        [
+            InlineKeyboardButton(f"{'✅ ' if abs(risk_pct - 0.5) < 0.05 else ''}0.50% ($25)", callback_data="set_prop_risk_0.5"),
+            InlineKeyboardButton(f"{'✅ ' if abs(risk_pct - 0.75) < 0.05 else ''}0.75% ($37.5)", callback_data="set_prop_risk_0.75"),
+            InlineKeyboardButton(f"{'✅ ' if abs(risk_pct - 1.0) < 0.05 else ''}1.00% ($50)", callback_data="set_prop_risk_1.0")
+        ],
+        [
+            InlineKeyboardButton("🔄 Refresh Dashboard", callback_data="btn_prop_menu"),
+            InlineKeyboardButton("⚠️ Reset $5K Challenge", callback_data="reset_prop_challenge")
+        ],
+        [
+            InlineKeyboardButton("🔙 Back to Main Menu", callback_data="btn_main_menu")
+        ]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+

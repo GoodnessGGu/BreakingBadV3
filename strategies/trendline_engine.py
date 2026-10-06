@@ -107,7 +107,10 @@ class TrendlineStrategyEngine:
         self.balance_id: Optional[int] = None
         self.active_trades: Dict[str, Optional[Dict[str, Any]]] = {s: None for s in TRENDLINE_PROFILES}
         self.enabled_symbols: Set[str] = {symbol, "NAS100"}
-        self.last_trade_bar: Dict[str, int] = {}
+        self.last_trade_bar: Dict[str, str] = {}
+        self.last_loss_time: Dict[str, float] = {}
+        self.consecutive_losses: Dict[str, int] = {}
+        self.min_cooldown_seconds: int = 1800  # 30 minutes post-loss cooldown
         self.placed_position_ids: Set[str] = set()
 
     def set_notification_callback(self, cb: Callable):
@@ -202,16 +205,31 @@ class TrendlineStrategyEngine:
             await self._manage_active_trade(symbol)
             return
 
-        # 2. Fetch 15-Minute Candles (size=900)
+        # 2. Check Post-Loss Cooldown & Consecutive Loss Lockout
+        now_ts = time.time()
+        last_loss = self.last_loss_time.get(symbol, 0.0)
+        cons_losses = self.consecutive_losses.get(symbol, 0)
+        cooldown_needed = 7200 if cons_losses >= 2 else self.min_cooldown_seconds
+        if (now_ts - last_loss) < cooldown_needed:
+            rem_m = int(max(1, (cooldown_needed - (now_ts - last_loss)) / 60))
+            logger.debug(f"[TrendlineEngine] {symbol} in cooldown ({rem_m}m remaining, {cons_losses} cons losses).")
+            return
+
+        # 3. Fetch 15-Minute Candles (size=900)
         raw_candles = self.mcp.get_candles(asset_id=asset_id, count=70, size=900)
         if not raw_candles or len(raw_candles) < 40:
             return
 
+        # 4. Bar-Lock: Max 1 execution per 15-Minute Candle Bar
+        cur_bar_time = str(raw_candles[-1].get("from") or raw_candles[-1].get("time") or raw_candles[-1].get("to") or "")
+        if cur_bar_time and self.last_trade_bar.get(symbol) == cur_bar_time:
+            return
+
         df = pd.DataFrame([{
-            "Open": float(c.get("open") or c.get("from", 0.0)),
-            "High": float(c.get("max") or c.get("high", 0.0)),
-            "Low": float(c.get("min") or c.get("low", 0.0)),
-            "Close": float(c.get("close") or c.get("to", 0.0))
+            "Open": float(c.get("open", 0.0) or 0.0),
+            "High": float(c.get("max", c.get("high", 0.0)) or 0.0),
+            "Low": float(c.get("min", c.get("low", 0.0)) or 0.0),
+            "Close": float(c.get("close", c.get("to", 0.0)) or 0.0)
         } for c in raw_candles])
 
         highs = df['High'].values
@@ -252,7 +270,7 @@ class TrendlineStrategyEngine:
                     if risk > sl_buf:
                         tp1 = round(entry + risk, digits)
                         tp2 = round(entry + (risk * rr_target), digits)
-                        await self._execute_dual_ticket_trade(symbol, "BUY", entry, sl, tp1, tp2, tl_val, df)
+                        await self._execute_dual_ticket_trade(symbol, "BUY", entry, sl, tp1, tp2, tl_val, df, cur_bar_time)
                         return
 
         # ── Check Descending Resistance Trendline (SELL Setup) ──────────
@@ -274,12 +292,12 @@ class TrendlineStrategyEngine:
                     if risk > sl_buf:
                         tp1 = round(entry - risk, digits)
                         tp2 = round(entry - (risk * rr_target), digits)
-                        await self._execute_dual_ticket_trade(symbol, "SELL", entry, sl, tp1, tp2, tl_val, df)
+                        await self._execute_dual_ticket_trade(symbol, "SELL", entry, sl, tp1, tp2, tl_val, df, cur_bar_time)
                         return
 
     async def _execute_dual_ticket_trade(
         self, symbol: str, side: str, entry: float, sl: float, tp1: float, tp2: float,
-        tl_val: float, df: pd.DataFrame
+        tl_val: float, df: pd.DataFrame, bar_time: str = ""
     ):
         profile = TRENDLINE_PROFILES[symbol]
         instrument_id = profile["instrument_id"]
@@ -309,6 +327,10 @@ class TrendlineStrategyEngine:
         else:
             lot_tp1 = min_l
             lot_runner = min_l
+
+        # Lock bar immediately before/during placement to prevent concurrent execution
+        if bar_time:
+            self.last_trade_bar[symbol] = bar_time
 
         trade_lev = min(self.leverage, 20 if symbol == "BTCUSD" else self.leverage)
         logger.info(f"📐 [TrendlineEngine] Executing 15M Bounce {side} on {symbol} @ {entry} | Line: {tl_val:.2f} | SL: {sl} | TP1: {tp1} | TP2: {tp2}")
@@ -343,6 +365,15 @@ class TrendlineStrategyEngine:
 
         pos1_id = res1.get("position_id") or res1.get("order_id") if isinstance(res1, dict) else None
         pos2_id = res2.get("position_id") or res2.get("order_id") if isinstance(res2, dict) else None
+
+        # Resolve order IDs to broker position IDs
+        if pos1_id and hasattr(self.mcp, "_resolve_actual_position_id"):
+            resolved1 = self.mcp._resolve_actual_position_id(pos1_id)
+            if resolved1: pos1_id = resolved1
+        if pos2_id and hasattr(self.mcp, "_resolve_actual_position_id"):
+            resolved2 = self.mcp._resolve_actual_position_id(pos2_id)
+            if resolved2: pos2_id = resolved2
+
         if pos1_id: self.placed_position_ids.add(str(pos1_id))
         if pos2_id: self.placed_position_ids.add(str(pos2_id))
 
@@ -404,10 +435,37 @@ class TrendlineStrategyEngine:
         except Exception:
             pass
 
-        open_ids = [str(p.get("position_id") or p.get("id")) for p in open_positions]
+        # Build comprehensive set of all open IDs (position_id, id, order_id)
+        open_ids = set()
+        for p in open_positions:
+            for k in ["position_id", "id", "order_id"]:
+                v = p.get(k)
+                if v:
+                    open_ids.add(str(v))
 
         leg1_id = str(trade.get("leg1_pos_id"))
         leg2_id = str(trade.get("leg2_pos_id"))
+
+        # Re-resolve if IDs still match broker open positions by asset_id
+        if leg1_id not in open_ids and leg2_id not in open_ids:
+            asset_open = [p for p in open_positions if p.get("asset_id") == profile.get("asset_id")]
+            if asset_open:
+                if len(asset_open) >= 2:
+                    p1 = str(asset_open[0].get("position_id") or asset_open[0].get("id"))
+                    p2 = str(asset_open[1].get("position_id") or asset_open[1].get("id"))
+                    trade["leg1_pos_id"] = p1
+                    trade["leg2_pos_id"] = p2
+                    leg1_id, leg2_id = p1, p2
+                    open_ids.add(p1)
+                    open_ids.add(p2)
+                elif len(asset_open) == 1:
+                    p2 = str(asset_open[0].get("position_id") or asset_open[0].get("id"))
+                    trade["leg1_pos_id"] = None
+                    trade["leg2_pos_id"] = p2
+                    leg1_id = "None"
+                    leg2_id = p2
+                    open_ids.add(p2)
+
         leg1_still_open = leg1_id in open_ids and leg1_id != "None"
         leg2_still_open = leg2_id in open_ids and leg2_id != "None"
 
@@ -438,4 +496,17 @@ class TrendlineStrategyEngine:
         # 2. Check if all legs are closed
         if not leg1_still_open and not leg2_still_open:
             logger.info(f"🏁 [TrendlineEngine] {symbol} All trade legs closed. Cycle complete.")
+            # Evaluate outcome: if TP1 never banked, register loss & trigger cooldown
+            if not trade.get("tp1_closed"):
+                self.last_loss_time[symbol] = time.time()
+                self.consecutive_losses[symbol] = self.consecutive_losses.get(symbol, 0) + 1
+                logger.warning(
+                    f"⚠️ [TrendlineEngine] {symbol} Loss registered. Consecutive losses: {self.consecutive_losses[symbol]}. "
+                    f"Enforcing {'2-Hour Lockout' if self.consecutive_losses[symbol] >= 2 else '30-Minute Cooldown'}."
+                )
+            else:
+                self.consecutive_losses[symbol] = 0
+                # Enforce a 15-minute breather even after a win to prevent instant re-entry on same structure
+                self.last_loss_time[symbol] = time.time() - (self.min_cooldown_seconds - 900)
+
             self.active_trades[symbol] = None

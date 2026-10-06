@@ -215,6 +215,9 @@ class ICTStrategyEngine:
                 self.enabled_symbols.add(sym_clean)
         self.pending_fvgs: Dict[str, Optional[Dict[str, Any]]] = {}
         self.active_trades: Dict[str, Optional[Dict[str, Any]]] = {}
+        self.last_loss_time: Dict[str, float] = {}
+        self.consecutive_losses: Dict[str, int] = {}
+        self.min_cooldown_seconds: int = 1800  # 30 min cooldown
         
         self.balance_id: Optional[int] = None
         self.notify_cb: Optional[Callable] = None
@@ -516,6 +519,14 @@ class ICTStrategyEngine:
         if not self.is_enabled or not pending or self.active_trades.get(symbol):
             return
 
+        # Check Post-Loss Cooldown & Consecutive Loss Lockout
+        now_ts = time.time()
+        last_loss = self.last_loss_time.get(symbol, 0.0)
+        cons_losses = self.consecutive_losses.get(symbol, 0)
+        cooldown_needed = 7200 if cons_losses >= 2 else self.min_cooldown_seconds
+        if (now_ts - last_loss) < cooldown_needed:
+            return
+
         profile = INSTRUMENT_PROFILES[symbol]
         digits = profile["digits"]
         min_fvg_gap = profile["min_fvg_gap"]
@@ -813,6 +824,19 @@ class ICTStrategyEngine:
         # If all tickets closed, cleanup trade
         if all(not t.get("is_open") for t in tickets):
             logger.info(f"🏁 [ICTEngine] {symbol} all legs closed. Trade completed.")
+            tp1_hit = any(t.get("is_tp1") and not t.get("is_open") and t.get("moved_to_be") for t in tickets) or trade.get("moved_to_be", False)
+            if not tp1_hit:
+                self.last_loss_time[symbol] = time.time()
+                self.consecutive_losses[symbol] = self.consecutive_losses.get(symbol, 0) + 1
+                self.pending_fvgs.pop(symbol, None)  # Purge failed setup
+                logger.warning(
+                    f"⚠️ [ICTEngine] {symbol} Loss registered. Consecutive losses: {self.consecutive_losses[symbol]}. "
+                    f"FVG purged. Enforcing {'2-Hour Lockout' if self.consecutive_losses[symbol] >= 2 else '30-Minute Cooldown'}."
+                )
+            else:
+                self.consecutive_losses[symbol] = 0
+                self.last_loss_time[symbol] = time.time() - (self.min_cooldown_seconds - 900)
+
             self.active_trades.pop(symbol, None)
             return
 

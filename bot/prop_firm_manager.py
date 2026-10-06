@@ -15,7 +15,7 @@ import json
 import time
 import logging
 from datetime import datetime, timezone
-from typing import Dict, Any, Optional, Tuple, List, Callable
+from typing import Dict, Any, Optional, Tuple, List, Callable, Set
 
 logger = logging.getLogger("PropFirmGuardian")
 
@@ -56,6 +56,13 @@ class PropFirmGuardian:
         self.recent_trades: List[Dict[str, Any]] = []
         self.processed_trade_ids: Set[str] = set()
 
+        # Institutional Risk Rules: Frequency Cap & Circuit Breakers
+        self.max_daily_trades: int = 8
+        self.daily_trade_count: int = 0
+        self.consecutive_losses: int = 0
+        self.max_consecutive_losses: int = 3
+        self.consecutive_loss_freeze_until: float = 0.0
+
         # Load persisted state if exists
         self.load_state()
         self.check_daily_reset()
@@ -86,6 +93,10 @@ class PropFirmGuardian:
                 "wins": self.wins,
                 "losses": self.losses,
                 "breakevens": self.breakevens,
+                "daily_trade_count": self.daily_trade_count,
+                "consecutive_losses": self.consecutive_losses,
+                "consecutive_loss_freeze_until": self.consecutive_loss_freeze_until,
+                "max_daily_trades": self.max_daily_trades,
                 "recent_trades": self.recent_trades[-30:]
             }
             with open(PROP_STATE_FILE, "w", encoding="utf-8") as f:
@@ -118,8 +129,12 @@ class PropFirmGuardian:
             self.wins = data.get("wins", 0)
             self.losses = data.get("losses", 0)
             self.breakevens = data.get("breakevens", 0)
+            self.daily_trade_count = data.get("daily_trade_count", 0)
+            self.consecutive_losses = data.get("consecutive_losses", 0)
+            self.consecutive_loss_freeze_until = data.get("consecutive_loss_freeze_until", 0.0)
+            self.max_daily_trades = data.get("max_daily_trades", 8)
             self.recent_trades = data.get("recent_trades", [])
-            logger.info(f"🛡️ [PropFirm] State loaded. Balance: ${self.current_balance:.2f} | Status: {self.status}")
+            logger.info(f"🛡️ [PropFirm] State loaded. Balance: ${self.current_balance:.2f} | Status: {self.status} | Trades Today: {self.daily_trade_count}/{self.max_daily_trades}")
         except Exception as e:
             logger.error(f"[PropFirm] Error loading state: {e}")
 
@@ -129,10 +144,13 @@ class PropFirmGuardian:
     def check_daily_reset(self) -> bool:
         today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         if today_str != self.last_reset_date:
-            logger.info(f"🌅 [PropFirm] New Trading Day ({today_str})! Resetting daily drawdown baseline.")
+            logger.info(f"🌅 [PropFirm] New Trading Day ({today_str})! Resetting daily drawdown baseline & trade counter.")
             self.last_reset_date = today_str
             self.daily_start_balance = self.current_balance
             self.daily_pnl = 0.0
+            self.daily_trade_count = 0
+            self.consecutive_losses = 0
+            self.consecutive_loss_freeze_until = 0.0
             if self.status == "DAILY_LOCKED":
                 self.status = "ACTIVE"
             self.save_state()
@@ -173,6 +191,15 @@ class PropFirmGuardian:
 
         if current_open_count >= self.max_open_positions:
             return False, f"⚠️ Concurrency Cap: Max {self.max_open_positions} concurrent positions reached.", 0.0
+
+        # Check consecutive loss circuit breaker (cooling off after multiple losses)
+        if time.time() < self.consecutive_loss_freeze_until:
+            rem_m = int(max(1, (self.consecutive_loss_freeze_until - time.time()) / 60))
+            return False, f"🛡️ Circuit Breaker Active: Paused for {rem_m}m after {self.consecutive_losses} consecutive losses.", 0.0
+
+        # Check daily trade count limit
+        if self.daily_trade_count >= self.max_daily_trades:
+            return False, f"🛑 Max Daily Trades ({self.max_daily_trades}) reached. Session closed under Prop Firm rules.", 0.0
 
         # Check remaining daily drawdown buffer
         remaining_daily_budget = self.get_max_daily_loss_amount() + self.daily_pnl
@@ -225,15 +252,27 @@ class PropFirmGuardian:
         self.daily_pnl += pnl_usd
         self.total_pnl += pnl_usd
         self.total_trades += 1
+        self.daily_trade_count += 1
 
         if pnl_usd > 0:
             self.wins += 1
+            self.consecutive_losses = 0
             if self.current_balance > self.peak_balance:
                 self.peak_balance = self.current_balance
         elif pnl_usd == 0:
             self.breakevens += 1
         else:
             self.losses += 1
+            self.consecutive_losses += 1
+            if self.consecutive_losses >= self.max_consecutive_losses:
+                self.consecutive_loss_freeze_until = time.time() + 3600  # 60 minute pause
+                logger.warning(f"🛡️ [PropFirm] Circuit Breaker activated! {self.consecutive_losses} losses in a row. Pausing 60 min.")
+                await self._alert(
+                    f"🛡️ **[PROP FIRM CIRCUIT BREAKER ACTIVATED]** 🛡️\n\n"
+                    f"• Consecutive Losses: `{self.consecutive_losses}` in a row.\n"
+                    f"• All new trades **PAUSED for 60 Minutes** to protect capital.\n"
+                    f"• Account capital is preserved from further drawdown."
+                )
 
         ts_str = datetime.now(timezone.utc).strftime("%H:%M")
         self.recent_trades.append({
@@ -327,6 +366,9 @@ class PropFirmGuardian:
         self.wins = 0
         self.losses = 0
         self.breakevens = 0
+        self.daily_trade_count = 0
+        self.consecutive_losses = 0
+        self.consecutive_loss_freeze_until = 0.0
         self.recent_trades = []
         self.last_reset_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         self.save_state()
@@ -392,10 +434,12 @@ class PropFirmGuardian:
             f"  {overall_bar_str} `-${overall_loss_val:.2f}` / `-${max_overall_loss:.2f}` used\n"
             f"  Hard Equity Floor: `${self.get_max_loss_equity_floor():.2f}`\n\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"⚙️ *Evaluation Rules & Sizing*:\n"
+            f"⚙️ *Evaluation Rules & Protection*:\n"
             f"  • Risk per Trade: `{self.risk_per_trade_pct:.2f}%` (${self.current_balance * self.risk_per_trade_pct / 100:.2f})\n"
+            f"  • Today's Executions: `{self.daily_trade_count}/{self.max_daily_trades}` (Max Daily Cap)\n"
+            f"  • Consecutive Loss Streak: `{self.consecutive_losses}/{self.max_consecutive_losses}` (Circuit Breaker)\n"
             f"  • Max Concurrent Trades: `{self.max_open_positions}`\n"
-            f"  • Win Rate: `{wr:.1f}%` ({self.wins}W - {self.losses}L - {self.breakevens}BE | `{self.total_trades}` Trades)\n"
+            f"  • Win Rate: `{wr:.1f}%` ({self.wins}W - {self.losses}L - {self.breakevens}BE | `{self.total_trades}` Total)\n"
         )
 
         if self.recent_trades:

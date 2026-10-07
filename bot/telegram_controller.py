@@ -42,6 +42,14 @@ from strategies.crt_engine import CRTStrategyEngine
 from strategies.snd_engine import SNDStrategyEngine, SND_INSTRUMENT_PROFILES
 from strategies.trendline_engine import TrendlineStrategyEngine, TRENDLINE_PROFILES
 
+try:
+    from gsheet_logger import gsheet_logger
+except ImportError:
+    try:
+        from utils.gsheet_logger import gsheet_logger
+    except ImportError:
+        gsheet_logger = None
+
 logger = logging.getLogger("TelegramController")
 
 class TelegramTradingBot:
@@ -1494,7 +1502,19 @@ class TelegramTradingBot:
                     self.snd_engine.active_trades[s] = None
                     logger.info(f"[Cleanup] Cleared SND trade for {s} (#{pos_id})")
 
-        # 5. Settlement to Prop Firm Simulator & fallback closure card for manual positions
+        # 5. Trendline Engine (NAS100 / US100 & Gold)
+        if hasattr(self, "trendline_engine") and self.trendline_engine and hasattr(self.trendline_engine, "active_trades"):
+            for s, t in list(self.trendline_engine.active_trades.items()):
+                if t and (str(t.get("leg1_pos_id")) == pid_str or str(t.get("leg2_pos_id")) == pid_str or (symbol and s == symbol)):
+                    handled = True
+                    try:
+                        if hasattr(self.trendline_engine, "_log_trade_closure"):
+                            await self.trendline_engine._log_trade_closure(s, pos_id, reason_override=close_reason)
+                    except Exception as tle:
+                        logger.warning(f"Error logging Trendline trade closure #{pos_id}: {tle}")
+                    logger.info(f"[Cleanup] Handled Trendline trade closure for {s} (#{pos_id})")
+
+        # 6. Settlement to Prop Firm Simulator & fallback closure card for manual positions
         try:
             bid = self.get_active_balance_id()
             if bid:
@@ -1551,6 +1571,33 @@ class TelegramTradingBot:
                             f"• Reason: {r_name}"
                         )
                         await self.broadcast_alert(card)
+
+                        # Safety-net Google Sheets logging for all unhandled broker closures
+                        if gsheet_logger:
+                            try:
+                                eq = 0.0
+                                if hasattr(self, "prop_guardian") and self.prop_guardian:
+                                    eq = self.prop_guardian.current_balance
+                                fallback_payload = {
+                                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                    "asset": f"CFD {sym}",
+                                    "side": side,
+                                    "lots": lots,
+                                    "entry_price": entry_px,
+                                    "stop_loss": 0.0,
+                                    "take_profit": 0.0,
+                                    "exit_price": exit_px,
+                                    "pnl": pnl,
+                                    "pips": round(abs(exit_px - entry_px), 2),
+                                    "risk_reward": "Broker Market Order",
+                                    "exit_reason": r_name,
+                                    "position_id": str(pid_str),
+                                    "balance_equity": eq
+                                }
+                                asyncio.create_task(asyncio.to_thread(gsheet_logger.log_forex_margin_trade, fallback_payload))
+                                logger.info(f"📊 [Controller] Safety-net logged position #{pid_str} ({sym}) to Google Sheets.")
+                            except Exception as ge:
+                                logger.warning(f"[Controller] Fallback GSheet log error: {ge}")
         except Exception as e:
             logger.warning(f"Closure settlement lookup error for #{pos_id}: {e}")
 

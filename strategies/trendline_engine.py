@@ -26,6 +26,14 @@ from utils.chart_generator import (
     generate_breakeven_chart
 )
 
+try:
+    from gsheet_logger import gsheet_logger
+except ImportError:
+    try:
+        from utils.gsheet_logger import gsheet_logger
+    except ImportError:
+        gsheet_logger = None
+
 logger = logging.getLogger("TrendlineEngine")
 
 TRENDLINE_PROFILES: Dict[str, Dict[str, Any]] = {
@@ -112,6 +120,7 @@ class TrendlineStrategyEngine:
         self.consecutive_losses: Dict[str, int] = {}
         self.min_cooldown_seconds: int = 1800  # 30 minutes post-loss cooldown
         self.placed_position_ids: Set[str] = set()
+        self.logged_trade_ids: Set[str] = set()
 
     def set_notification_callback(self, cb: Callable):
         self.notify_cb = cb
@@ -493,9 +502,48 @@ class TrendlineStrategyEngine:
                     f"• Position is now **100% Risk-Free** targeting `{tp2:.2f}`!"
                 )
 
+                # Log Leg 1 closure to Google Sheets
+                await self._log_ticket_closure(
+                    symbol=symbol,
+                    tag="Leg 1 (50% TP1)",
+                    pos_id=leg1_id,
+                    lots=trade.get("lot_tp1", 0.5),
+                    entry_px=entry,
+                    sl_px=trade.get("sl_price", 0.0),
+                    tp_px=tp1,
+                    default_reason="take_profit"
+                )
+
         # 2. Check if all legs are closed
         if not leg1_still_open and not leg2_still_open:
             logger.info(f"🏁 [TrendlineEngine] {symbol} All trade legs closed. Cycle complete.")
+
+            # Log Leg 2 (Runner) to Google Sheets
+            if leg2_id and leg2_id != "None":
+                await self._log_ticket_closure(
+                    symbol=symbol,
+                    tag="Leg 2 (Runner)",
+                    pos_id=leg2_id,
+                    lots=trade.get("lot_runner", 0.5),
+                    entry_px=entry,
+                    sl_px=trade.get("sl_price", 0.0),
+                    tp_px=tp2,
+                    default_reason="take_profit" if trade.get("tp1_closed") else "stop_loss"
+                )
+
+            # If Leg 1 stopped out without hitting TP1, log Leg 1 as well
+            if not trade.get("tp1_closed") and leg1_id and leg1_id != "None":
+                await self._log_ticket_closure(
+                    symbol=symbol,
+                    tag="Leg 1 (50% TP1)",
+                    pos_id=leg1_id,
+                    lots=trade.get("lot_tp1", 0.5),
+                    entry_px=entry,
+                    sl_px=trade.get("sl_price", 0.0),
+                    tp_px=tp1,
+                    default_reason="stop_loss"
+                )
+
             # Evaluate outcome: if TP1 never banked, register loss & trigger cooldown
             if not trade.get("tp1_closed"):
                 self.last_loss_time[symbol] = time.time()
@@ -510,3 +558,97 @@ class TrendlineStrategyEngine:
                 self.last_loss_time[symbol] = time.time() - (self.min_cooldown_seconds - 900)
 
             self.active_trades[symbol] = None
+
+    async def _log_ticket_closure(
+        self, symbol: str, tag: str, pos_id: Any, lots: float,
+        entry_px: float, sl_px: float, tp_px: float, default_reason: str = "closed",
+        reason_override: Optional[str] = None
+    ):
+        if not pos_id or str(pos_id) == "None":
+            return
+        pid_str = str(pos_id)
+        if pid_str in self.logged_trade_ids:
+            return
+        self.logged_trade_ids.add(pid_str)
+
+        profile = TRENDLINE_PROFILES.get(symbol, {})
+        digits = profile.get("digits", 2)
+        sym_label = "US100" if symbol == "NAS100" else symbol
+        trade = self.active_trades.get(symbol) or {}
+        side = trade.get("side", "BUY")
+
+        pnl = 0.0
+        exit_px = entry_px
+        reason = reason_override or default_reason
+
+        # Fetch trade history from broker for exact PnL and exit price
+        for attempt in range(3):
+            try:
+                hist = self.mcp.get_trade_history(balance_id=self.balance_id, limit=25) or []
+                matched = next(
+                    (h for h in hist if 
+                     str(h.get("position_id")) == pid_str or 
+                     str(h.get("order_id")) == pid_str or 
+                     str(h.get("id")) == pid_str),
+                    None
+                )
+                if matched:
+                    pnl = float(matched.get("pnl", 0.0))
+                    exit_px = float(matched.get("close_price", matched.get("exit_price", entry_px)))
+                    reason = reason_override or matched.get("close_reason", reason)
+                    break
+            except Exception as e:
+                logger.debug(f"[TrendlineEngine] History lookup attempt {attempt+1} error: {e}")
+            if attempt < 2:
+                await asyncio.sleep(0.8)
+
+        # Sync to Google Sheets
+        if gsheet_logger:
+            try:
+                eq = 0.0
+                try:
+                    bals = self.mcp.list_balances() or []
+                    cur_bal = next((b for b in bals if b.get("balance_id") == self.balance_id), None)
+                    if cur_bal:
+                        eq = float(cur_bal.get("equity") or cur_bal.get("amount", 0.0))
+                except Exception:
+                    pass
+
+                trade_payload = {
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "asset": f"Trendline {sym_label} ({tag})",
+                    "side": side,
+                    "lots": lots,
+                    "entry_price": entry_px,
+                    "stop_loss": sl_px,
+                    "take_profit": tp_px,
+                    "exit_price": exit_px,
+                    "pnl": pnl,
+                    "pips": round(abs(exit_px - entry_px) * (10 ** (digits - 1)), 1),
+                    "risk_reward": f"{tag} (1:2.5 Plan)",
+                    "exit_reason": reason,
+                    "position_id": pid_str,
+                    "balance_equity": eq
+                }
+                asyncio.create_task(asyncio.to_thread(gsheet_logger.log_forex_margin_trade, trade_payload))
+                logger.info(f"📊 [TrendlineEngine] Dispatched Google Sheets log for {sym_label} #{pid_str} PnL=${pnl:.2f}")
+            except Exception as ge:
+                logger.warning(f"[TrendlineEngine] GSheet dispatch error: {ge}")
+
+    async def _log_trade_closure(self, symbol: str, pos_id: Any, reason_override: Optional[str] = None):
+        trade = self.active_trades.get(symbol)
+        if not trade:
+            return
+        pid_str = str(pos_id)
+        if str(trade.get("leg1_pos_id")) == pid_str:
+            await self._log_ticket_closure(
+                symbol, "Leg 1 (50% TP1)", pos_id, trade.get("lot_tp1", 0.5),
+                trade["entry_price"], trade["sl_price"], trade["tp1"],
+                default_reason="TP1 Partial Hit", reason_override=reason_override
+            )
+        elif str(trade.get("leg2_pos_id")) == pid_str:
+            await self._log_ticket_closure(
+                symbol, "Leg 2 (Runner)", pos_id, trade.get("lot_runner", 0.5),
+                trade["entry_price"], trade["sl_price"], trade["tp2"],
+                default_reason="Runner Closed", reason_override=reason_override
+            )

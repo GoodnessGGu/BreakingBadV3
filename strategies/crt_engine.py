@@ -26,6 +26,14 @@ from utils.chart_generator import (
     generate_ict_setup_chart
 )
 
+try:
+    from gsheet_logger import gsheet_logger
+except ImportError:
+    try:
+        from utils.gsheet_logger import gsheet_logger
+    except ImportError:
+        gsheet_logger = None
+
 logger = logging.getLogger("CRTEngine")
 
 CRT_INSTRUMENT_PROFILES: Dict[str, Dict[str, Any]] = {
@@ -123,6 +131,7 @@ class CRTStrategyEngine:
         self.enabled_symbols: Set[str] = set(self.symbols)
         self.unavailable_cooldown: Dict[str, float] = {}
         self.placed_position_ids: Set[str] = set()
+        self.logged_trade_ids: Set[str] = set()
 
     def set_notification_callback(self, cb: Callable):
         self.notify_cb = cb
@@ -495,7 +504,140 @@ class CRTStrategyEngine:
                     f"• Position is now **100% Risk-Free** running to `{tp2}`!"
                 )
 
+                # Log Leg 1 to Google Sheets
+                await self._log_ticket_closure(
+                    symbol=symbol,
+                    tag="Leg 1 (50% TP1)",
+                    pos_id=leg1_id,
+                    lots=trade.get("lot_tp1", self.lots * 0.5),
+                    entry_px=entry,
+                    sl_px=trade.get("sl_price", 0.0),
+                    tp_px=tp1,
+                    default_reason="take_profit"
+                )
+
         # 2. Check if all legs are closed
         if not leg1_still_open and not leg2_still_open:
             logger.info(f"🏁 [CRTEngine] {symbol} All trade legs closed. Cycle complete.")
+
+            # Log Leg 2 (Runner) to Google Sheets
+            if leg2_id and leg2_id != "None":
+                await self._log_ticket_closure(
+                    symbol=symbol,
+                    tag="Leg 2 (Runner)",
+                    pos_id=leg2_id,
+                    lots=trade.get("lot_runner", self.lots * 0.5),
+                    entry_px=entry,
+                    sl_px=trade.get("sl_price", 0.0),
+                    tp_px=tp2,
+                    default_reason="take_profit" if trade.get("tp1_closed") else "stop_loss"
+                )
+
+            # If Leg 1 stopped out without hitting TP1, log Leg 1 as well
+            if not trade.get("tp1_closed") and leg1_id and leg1_id != "None":
+                await self._log_ticket_closure(
+                    symbol=symbol,
+                    tag="Leg 1 (50% TP1)",
+                    pos_id=leg1_id,
+                    lots=trade.get("lot_tp1", self.lots * 0.5),
+                    entry_px=entry,
+                    sl_px=trade.get("sl_price", 0.0),
+                    tp_px=tp1,
+                    default_reason="stop_loss"
+                )
+
             self.active_trades[symbol] = None
+
+    async def _log_ticket_closure(
+        self, symbol: str, tag: str, pos_id: Any, lots: float,
+        entry_px: float, sl_px: float, tp_px: float, default_reason: str = "closed",
+        reason_override: Optional[str] = None
+    ):
+        if not pos_id or str(pos_id) == "None":
+            return
+        pid_str = str(pos_id)
+        if pid_str in self.logged_trade_ids:
+            return
+        self.logged_trade_ids.add(pid_str)
+
+        profile = CRT_INSTRUMENT_PROFILES.get(symbol, {})
+        digits = profile.get("digits", 5)
+        trade = self.active_trades.get(symbol) or {}
+        side = trade.get("side", "BUY")
+
+        pnl = 0.0
+        exit_px = entry_px
+        reason = reason_override or default_reason
+
+        # Fetch trade history from broker for exact PnL and exit price
+        for attempt in range(3):
+            try:
+                hist = self.mcp.get_trade_history(balance_id=self.balance_id, limit=25) or []
+                matched = next(
+                    (h for h in hist if 
+                     str(h.get("position_id")) == pid_str or 
+                     str(h.get("order_id")) == pid_str or 
+                     str(h.get("id")) == pid_str),
+                    None
+                )
+                if matched:
+                    pnl = float(matched.get("pnl", 0.0))
+                    exit_px = float(matched.get("close_price", matched.get("exit_price", entry_px)))
+                    reason = reason_override or matched.get("close_reason", reason)
+                    break
+            except Exception as e:
+                logger.debug(f"[CRTEngine] History lookup attempt {attempt+1} error: {e}")
+            if attempt < 2:
+                await asyncio.sleep(0.8)
+
+        # Sync to Google Sheets
+        if gsheet_logger:
+            try:
+                eq = 0.0
+                try:
+                    bals = self.mcp.list_balances() or []
+                    cur_bal = next((b for b in bals if b.get("balance_id") == self.balance_id), None)
+                    if cur_bal:
+                        eq = float(cur_bal.get("equity") or cur_bal.get("amount", 0.0))
+                except Exception:
+                    pass
+
+                trade_payload = {
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "asset": f"CRT {symbol} ({tag})",
+                    "side": side,
+                    "lots": lots,
+                    "entry_price": entry_px,
+                    "stop_loss": sl_px,
+                    "take_profit": tp_px,
+                    "exit_price": exit_px,
+                    "pnl": pnl,
+                    "pips": round(abs(exit_px - entry_px) * (10 ** (digits - 1)), 1),
+                    "risk_reward": f"{tag} (1:{self.rr_target:.1f} Plan)",
+                    "exit_reason": reason,
+                    "position_id": pid_str,
+                    "balance_equity": eq
+                }
+                asyncio.create_task(asyncio.to_thread(gsheet_logger.log_forex_margin_trade, trade_payload))
+                logger.info(f"📊 [CRTEngine] Dispatched Google Sheets log for {symbol} #{pid_str} PnL=${pnl:.2f}")
+            except Exception as ge:
+                logger.warning(f"[CRTEngine] GSheet dispatch error: {ge}")
+
+    async def _log_trade_closure(self, symbol: str, trade_dict: Any, reason_override: Optional[str] = None):
+        trade = self.active_trades.get(symbol) or trade_dict or {}
+        if not trade:
+            return
+        leg1 = trade.get("leg1_pos_id")
+        leg2 = trade.get("leg2_pos_id")
+        if leg1 and str(leg1) != "None":
+            await self._log_ticket_closure(
+                symbol, "Leg 1 (50% TP1)", leg1, trade.get("lot_tp1", self.lots * 0.5),
+                trade.get("entry_price", 0.0), trade.get("sl_price", 0.0), trade.get("tp1", 0.0),
+                default_reason="closed", reason_override=reason_override
+            )
+        if leg2 and str(leg2) != "None":
+            await self._log_ticket_closure(
+                symbol, "Leg 2 (Runner)", leg2, trade.get("lot_runner", self.lots * 0.5),
+                trade.get("entry_price", 0.0), trade.get("sl_price", 0.0), trade.get("tp2", 0.0),
+                default_reason="closed", reason_override=reason_override
+            )

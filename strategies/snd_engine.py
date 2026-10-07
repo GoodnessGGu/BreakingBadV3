@@ -689,3 +689,38 @@ class SNDStrategyEngine:
             f"• Reason: {reason}"
         )
         await self.notify_text(card)
+
+        # Async non-blocking Google Sheets logging
+        if gsheet_logger:
+            try:
+                profile = SND_INSTRUMENT_PROFILES.get(symbol, {})
+                digits = profile.get("digits", 5)
+                eq = 0.0
+                try:
+                    bals = self.mcp.list_balances() or []
+                    cur_bal = next((b for b in bals if b.get("balance_id") == self.balance_id), None)
+                    if cur_bal:
+                        eq = float(cur_bal.get("equity") or cur_bal.get("amount", 0.0))
+                except Exception:
+                    pass
+
+                trade_payload = {
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "asset": f"S&D {symbol}",
+                    "side": side,
+                    "lots": lots,
+                    "entry_price": entry,
+                    "stop_loss": float(trade.get("stop_loss", 0.0)),
+                    "take_profit": float(trade.get("take_profit", 0.0)),
+                    "exit_price": exit_px,
+                    "pnl": pnl,
+                    "pips": round(abs(exit_px - entry) * (10 ** (digits - 1)), 1),
+                    "risk_reward": f"1:{self.rr_ratio:.1f} Plan",
+                    "exit_reason": reason,
+                    "position_id": str(pos_id or ''),
+                    "balance_equity": eq
+                }
+                asyncio.create_task(asyncio.to_thread(gsheet_logger.log_forex_margin_trade, trade_payload))
+                logger.info(f"📊 [SNDEngine] Dispatched Google Sheets log for {symbol} #{pos_id} PnL=${pnl:.2f}")
+            except Exception as ge:
+                logger.warning(f"[SNDEngine] GSheet dispatch error: {ge}")

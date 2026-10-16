@@ -144,6 +144,14 @@ class SNDStrategyEngine:
         self.notify_cb: Optional[Callable] = None
         self.notify_photo_cb: Optional[Callable] = None
         self.is_running = False
+        self.rr_ratio: float = 2.0  # Fixed 1:2.0 R:R per Config E institutional specification
+        self.prop_guardian = None
+        self._pending_settlements: List[Dict[str, Any]] = []
+
+    def set_prop_guardian(self, guardian: Any):
+        """Link PropFirmGuardian for institutional settlement synchronization."""
+        self.prop_guardian = guardian
+        logger.info("🛡️ [SNDEngine] PropFirmGuardian settlement tracking linked")
 
     def set_balance(self, balance_id: int, account_type: str = "training"):
         self.balance_id = balance_id
@@ -434,6 +442,19 @@ class SNDStrategyEngine:
         instrument_id = profile["instrument_id"]
         lots = profile.get("default_lots", self.lots)
 
+        # MTF Higher-Timeframe Trend Confirmation (Addendum C)
+        try:
+            from utils.mtf_confirmation import MTFConfirmation
+            mtf_checker = getattr(self, "mtf_confirmation", None) or MTFConfirmation()
+            is_aligned, mtf_reason, _ = mtf_checker.check_higher_timeframe_bias(
+                self.mcp, profile["asset_id"], side, symbol
+            )
+            if not is_aligned:
+                logger.warning(f"🚫 [SNDEngine] {symbol} {side} blocked by MTF trend confirmation: {mtf_reason}")
+                return False
+        except Exception as e:
+            logger.debug(f"[SNDEngine] MTF check exception (failing open): {e}")
+
         logger.info(f"⚡ [SNDEngine] Executing {side} on {symbol} @ {entry:.5f} | SL: {sl} | TP: {tp} (1:{profile['target_rr']} R:R)")
 
         res = self.mcp.place_market_order(
@@ -492,6 +513,23 @@ class SNDStrategyEngine:
             "opened_at": time.time()
         }
 
+        # Persistent Trade Ledger recording (Addendum A)
+        if hasattr(self, "trade_ledger") and self.trade_ledger:
+            try:
+                self.trade_ledger.record_open(
+                    position_id=pos_id,
+                    strategy="S&D",
+                    symbol=symbol,
+                    side=side,
+                    lots=lots,
+                    entry_price=entry,
+                    sl=sl,
+                    tp=tp,
+                    balance_type=self.account_type
+                )
+            except Exception as le:
+                logger.debug(f"[SNDEngine] Error recording open to ledger: {le}")
+
         # Generate TradingView Pro execution chart
         chart_bytes = generate_trade_execution_chart(
             df=df,
@@ -544,28 +582,48 @@ class SNDStrategyEngine:
         if not pos_id or pos_id == trade.get("order_id"):
             try:
                 open_positions = self.mcp.list_positions(balance_id=self.balance_id)
-                for p in open_positions:
-                    if p.get("asset_id") == profile.get("asset_id"):
-                        pos_id = p.get("position_id") or p.get("id")
-                        trade["position_id"] = pos_id
-                        break
+                if open_positions is not None:
+                    for p in open_positions:
+                        if p.get("asset_id") == profile.get("asset_id"):
+                            pos_id = p.get("position_id") or p.get("id")
+                            trade["position_id"] = pos_id
+                            break
             except Exception as e:
                 logger.debug(f"[SNDEngine] Position ID resolution error: {e}")
 
-        # 2. Check if closed on broker directly
+        # 2. Check if closed on broker directly (FAILURE-AWARE)
         if pos_id and str(pos_id).isdigit():
             try:
                 open_positions = self.mcp.list_positions(balance_id=self.balance_id)
-                is_still_open = any(str(p.get("position_id") or p.get("id")) == str(pos_id) for p in open_positions)
-                if not is_still_open:
-                    logger.info(f"🏁 [SNDEngine] {symbol} Position #{pos_id} was settled on broker platform!")
-                    await self._log_trade_closure(symbol, trade)
-                    self.active_trades[symbol] = None
-                    return
+                if open_positions is None:
+                    # Failure / rate-limited: NEVER clear trade on failed position query
+                    logger.warning(f"⚠️ [SNDEngine] list_positions failed for {symbol} #{pos_id} - keeping trade active (will retry next tick)")
+                else:
+                    is_still_open = any(str(p.get("position_id") or p.get("id")) == str(pos_id) for p in open_positions)
+                    if not is_still_open:
+                        # Position missing from open list: verify closure via trade history before clearing
+                        hist = self.mcp.get_trade_history(balance_id=self.balance_id, limit=20)
+                        if hist is not None:
+                            matched = next(
+                                (h for h in hist if
+                                 str(h.get("position_id")) == str(pos_id) or
+                                 str(h.get("order_id")) == str(pos_id) or
+                                 str(h.get("id")) == str(pos_id)),
+                                None
+                            )
+                            if matched:
+                                logger.info(f"🏁 [SNDEngine] {symbol} Position #{pos_id} confirmed closed via broker history")
+                                await self._log_trade_closure(symbol, trade)
+                                self.active_trades[symbol] = None
+                                return
+                            else:
+                                logger.warning(f"⚠️ [SNDEngine] {symbol} #{pos_id} missing from open positions but not confirmed in history yet - keeping active")
+                        else:
+                            logger.warning(f"⚠️ [SNDEngine] Trade history query failed for {symbol} #{pos_id} - keeping trade active")
             except Exception as e:
                 logger.debug(f"[SNDEngine] Broker position state check error: {e}")
 
-        mid = cur_prices["mid"]
+        mid = cur_prices.get("mid", trade.get("entry_price", 0.0))
         side = trade["side"]
         entry = trade["entry_price"]
         sl = trade["sl_price"]
@@ -642,31 +700,46 @@ class SNDStrategyEngine:
         entry = float(trade.get("entry_price", 0.0))
         lots = float(trade.get("lots", self.lots))
 
-        pnl = 0.0
-        exit_px = 0.0
+        pnl = None
+        exit_px = None
         reason = reason_override or "closed"
 
         for attempt in range(3):
             try:
-                hist = self.mcp.get_trade_history(balance_id=self.balance_id, limit=15) or []
-                matched = next(
-                    (h for h in hist if
-                     (pos_id and str(h.get("position_id")) == str(pos_id)) or
-                     (pos_id and str(h.get("order_id")) == str(pos_id)) or
-                     (pos_id and str(h.get("id")) == str(pos_id))),
-                    None
-                )
-                if matched:
-                    pnl = float(matched.get("pnl", 0.0))
-                    exit_px = float(matched.get("close_price", matched.get("exit_price", 0.0)))
-                    reason = reason_override or matched.get("close_reason", reason)
-                    break
+                hist = self.mcp.get_trade_history(balance_id=self.balance_id, limit=25)
+                if hist is not None:
+                    matched = next(
+                        (h for h in hist if
+                         (pos_id and str(h.get("position_id")) == str(pos_id)) or
+                         (pos_id and str(h.get("order_id")) == str(pos_id)) or
+                         (pos_id and str(h.get("id")) == str(pos_id))),
+                        None
+                    )
+                    if matched:
+                        pnl = float(matched.get("pnl", 0.0))
+                        exit_px = float(matched.get("close_price", matched.get("exit_price", 0.0)))
+                        reason = reason_override or matched.get("close_reason", reason)
+                        break
             except Exception as e:
                 logger.debug(f"[SNDEngine] Hist lookup error (attempt {attempt+1}): {e}")
             if attempt < 2:
                 await asyncio.sleep(0.8)
 
-        if exit_px == 0.0:
+        # If PnL could not be retrieved from history, do NOT broadcast a false card with $0.00
+        if pnl is None:
+            logger.warning(f"⚠️ [SNDEngine] Could not confirm PnL from history for {symbol} #{pos_id} - trade placed in pending settlement")
+            if not hasattr(self, "_pending_settlements"):
+                self._pending_settlements = []
+            self._pending_settlements.append({
+                "symbol": symbol,
+                "trade": trade.copy(),
+                "reason": reason_override,
+                "next_retry": time.time() + 10.0,
+                "attempts": 3
+            })
+            return
+
+        if exit_px is None or exit_px == 0.0:
             prices = self.get_market_price(symbol)
             exit_px = prices.get("mid", entry)
 
@@ -674,10 +747,12 @@ class SNDStrategyEngine:
 
         if pnl > 0 or reason == "take_profit":
             header_line = f"🏆 [S&D WON] {symbol} {pnl_sign}"
-        elif pnl == 0 or reason == "breakeven" or trade.get("is_breakeven"):
+        elif pnl == 0.0 and (reason == "breakeven" or trade.get("is_breakeven")):
             header_line = f"🛡️ [S&D BREAKEVEN] {symbol} $0.00"
-        else:
+        elif pnl < 0:
             header_line = f"❌ [S&D CLOSED] {symbol} {pnl_sign}"
+        else:
+            header_line = f"🛡️ [S&D CLOSED] {symbol} {pnl_sign}"
 
         card = (
             f"{header_line}\n\n"
@@ -689,6 +764,35 @@ class SNDStrategyEngine:
             f"• Reason: {reason}"
         )
         await self.notify_text(card)
+
+        # Bug 3: Settle into PropFirmGuardian exactly once per closed position
+        if hasattr(self, "prop_guardian") and self.prop_guardian:
+            try:
+                await self.prop_guardian.on_trade_closed(
+                    symbol=symbol,
+                    pnl_usd=pnl,
+                    side=side,
+                    lots=lots,
+                    reason=reason,
+                    trade_id=str(pos_id) if pos_id else None
+                )
+                logger.info(f"🛡️ [SNDEngine] Settled {symbol} #{pos_id} into PropFirmGuardian (PnL: ${pnl:.2f})")
+            except Exception as pge:
+                logger.error(f"[SNDEngine] Error settling into PropFirmGuardian: {pge}")
+
+        # Addendum A: Record confirmed closure to Persistent Trade Ledger
+        if hasattr(self, "trade_ledger") and self.trade_ledger and pnl is not None:
+            try:
+                self.trade_ledger.record_close(
+                    position_id=pos_id,
+                    exit_price=exit_px,
+                    pnl=pnl,
+                    exit_reason=reason,
+                    strategy_fallback="S&D",
+                    symbol_fallback=symbol
+                )
+            except Exception as le:
+                logger.debug(f"[SNDEngine] Error recording close to ledger: {le}")
 
         # Async non-blocking Google Sheets logging
         if gsheet_logger:
@@ -710,8 +814,8 @@ class SNDStrategyEngine:
                     "side": side,
                     "lots": lots,
                     "entry_price": entry,
-                    "stop_loss": float(trade.get("stop_loss", 0.0)),
-                    "take_profit": float(trade.get("take_profit", 0.0)),
+                    "stop_loss": float(trade.get("sl_price", trade.get("stop_loss", 0.0))),
+                    "take_profit": float(trade.get("tp_price", trade.get("take_profit", 0.0))),
                     "exit_price": exit_px,
                     "pnl": pnl,
                     "pips": round(abs(exit_px - entry) * (10 ** (digits - 1)), 1),

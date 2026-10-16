@@ -357,6 +357,9 @@ class GoldPipsCopier(BaseCopier):
             await asyncio.sleep(15)
             try:
                 open_positions = self.mcp.list_positions(balance_id=self.balance_id)
+                if open_positions is None:
+                    logger.warning(f"⚠️ [GoldPips] list_positions failed (rate-limited / error) - keeping position #{pos_id} active")
+                    continue
                 is_still_open = any(str(p.get("position_id") or p.get("id")) == str(pos_id) for p in open_positions)
             except Exception as e:
                 logger.warning(f"[GoldPips] Error listing positions: {e}")

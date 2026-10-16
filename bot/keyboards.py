@@ -56,25 +56,51 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
 
 
-def history_menu_keyboard(category: str = "all") -> InlineKeyboardMarkup:
+def history_menu_keyboard(category: str = "all", period: str = "all", page: int = 1, total_pages: int = 1) -> InlineKeyboardMarkup:
+    cat = (category or "all").lower()
+    per = (period or "all").lower()
+    pg = max(1, page)
+    tot_pg = max(1, total_pages)
+
     keyboard = [
         [
-            InlineKeyboardButton(f"{'✅ ' if category == 'all' else ''}📊 All Trades", callback_data="history_cat_all"),
-            InlineKeyboardButton(f"{'✅ ' if category == 'cfd' else ''}📈 CFD Copiers", callback_data="history_cat_cfd")
+            InlineKeyboardButton(f"{'✅ ' if cat == 'all' else ''}📊 All", callback_data=f"hist_all_{per}_1"),
+            InlineKeyboardButton(f"{'✅ ' if cat == 'snd' else ''}🏛️ S&D", callback_data=f"hist_snd_{per}_1"),
+            InlineKeyboardButton(f"{'✅ ' if cat == 'trendline' else ''}📐 Trendline", callback_data=f"hist_trendline_{per}_1")
         ],
         [
-            InlineKeyboardButton(f"{'✅ ' if category == 'ict' else ''}🤖 ICT Engine", callback_data="history_cat_ict"),
-            InlineKeyboardButton(f"{'✅ ' if category == 'crt' else ''}🕯️ CRT Engine", callback_data="history_cat_crt")
+            InlineKeyboardButton(f"{'✅ ' if cat == 'crt' else ''}🕯️ CRT", callback_data=f"hist_crt_{per}_1"),
+            InlineKeyboardButton(f"{'✅ ' if cat == 'ict' else ''}🤖 ICT", callback_data=f"hist_ict_{per}_1"),
+            InlineKeyboardButton(f"{'✅ ' if cat == 'cfd' else ''}📈 Copiers", callback_data=f"hist_cfd_{per}_1")
         ],
         [
-            InlineKeyboardButton(f"{'✅ ' if category == 'trendline' else ''}📐 Trendlines", callback_data="history_cat_trendline"),
-            InlineKeyboardButton(f"{'✅ ' if category == 'blitz' else ''}⚡ Blitz Options", callback_data="history_cat_blitz")
+            InlineKeyboardButton(f"{'✅ ' if cat == 'blitz' else ''}⚡ Blitz", callback_data=f"hist_blitz_{per}_1"),
+            InlineKeyboardButton(f"{'✅ ' if cat == 'manual' else ''}👤 Manual", callback_data=f"hist_manual_{per}_1")
         ],
         [
-            InlineKeyboardButton("🔄 Refresh", callback_data=f"history_cat_{category}"),
-            InlineKeyboardButton("🔙 Main Menu", callback_data="btn_main_menu")
+            InlineKeyboardButton(f"{'📍 ' if per == 'all' else ''}All Time", callback_data=f"hist_{cat}_all_1"),
+            InlineKeyboardButton(f"{'📍 ' if per == 'today' else ''}Today", callback_data=f"hist_{cat}_today_1"),
+            InlineKeyboardButton(f"{'📍 ' if per == '7d' else ''}7 Days", callback_data=f"hist_{cat}_7d_1"),
+            InlineKeyboardButton(f"{'📍 ' if per == '30d' else ''}30 Days", callback_data=f"hist_{cat}_30d_1")
         ]
     ]
+
+    # Pagination row
+    nav_row = []
+    if pg > 1:
+        nav_row.append(InlineKeyboardButton("◀️ Prev", callback_data=f"hist_{cat}_{per}_{pg - 1}"))
+    nav_row.append(InlineKeyboardButton(f"📄 {pg}/{tot_pg}", callback_data=f"hist_{cat}_{per}_{pg}"))
+    if pg < tot_pg:
+        nav_row.append(InlineKeyboardButton("Next ▶️", callback_data=f"hist_{cat}_{per}_{pg + 1}"))
+    keyboard.append(nav_row)
+
+    # Actions row
+    keyboard.append([
+        InlineKeyboardButton("📥 Export CSV", callback_data=f"export_hist_{cat}_{per}"),
+        InlineKeyboardButton("🔄 Refresh", callback_data=f"hist_{cat}_{per}_{pg}"),
+        InlineKeyboardButton("🔙 Main Menu", callback_data="btn_main_menu")
+    ])
+
     return InlineKeyboardMarkup(keyboard)
 
 

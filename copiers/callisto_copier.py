@@ -455,6 +455,9 @@ class CallistoCopier(BaseCopier):
             await asyncio.sleep(self.poll_interval)
             try:
                 open_positions = self.mcp.list_positions(balance_id=self.balance_id)
+                if open_positions is None:
+                    logger.warning(f"⚠️ [Callisto] list_positions failed (rate-limited / error) - keeping position #{pos_id or order_id} active")
+                    continue
                 is_still_open = False
                 if pos_id:
                     is_still_open = any(str(p.get("position_id") or p.get("id")) == str(pos_id) for p in open_positions)

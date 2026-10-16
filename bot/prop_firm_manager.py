@@ -62,10 +62,16 @@ class PropFirmGuardian:
         self.consecutive_losses: int = 0
         self.max_consecutive_losses: int = 3
         self.consecutive_loss_freeze_until: float = 0.0
+        self.mcp_client = None
 
         # Load persisted state if exists
         self.load_state()
         self.check_daily_reset()
+
+    def set_mcp_client(self, mcp_client: Any):
+        """Attach MCP client for live broker balance reconciliation."""
+        self.mcp_client = mcp_client
+        logger.info("🛡️ [PropFirm] Attached MCP client for live broker balance reconciliation")
 
     # -------------------------------------------------------------
     # State Persistence
@@ -97,7 +103,8 @@ class PropFirmGuardian:
                 "consecutive_losses": self.consecutive_losses,
                 "consecutive_loss_freeze_until": self.consecutive_loss_freeze_until,
                 "max_daily_trades": self.max_daily_trades,
-                "recent_trades": self.recent_trades[-30:]
+                "recent_trades": self.recent_trades[-30:],
+                "processed_trade_ids": list(self.processed_trade_ids)
             }
             with open(PROP_STATE_FILE, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
@@ -134,6 +141,7 @@ class PropFirmGuardian:
             self.consecutive_loss_freeze_until = data.get("consecutive_loss_freeze_until", 0.0)
             self.max_daily_trades = data.get("max_daily_trades", 8)
             self.recent_trades = data.get("recent_trades", [])
+            self.processed_trade_ids = set(data.get("processed_trade_ids", []))
             logger.info(f"🛡️ [PropFirm] State loaded. Balance: ${self.current_balance:.2f} | Status: {self.status} | Trades Today: {self.daily_trade_count}/{self.max_daily_trades}")
         except Exception as e:
             logger.error(f"[PropFirm] Error loading state: {e}")
@@ -170,7 +178,14 @@ class PropFirmGuardian:
     def get_max_daily_loss_amount(self) -> float:
         return self.daily_start_balance * (self.daily_drawdown_limit_pct / 100.0)
 
-    def can_execute_trade(self, symbol: str, current_open_count: int = 0) -> Tuple[bool, str, float]:
+    def can_execute_trade(
+        self,
+        symbol: str,
+        current_open_count: int = 0,
+        entry_price: Optional[float] = None,
+        sl_price: Optional[float] = None,
+        open_risk_usd: float = 0.0
+    ) -> Tuple[bool, str, float]:
         """
         Validates if a new trade is permitted under Prop Firm Rules.
         Returns: (allowed: bool, rejection_reason: str, recommended_lot_size: float)
@@ -206,13 +221,98 @@ class PropFirmGuardian:
         if remaining_daily_budget <= 15.0:
             return False, f"🛡️ Insufficient Daily Drawdown Buffer (${remaining_daily_budget:.2f} remaining).", 0.0
 
-        # Calculate strict dollar risk per trade ($37.50 on $5k)
+        # Calculate strict dollar risk per trade ($37.50 on $5k at 0.75%)
         target_risk_usd = self.current_balance * (self.risk_per_trade_pct / 100.0)
         target_risk_usd = min(target_risk_usd, remaining_daily_budget * 0.5)
 
-        # Determine optimal lot size for $5,000 risk envelope
-        lots = self._compute_asset_prop_lots(symbol, target_risk_usd)
+        # Dynamic position sizing if entry and SL provided
+        if entry_price is not None and sl_price is not None and abs(entry_price - sl_price) > 0:
+            lots = self.calculate_dynamic_lot_size(symbol, entry_price, sl_price, target_risk_usd=target_risk_usd)
+            # Projected-loss check
+            new_trade_risk = abs(entry_price - sl_price) * self._get_point_value_per_lot(symbol) * lots
+            allowed_proj, proj_reason = self.can_execute_projected_risk(new_trade_risk, open_risk_usd)
+            if not allowed_proj:
+                return False, proj_reason, 0.0
+        else:
+            # Fallback to calibrated default lots
+            lots = self._compute_asset_prop_lots(symbol, target_risk_usd)
+
         return True, "Approved under Prop Firm Rules", lots
+
+    def _get_point_value_per_lot(self, symbol: str) -> float:
+        """Returns dollar value of a 1.0 price unit move per 1.0 standard lot."""
+        sym = symbol.upper().replace("/", "").replace("-", "")
+        if sym in ("XAUUSD", "GOLD"):
+            return 100.0  # 100 oz per lot, $1 move = $100
+        elif sym in ("XAGUSD", "SILVER"):
+            return 5000.0  # 5000 oz per lot
+        elif sym in ("BTCUSD", "BITCOIN", "ETHUSD"):
+            return 1.0
+        elif sym in ("NAS100", "US100", "US500"):
+            return 1.0
+        elif sym in ("EURUSD", "GBPUSD", "AUDUSD", "NZDUSD"):
+            return 100000.0  # Standard forex pair, 1 pip (0.0001) = $10 / lot
+        elif sym in ("USDJPY", "USDCAD", "USDCHF"):
+            return 1000.0   # 1 pip approx $7 - $10
+        return 100000.0
+
+    def calculate_dynamic_lot_size(
+        self,
+        symbol: str,
+        entry_price: float,
+        sl_price: float,
+        target_risk_usd: Optional[float] = None,
+        account_balance: Optional[float] = None
+    ) -> float:
+        """
+        Calculates institutional risk-calibrated lot size based on Stop Loss distance.
+        Ensures exact dollar risk does not exceed risk_per_trade_pct budget.
+        """
+        bal = account_balance or self.current_balance
+        risk_dollar = target_risk_usd or (bal * (self.risk_per_trade_pct / 100.0))
+        sl_distance = abs(entry_price - sl_price)
+        if sl_distance <= 0:
+            return self._compute_asset_prop_lots(symbol, risk_dollar)
+
+        point_val = self._get_point_value_per_lot(symbol)
+        raw_lots = risk_dollar / (sl_distance * point_val)
+
+        sym = symbol.upper().replace("/", "").replace("-", "")
+        # Enforce broker lot minimums and step sizing
+        if sym in ("XAUUSD", "GOLD"):
+            return max(1.0, round(raw_lots, 1))
+        elif sym in ("BTCUSD", "BITCOIN"):
+            return max(0.001, min(2.0, round(raw_lots, 3)))
+        elif sym in ("NAS100", "US100"):
+            return max(0.1, min(10.0, round(raw_lots, 2)))
+        elif sym in ("XAGUSD", "SILVER"):
+            return max(10.0, round(raw_lots, 1))
+        else:
+            # Forex
+            return max(0.01, min(10.0, round(raw_lots, 2)))
+
+    def can_execute_projected_risk(
+        self,
+        new_trade_sl_risk_usd: float,
+        open_positions_risk_usd: float = 0.0
+    ) -> Tuple[bool, str]:
+        """
+        Validates that opening this new position will not cause the account
+        to breach the daily or overall drawdown floor if ALL active trades hit SL.
+        """
+        total_risk = open_positions_risk_usd + new_trade_sl_risk_usd
+        worst_case_equity = self.current_balance - total_risk
+
+        floor = self.get_max_loss_equity_floor()
+        if worst_case_equity < floor:
+            return False, f"🚨 Projected Risk Violation: Max loss equity floor (${floor:.2f}) would be breached if all open trades hit SL (Projected: ${worst_case_equity:.2f})."
+
+        max_daily_loss = self.get_max_daily_loss_amount()
+        projected_daily_pnl = self.daily_pnl - total_risk
+        if projected_daily_pnl < -max_daily_loss:
+            return False, f"🛡️ Projected Daily Drawdown Violation: Daily loss cap (-${max_daily_loss:.2f}) would be breached if open trades stop out (Projected: -${abs(projected_daily_pnl):.2f})."
+
+        return True, "Projected risk within limits"
 
     def _compute_asset_prop_lots(self, symbol: str, risk_usd: float) -> float:
         """
@@ -289,15 +389,32 @@ class PropFirmGuardian:
         # 1. Check Target Reached
         target_bal = self.get_target_balance()
         if self.current_balance >= target_bal:
-            self.status = "PASSED"
-            self.save_state()
-            await self._alert(
-                f"🎉 **[PROP FIRM CHALLENGE PASSED!]** 🎉\n\n"
-                f"• Target Balance (${target_bal:.2f}) ACHIEVED!\n"
-                f"• Current Equity: `${self.current_balance:.2f}` (+{self.profit_target_pct:.1f}%)\n"
-                f"• Phase {self.phase} Successfully Completed! 🏆"
-            )
-            return
+            # Reconcile with broker before firing passed
+            broker_confirmed = True
+            if self.mcp_client:
+                try:
+                    bals = self.mcp_client.list_balances()
+                    if bals is not None and bals:
+                        broker_eq = float(bals[0].get("equity") or bals[0].get("amount", 0.0))
+                        if broker_eq < target_bal:
+                            broker_confirmed = False
+                            logger.warning(
+                                f"⚠️ [PropFirm] Target reached in simulator (${self.current_balance:.2f}) "
+                                f"but broker balance (${broker_eq:.2f}) has not yet confirmed target (${target_bal:.2f})."
+                            )
+                except Exception as b_err:
+                    logger.debug(f"[PropFirm] Broker target check: {b_err}")
+
+            if broker_confirmed:
+                self.status = "PASSED"
+                self.save_state()
+                await self._alert(
+                    f"🎉 **[PROP FIRM CHALLENGE PASSED!]** 🎉\n\n"
+                    f"• Target Balance (${target_bal:.2f}) ACHIEVED!\n"
+                    f"• Current Equity: `${self.current_balance:.2f}` (+{self.profit_target_pct:.1f}%)\n"
+                    f"• Phase {self.phase} Successfully Completed! 🏆"
+                )
+                return
 
         # 2. Check Daily Drawdown Breach
         max_daily_loss = self.get_max_daily_loss_amount()
@@ -333,6 +450,45 @@ class PropFirmGuardian:
                 await self.broadcast_func(text)
             except Exception as e:
                 logger.error(f"[PropFirm] Broadcast error: {e}")
+
+    async def reconcile_with_broker(self, drift_threshold: float = 25.0) -> Optional[float]:
+        """
+        Reconciliation job: compares guardian's tracked balance against broker balance
+        and logs/alerts on drift above threshold.
+        """
+        if not self.mcp_client:
+            return None
+
+        try:
+            bals = self.mcp_client.list_balances()
+            if bals is None or not bals:
+                logger.debug("[PropFirm Recon] list_balances returned None or empty - skipping")
+                return None
+
+            broker_bal = float(bals[0].get("equity") or bals[0].get("amount", 0.0))
+            if broker_bal <= 0:
+                return None
+
+            drift = abs(broker_bal - self.current_balance)
+            if drift > drift_threshold:
+                logger.warning(
+                    f"⚠️ [PropFirm Recon] Balance drift detected! "
+                    f"Tracked: ${self.current_balance:.2f} | Broker: ${broker_bal:.2f} | Drift: ${drift:.2f}"
+                )
+                await self._alert(
+                    f"⚠️ **[PROP FIRM RECONCILIATION DRIFT]**\n\n"
+                    f"• Tracked Balance: `${self.current_balance:.2f}`\n"
+                    f"• Broker Equity: `${broker_bal:.2f}`\n"
+                    f"• Drift: `${drift:.2f}` (Threshold: `${drift_threshold:.2f}`)\n"
+                    f"• Please review unrecorded or external trades."
+                )
+            else:
+                logger.info(f"✅ [PropFirm Recon] Balance verified: Tracked=${self.current_balance:.2f}, Broker=${broker_bal:.2f} (Drift: ${drift:.2f})")
+
+            return drift
+        except Exception as e:
+            logger.error(f"[PropFirm Recon] Reconciliation error: {e}")
+            return None
 
     # -------------------------------------------------------------
     # Controls & Resets

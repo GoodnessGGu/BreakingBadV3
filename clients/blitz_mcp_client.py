@@ -74,7 +74,7 @@ class IQBlitzMCPClient:
                 logger.error("❌ 403 Forbidden: Token lacks Blitz Options permission.")
                 return {"error": {"code": 403, "message": "Forbidden: Token lacks Blitz Options permission"}}
             elif resp.status_code in (400, 404, 410) and retry_init and method != "initialize":
-                logger.warning(f"⚠️ Blitz MCP HTTP {resp.status_code} (session invalid/expired). Re-initializing...")
+                logger.debug(f"[Blitz MCP] HTTP {resp.status_code} (session invalid/expired). Re-initializing quietly...")
                 if self.initialize():
                     return self.rpc_call(method, params, retry_init=False)
 
@@ -99,7 +99,7 @@ class IQBlitzMCPClient:
 
             err = data.get("error") if isinstance(data, dict) else None
             if err and retry_init and ("session" in str(err).lower() or "not found" in str(err).lower()):
-                logger.warning("⚠️ Blitz MCP session error in response. Re-initializing...")
+                logger.debug("[Blitz MCP] Session expired in response. Re-initializing quietly...")
                 if self.initialize():
                     return self.rpc_call(method, params, retry_init=False)
 

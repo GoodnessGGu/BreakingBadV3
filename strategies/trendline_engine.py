@@ -121,6 +121,13 @@ class TrendlineStrategyEngine:
         self.min_cooldown_seconds: int = 1800  # 30 minutes post-loss cooldown
         self.placed_position_ids: Set[str] = set()
         self.logged_trade_ids: Set[str] = set()
+        self.prop_guardian = None
+        self._pending_settlements: List[Dict[str, Any]] = []
+
+    def set_prop_guardian(self, guardian: Any):
+        """Link PropFirmGuardian for institutional settlement synchronization."""
+        self.prop_guardian = guardian
+        logger.info("🛡️ [TrendlineEngine] PropFirmGuardian settlement tracking linked")
 
     def set_notification_callback(self, cb: Callable):
         self.notify_cb = cb
@@ -342,6 +349,20 @@ class TrendlineStrategyEngine:
             self.last_trade_bar[symbol] = bar_time
 
         trade_lev = min(self.leverage, 20 if symbol == "BTCUSD" else self.leverage)
+
+        # MTF Higher-Timeframe Trend Confirmation (Addendum C)
+        try:
+            from utils.mtf_confirmation import MTFConfirmation
+            mtf_checker = getattr(self, "mtf_confirmation", None) or MTFConfirmation()
+            is_aligned, mtf_reason, _ = mtf_checker.check_higher_timeframe_bias(
+                self.mcp, asset_id, side, symbol
+            )
+            if not is_aligned:
+                logger.warning(f"🚫 [TrendlineEngine] {symbol} {side} blocked by MTF trend confirmation: {mtf_reason}")
+                return False
+        except Exception as e:
+            logger.debug(f"[TrendlineEngine] MTF check exception (failing open): {e}")
+
         logger.info(f"📐 [TrendlineEngine] Executing 15M Bounce {side} on {symbol} @ {entry} | Line: {tl_val:.2f} | SL: {sl} | TP1: {tp1} | TP2: {tp2}")
 
         # Leg 1: Banks profit at TP1 (+1.0R)
@@ -386,6 +407,8 @@ class TrendlineStrategyEngine:
         if pos1_id: self.placed_position_ids.add(str(pos1_id))
         if pos2_id: self.placed_position_ids.add(str(pos2_id))
 
+        group_id = f"tl_{symbol}_{int(time.time())}"
+
         self.active_trades[symbol] = {
             "symbol": symbol,
             "side": side,
@@ -400,8 +423,41 @@ class TrendlineStrategyEngine:
             "lot_runner": lot_runner,
             "tp1_closed": False,
             "runner_at_be": False,
+            "group_id": group_id,
             "opened_at": time.time()
         }
+
+        # Persistent Trade Ledger recording with group_id linking (Addendum A)
+        if hasattr(self, "trade_ledger") and self.trade_ledger:
+            try:
+                if pos1_id:
+                    self.trade_ledger.record_open(
+                        position_id=pos1_id,
+                        strategy="Trendline",
+                        symbol=symbol,
+                        side=side,
+                        lots=lot_tp1,
+                        entry_price=entry,
+                        sl=sl,
+                        tp=tp1,
+                        balance_type=self.account_type,
+                        group_id=group_id
+                    )
+                if pos2_id:
+                    self.trade_ledger.record_open(
+                        position_id=pos2_id,
+                        strategy="Trendline",
+                        symbol=symbol,
+                        side=side,
+                        lots=lot_runner,
+                        entry_price=entry,
+                        sl=sl,
+                        tp=tp2,
+                        balance_type=self.account_type,
+                        group_id=group_id
+                    )
+            except Exception as le:
+                logger.debug(f"[TrendlineEngine] Error recording legs to ledger: {le}")
 
         # Telegram Chart Notification
         chart_bytes = generate_trade_execution_chart(
@@ -438,11 +494,10 @@ class TrendlineStrategyEngine:
         tp1 = trade["tp1"]
         tp2 = trade["tp2"]
 
-        open_positions = []
-        try:
-            open_positions = self.mcp.list_positions(balance_id=self.balance_id) or []
-        except Exception:
-            pass
+        open_positions = self.mcp.list_positions(balance_id=self.balance_id)
+        if open_positions is None:
+            logger.warning(f"⚠️ [TrendlineEngine] list_positions failed for {symbol} - keeping trade active (will retry next tick)")
+            return
 
         # Build comprehensive set of all open IDs (position_id, id, order_id)
         open_ids = set()
@@ -577,30 +632,72 @@ class TrendlineStrategyEngine:
         trade = self.active_trades.get(symbol) or {}
         side = trade.get("side", "BUY")
 
-        pnl = 0.0
+        pnl = None
         exit_px = entry_px
         reason = reason_override or default_reason
 
         # Fetch trade history from broker for exact PnL and exit price
         for attempt in range(3):
             try:
-                hist = self.mcp.get_trade_history(balance_id=self.balance_id, limit=25) or []
-                matched = next(
-                    (h for h in hist if 
-                     str(h.get("position_id")) == pid_str or 
-                     str(h.get("order_id")) == pid_str or 
-                     str(h.get("id")) == pid_str),
-                    None
-                )
-                if matched:
-                    pnl = float(matched.get("pnl", 0.0))
-                    exit_px = float(matched.get("close_price", matched.get("exit_price", entry_px)))
-                    reason = reason_override or matched.get("close_reason", reason)
-                    break
+                hist = self.mcp.get_trade_history(balance_id=self.balance_id, limit=25)
+                if hist is not None:
+                    matched = next(
+                        (h for h in hist if 
+                         str(h.get("position_id")) == pid_str or 
+                         str(h.get("order_id")) == pid_str or 
+                         str(h.get("id")) == pid_str),
+                        None
+                    )
+                    if matched:
+                        pnl = float(matched.get("pnl", 0.0))
+                        exit_px = float(matched.get("close_price", matched.get("exit_price", entry_px)))
+                        reason = reason_override or matched.get("close_reason", reason)
+                        break
             except Exception as e:
                 logger.debug(f"[TrendlineEngine] History lookup attempt {attempt+1} error: {e}")
             if attempt < 2:
                 await asyncio.sleep(0.8)
+
+        if pnl is None:
+            logger.warning(f"⚠️ [TrendlineEngine] Could not confirm PnL from history for {symbol} #{pid_str} - pending settlement")
+            if not hasattr(self, "_pending_settlements"):
+                self._pending_settlements = []
+            self._pending_settlements.append({
+                "symbol": symbol, "tag": tag, "pos_id": pid_str, "lots": lots,
+                "entry_px": entry_px, "sl_px": sl_px, "tp_px": tp_px,
+                "default_reason": default_reason, "reason_override": reason_override,
+                "next_retry": time.time() + 10.0
+            })
+            return
+
+        # Settle into PropFirmGuardian exactly once per closed position
+        if hasattr(self, "prop_guardian") and self.prop_guardian:
+            try:
+                await self.prop_guardian.on_trade_closed(
+                    symbol=symbol,
+                    pnl_usd=pnl,
+                    side=side,
+                    lots=lots,
+                    reason=reason,
+                    trade_id=pid_str
+                )
+                logger.info(f"🛡️ [TrendlineEngine] Settled {symbol} #{pid_str} into PropFirmGuardian (PnL: ${pnl:.2f})")
+            except Exception as pge:
+                logger.error(f"[TrendlineEngine] Error settling into PropFirmGuardian: {pge}")
+
+        # Addendum A: Record confirmed closure to Persistent Trade Ledger
+        if hasattr(self, "trade_ledger") and self.trade_ledger and pnl is not None:
+            try:
+                self.trade_ledger.record_close(
+                    position_id=pid_str,
+                    exit_price=exit_px,
+                    pnl=pnl,
+                    exit_reason=reason,
+                    strategy_fallback="Trendline",
+                    symbol_fallback=symbol
+                )
+            except Exception as le:
+                logger.debug(f"[TrendlineEngine] Error recording close to ledger: {le}")
 
         # Sync to Google Sheets
         if gsheet_logger:

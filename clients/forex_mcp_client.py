@@ -17,11 +17,88 @@ import os
 import json
 import logging
 import math
+import time
+import threading
 import requests
 from typing import Dict, Any, Optional, List, Tuple
 from dotenv import load_dotenv
 
 logger = logging.getLogger("IQForexMCP")
+
+class MCPRateLimitError(Exception):
+    """Raised when IQ Option MCP API returns a rate-limit response."""
+    def __init__(self, message: str = "Rate limited", retry_after_ms: Optional[int] = None):
+        super().__init__(message)
+        self.retry_after_ms = retry_after_ms
+
+class MCPRequestError(Exception):
+    """Raised when an MCP API request fails."""
+    pass
+
+class TokenBucketLimiter:
+    """Thread-safe token bucket rate limiter for IQ Option MCP (60 calls/min)."""
+
+    PRIORITY_CRITICAL = 0   # close, stop-loss, take-profit, order placement
+    PRIORITY_NORMAL = 1     # list_positions, list_balances, history
+    PRIORITY_LOW = 2        # candles, sizing, metadata
+
+    CRITICAL_TOOLS = {"close_position", "change_position_stop_loss", "change_position_take_profit", "place_market_order"}
+    LOW_PRIORITY_TOOLS = {"get_candles", "calculate_order_size", "list_assets", "get_instruments"}
+
+    def __init__(self, max_tokens: int = 55, refill_rate: float = 55.0 / 60.0):
+        self._max_tokens = max_tokens
+        self._tokens = float(max_tokens)
+        self._refill_rate = refill_rate  # tokens per second
+        self._last_refill = time.time()
+        self._lock = threading.Lock()
+        self._backoff_until = 0.0
+
+    def acquire(self, tool_name: str = "", timeout: float = 30.0) -> bool:
+        """Acquire a token, blocking up to timeout seconds. Returns False if timed out."""
+        deadline = time.time() + timeout
+        priority = self._get_priority(tool_name)
+
+        while time.time() < deadline:
+            with self._lock:
+                self._refill()
+                now = time.time()
+
+                # Honor backoff if set
+                if now < self._backoff_until:
+                    wait_rem = self._backoff_until - now
+                    if priority > self.PRIORITY_CRITICAL or wait_rem > 1.5:
+                        pass
+                    elif self._tokens >= 1.0:
+                        self._tokens -= 1.0
+                        return True
+                else:
+                    min_tokens = 5.0 if priority > self.PRIORITY_CRITICAL else 1.0
+                    if self._tokens >= min_tokens:
+                        self._tokens -= 1.0
+                        return True
+
+            time.sleep(0.05)
+        return False
+
+    def set_backoff(self, retry_after_ms: Optional[int] = None):
+        """Set backoff cooldown upon receiving a rate-limit error."""
+        with self._lock:
+            wait_s = (float(retry_after_ms) / 1000.0) if retry_after_ms else 3.0
+            self._backoff_until = max(self._backoff_until, time.time() + wait_s)
+            logger.warning(f"⚠️ [MCP Limiter] Backing off for {wait_s:.2f}s due to rate limit")
+
+    def _refill(self):
+        now = time.time()
+        elapsed = now - self._last_refill
+        self._tokens = min(self._max_tokens, self._tokens + (elapsed * self._refill_rate))
+        self._last_refill = now
+
+    def _get_priority(self, tool_name: str) -> int:
+        if tool_name in self.CRITICAL_TOOLS:
+            return self.PRIORITY_CRITICAL
+        if tool_name in self.LOW_PRIORITY_TOOLS:
+            return self.PRIORITY_LOW
+        return self.PRIORITY_NORMAL
 
 FOREX_ENDPOINTS = {
     "cfd": "https://marginal-cfd.mcp.iqoption.com",
@@ -46,6 +123,14 @@ class IQForexMCPClient:
         self.tools: Dict[str, Dict[str, Any]] = {k: {} for k in self.endpoint_urls}
         self.asset_cache: Dict[str, Any] = {}
         self.instrument_cache: Dict[int, Any] = {}
+
+        # Shared rate limiter and short-TTL query caches
+        self._rate_limiter = TokenBucketLimiter()
+        self._position_cache: Optional[Tuple[float, Any, int, int, Any]] = None  # (ts, result, skip, limit, bal_id)
+        self._position_cache_ttl: float = 3.0
+        self._balance_cache: Optional[Tuple[float, Any, str]] = None  # (ts, result, types)
+        self._balance_cache_ttl: float = 3.0
+        self._cache_lock = threading.Lock()
         
         if self.token:
             self._update_auth_headers()
@@ -235,12 +320,25 @@ class IQForexMCPClient:
                 instrument_id=arguments.get("instrument_id")
             )
 
+        # Rate limiting: acquire token
+        if hasattr(self, "_rate_limiter") and not self._rate_limiter.acquire(tool_name=name, timeout=15.0):
+            raise MCPRateLimitError(f"Rate limiter timeout waiting to call {name} on {endpoint}")
+
         res = self.rpc_call("tools/call", {
             "name": name,
             "arguments": arguments
         }, endpoint=endpoint)
 
         if "error" in res:
+            err_obj = res["error"]
+            err_str = str(err_obj).lower()
+            if "rate_limit" in err_str or "rate limit" in err_str or "too many" in err_str or "429" in err_str:
+                retry_ms = None
+                if isinstance(err_obj, dict):
+                    retry_ms = err_obj.get("retry_after_ms")
+                if hasattr(self, "_rate_limiter"):
+                    self._rate_limiter.set_backoff(retry_ms)
+                raise MCPRateLimitError(f"Rate limited on {name} ({endpoint})", retry_after_ms=retry_ms)
             logger.error(f"Tool call error [{name}] on {endpoint}: {res['error']}")
             return {"error": res["error"]}
 
@@ -250,8 +348,14 @@ class IQForexMCPClient:
             for c in result.get("content", []):
                 if isinstance(c, dict) and "text" in c:
                     err_msg += c["text"] + " "
-            logger.error(f"Tool execution returned error [{name}] on {endpoint}: {err_msg.strip()}")
-            return {"error": {"message": err_msg.strip()}}
+            err_msg_clean = err_msg.strip()
+            err_lower = err_msg_clean.lower()
+            if "rate_limit" in err_lower or "rate limit" in err_lower or "too many" in err_lower or "429" in err_lower:
+                if hasattr(self, "_rate_limiter"):
+                    self._rate_limiter.set_backoff(None)
+                raise MCPRateLimitError(f"Rate limited on {name} ({endpoint}): {err_msg_clean}")
+            logger.error(f"Tool execution returned error [{name}] on {endpoint}: {err_msg_clean}")
+            return {"error": {"message": err_msg_clean}}
 
         # Extract structuredContent if present
         if "structuredContent" in result and result["structuredContent"]:
@@ -274,12 +378,33 @@ class IQForexMCPClient:
     # High-Level Forex, CFD & Crypto API Methods
     # ==========================================
 
-    def list_balances(self, types: str = "ALL") -> List[Dict[str, Any]]:
-        """List marginal balances (equity, margin, free_margin, pnl)."""
-        res = self.call_tool("list_balances", {"types": types.upper()}, endpoint="cfd")
-        if isinstance(res, dict) and "balances" in res:
-            return res["balances"]
-        return []
+    def list_balances(self, types: str = "ALL") -> Optional[List[Dict[str, Any]]]:
+        """List marginal balances (equity, margin, free_margin, pnl).
+        Returns None on error or rate-limit."""
+        types_key = types.upper()
+        now = time.time()
+        with self._cache_lock:
+            if self._balance_cache is not None:
+                ts, cached_bals, cached_types = self._balance_cache
+                if cached_types == types_key and (now - ts) < self._balance_cache_ttl:
+                    return cached_bals
+
+        try:
+            res = self.call_tool("list_balances", {"types": types_key}, endpoint="cfd")
+            if isinstance(res, dict) and "balances" in res:
+                bals = res["balances"]
+                with self._cache_lock:
+                    self._balance_cache = (now, bals, types_key)
+                return bals
+            if isinstance(res, dict) and ("error" in res or res.get("isError")):
+                return None
+            return []
+        except MCPRateLimitError as e:
+            logger.warning(f"⚠️ Rate limited listing balances: {e}")
+            return None
+        except Exception as e:
+            logger.debug(f"Error listing balances: {e}")
+            return None
 
     def get_real_balance(self) -> Optional[Dict[str, Any]]:
         """Retrieve real money marginal balance profile."""
@@ -513,8 +638,19 @@ class IQForexMCPClient:
                 logger.debug(f"[MCP] TP update exception on {ep}: {e}")
         return {"error": {"message": f"Failed to update TP for position {actual_pid}"}}
 
-    def list_positions(self, balance_id: Optional[int] = None, skip: int = 0, limit: int = 50) -> List[Dict[str, Any]]:
-        """List currently open marginal positions across all engines (CFD, Forex, Crypto)."""
+    def list_positions(
+        self,
+        balance_id: Optional[int] = None,
+        skip: int = 0,
+        limit: int = 50,
+        endpoint: Optional[str] = None,
+        asset_id: Optional[int] = None
+    ) -> Optional[List[Dict[str, Any]]]:
+        """
+        List currently open marginal positions across all engines (CFD, Forex, Crypto).
+        Returns None if ALL endpoint queries fail (rate-limited / error), indicating
+        unreliable state. Returns an empty list only when broker confirms zero open positions.
+        """
         active_bal_id = balance_id
         if not active_bal_id:
             try:
@@ -524,23 +660,53 @@ class IQForexMCPClient:
             except Exception:
                 pass
 
+        target_ep = endpoint
+        if not target_ep and asset_id is not None:
+            target_ep = self.resolve_endpoint(asset_id=asset_id)
+
+        now = time.time()
+        # Check cache if querying all endpoints and no specific pagination
+        if not target_ep and skip == 0:
+            with self._cache_lock:
+                if self._position_cache is not None:
+                    ts, cached_res, c_skip, c_lim, c_bid = self._position_cache
+                    if c_skip == skip and c_lim == limit and c_bid == active_bal_id and (now - ts) < self._position_cache_ttl:
+                        return [dict(p) for p in cached_res] if cached_res is not None else None
+
+        endpoints_to_query = [target_ep] if target_ep else ["cfd", "forex", "crypto"]
         all_positions = []
         seen = set()
-        for ep in ("cfd", "forex", "crypto"):
+        any_success = False
+
+        for ep in endpoints_to_query:
             try:
                 args = {"skip": skip, "limit": limit}
                 if active_bal_id:
                     args["balance_id"] = active_bal_id
                 res = self.call_tool("list_positions", args, endpoint=ep)
                 if isinstance(res, dict) and "positions" in res:
+                    any_success = True
                     for p in (res["positions"] or []):
                         pid = p.get("position_id") or p.get("id")
                         if pid and pid not in seen:
                             seen.add(pid)
                             p["_endpoint"] = ep
                             all_positions.append(p)
+                elif isinstance(res, dict) and not res.get("error") and not res.get("isError"):
+                    any_success = True
+            except MCPRateLimitError as e:
+                logger.warning(f"⚠️ [MCP] Rate limited listing positions on {ep}: {e}")
             except Exception as e:
-                logger.debug(f"Error listing positions on {ep}: {e}")
+                logger.debug(f"[MCP] Error listing positions on {ep}: {e}")
+
+        if not any_success:
+            logger.warning(f"⚠️ [MCP] All endpoints failed during list_positions - returning None")
+            return None
+
+        if not target_ep and skip == 0:
+            with self._cache_lock:
+                self._position_cache = (now, [dict(p) for p in all_positions], skip, limit, active_bal_id)
+
         return all_positions
 
     def get_orders(self, balance_id: int) -> List[Dict[str, Any]]:
@@ -555,11 +721,28 @@ class IQForexMCPClient:
                 pass
         return all_orders
 
-    def get_trade_history(self, balance_id: int, skip: int = 0, limit: int = 50) -> List[Dict[str, Any]]:
-        """List closed marginal positions across all engines."""
+    def get_trade_history(
+        self,
+        balance_id: int,
+        skip: int = 0,
+        limit: int = 50,
+        endpoint: Optional[str] = None,
+        asset_id: Optional[int] = None
+    ) -> Optional[List[Dict[str, Any]]]:
+        """
+        List closed marginal positions across all engines.
+        Returns None if ALL queried endpoints fail (rate-limited / error).
+        """
+        target_ep = endpoint
+        if not target_ep and asset_id is not None:
+            target_ep = self.resolve_endpoint(asset_id=asset_id)
+
+        endpoints_to_query = [target_ep] if target_ep else ["cfd", "forex", "crypto"]
         all_history = []
         seen = set()
-        for ep in ("cfd", "forex", "crypto"):
+        any_success = False
+
+        for ep in endpoints_to_query:
             try:
                 res = self.call_tool("get_trade_history", {
                     "balance_id": balance_id,
@@ -567,24 +750,61 @@ class IQForexMCPClient:
                     "limit": limit
                 }, endpoint=ep)
                 if isinstance(res, dict) and "history" in res:
+                    any_success = True
                     for h in (res["history"] or []):
                         hid = h.get("position_id") or h.get("id")
                         if hid and hid not in seen:
                             seen.add(hid)
                             all_history.append(h)
-            except Exception:
-                pass
+                elif isinstance(res, dict) and not res.get("error") and not res.get("isError"):
+                    any_success = True
+            except MCPRateLimitError as e:
+                logger.warning(f"⚠️ [MCP] Rate limited fetching trade history on {ep}: {e}")
+            except Exception as e:
+                logger.debug(f"[MCP] Error fetching trade history on {ep}: {e}")
+
+        if not any_success:
+            logger.warning(f"⚠️ [MCP] All endpoints failed during get_trade_history - returning None")
+            return None
+
         return all_history
 
     def close_position(self, position_id: int) -> Dict[str, Any]:
-        """Close an open marginal position by trying endpoints until accepted."""
+        """
+        Close an open marginal position by trying endpoints until accepted.
+        Checks if position is already closed first and treats 'not_found' as already closed.
+        """
         actual_pid = self._resolve_actual_position_id(int(position_id))
         logger.info(f"🔒 [MCP] Closing position #{actual_pid} (input: #{position_id})")
+
+        # Verify whether position is still open if list_positions succeeds
+        try:
+            open_pos = self.list_positions()
+            if open_pos is not None:
+                is_open = any(str(p.get("position_id") or p.get("id")) == str(actual_pid) for p in open_pos)
+                if not is_open:
+                    logger.info(f"ℹ️ [MCP] Position #{actual_pid} is already not in open positions.")
+                    return {"already_closed": True, "position_id": actual_pid, "message": "Position not in open list"}
+        except Exception as e:
+            logger.debug(f"[MCP] Pre-close open check skipped: {e}")
+
         for ep in ("cfd", "forex", "crypto"):
             try:
                 res = self.call_tool("close_position", {"position_id": int(actual_pid)}, endpoint=ep)
                 if res and not res.get("error") and not res.get("isError"):
                     return res
-            except Exception:
-                pass
+                # Check if error indicates already closed / not found
+                err_str = str(res.get("error", "")).lower() + " " + str(res.get("message", "")).lower()
+                if "not_found" in err_str or "not found" in err_str or "does not exist" in err_str:
+                    logger.info(f"ℹ️ [MCP] Position #{actual_pid} not found on {ep} - confirmed already closed.")
+                    return {"already_closed": True, "position_id": actual_pid, "message": "Position not found (already closed)"}
+            except MCPRateLimitError as e:
+                logger.warning(f"⚠️ [MCP] Rate limited closing position #{actual_pid} on {ep}: {e}")
+                if e.retry_after_ms:
+                    time.sleep(min(3.0, e.retry_after_ms / 1000.0))
+            except Exception as e:
+                err_str = str(e).lower()
+                if "not_found" in err_str or "not found" in err_str:
+                    return {"already_closed": True, "position_id": actual_pid, "message": "Position not found"}
+
         return self.call_tool("close_position", {"position_id": int(actual_pid)}, endpoint="cfd")

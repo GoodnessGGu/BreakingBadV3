@@ -28,8 +28,10 @@ def main():
     balances = client.list_balances()
     print("Balances result:", json.dumps(balances, indent=2))
     
-    logger.info("\n=== TESTING LIST POSITIONS ===")
-    positions = client.list_positions()
+    training_balance = next((b for b in balances if b.get("type") == "training"), None)
+    balance_id = training_balance["balance_id"] if training_balance else balances[0]["balance_id"]
+    logger.info(f"\n=== TESTING LIST POSITIONS (Balance ID: {balance_id}) ===")
+    positions = client.list_positions(balance_id=balance_id)
     print("Positions result:", json.dumps(positions, indent=2))
 
 if __name__ == "__main__":

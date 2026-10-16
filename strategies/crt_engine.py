@@ -467,11 +467,10 @@ class CRTStrategyEngine:
         mid = cur_prices["mid"]
 
         # Check broker positions
-        open_positions = []
-        try:
-            open_positions = self.mcp.list_positions(balance_id=self.balance_id) or []
-        except Exception:
-            pass
+        open_positions = self.mcp.list_positions(balance_id=self.balance_id)
+        if open_positions is None:
+            logger.warning(f"⚠️ [CRTEngine] list_positions failed for {symbol} - keeping trade active (will retry next tick)")
+            return
 
         open_ids = [str(p.get("position_id") or p.get("id")) for p in open_positions]
 
@@ -565,30 +564,50 @@ class CRTStrategyEngine:
         trade = self.active_trades.get(symbol) or {}
         side = trade.get("side", "BUY")
 
-        pnl = 0.0
+        pnl = None
         exit_px = entry_px
         reason = reason_override or default_reason
 
         # Fetch trade history from broker for exact PnL and exit price
         for attempt in range(3):
             try:
-                hist = self.mcp.get_trade_history(balance_id=self.balance_id, limit=25) or []
-                matched = next(
-                    (h for h in hist if 
-                     str(h.get("position_id")) == pid_str or 
-                     str(h.get("order_id")) == pid_str or 
-                     str(h.get("id")) == pid_str),
-                    None
-                )
-                if matched:
-                    pnl = float(matched.get("pnl", 0.0))
-                    exit_px = float(matched.get("close_price", matched.get("exit_price", entry_px)))
-                    reason = reason_override or matched.get("close_reason", reason)
-                    break
+                hist = self.mcp.get_trade_history(balance_id=self.balance_id, limit=25)
+                if hist is not None:
+                    matched = next(
+                        (h for h in hist if 
+                         str(h.get("position_id")) == pid_str or 
+                         str(h.get("order_id")) == pid_str or 
+                         str(h.get("id")) == pid_str),
+                        None
+                    )
+                    if matched:
+                        pnl = float(matched.get("pnl", 0.0))
+                        exit_px = float(matched.get("close_price", matched.get("exit_price", entry_px)))
+                        reason = reason_override or matched.get("close_reason", reason)
+                        break
             except Exception as e:
                 logger.debug(f"[CRTEngine] History lookup attempt {attempt+1} error: {e}")
             if attempt < 2:
                 await asyncio.sleep(0.8)
+
+        if pnl is None:
+            logger.warning(f"⚠️ [CRTEngine] Could not confirm PnL from history for {symbol} #{pid_str} - pending settlement")
+            return
+
+        # Settle into PropFirmGuardian exactly once per closed position
+        if hasattr(self, "prop_guardian") and self.prop_guardian:
+            try:
+                await self.prop_guardian.on_trade_closed(
+                    symbol=symbol,
+                    pnl_usd=pnl,
+                    side=side,
+                    lots=lots,
+                    reason=reason,
+                    trade_id=pid_str
+                )
+                logger.info(f"🛡️ [CRTEngine] Settled {symbol} #{pid_str} into PropFirmGuardian (PnL: ${pnl:.2f})")
+            except Exception as pge:
+                logger.error(f"[CRTEngine] Error settling into PropFirmGuardian: {pge}")
 
         # Sync to Google Sheets
         if gsheet_logger:

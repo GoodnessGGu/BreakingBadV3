@@ -759,6 +759,9 @@ class ICTStrategyEngine:
 
         # 1. Resolve missing position_ids from open broker positions
         open_positions = self.mcp.list_positions(balance_id=self.balance_id)
+        if open_positions is None:
+            logger.warning(f"⚠️ [ICTEngine] list_positions failed for {symbol} - keeping trade active (will retry next tick)")
+            return
         assigned_pids = {t["position_id"] for t in tickets if t.get("position_id")}
 
         for t in tickets:
@@ -1022,29 +1025,49 @@ class ICTStrategyEngine:
         profile = INSTRUMENT_PROFILES[symbol]
         digits = profile["digits"]
         try:
-            pnl = 0.0
+            pnl = None
             exit_px = 0.0
             reason = reason_override or ("TP1 Partial Hit" if ticket.get("is_tp1") else "closed")
 
             for attempt in range(3):
                 try:
-                    history = self.mcp.get_trade_history(balance_id=self.balance_id, limit=15) or []
-                    matched = next(
-                        (h for h in history if 
-                         str(h.get("position_id")) == str(pos_id) or 
-                         str(h.get("order_id")) == str(pos_id) or 
-                         str(h.get("id")) == str(pos_id)),
-                        None
-                    )
-                    if matched:
-                        pnl = float(matched.get("pnl", 0.0))
-                        exit_px = float(matched.get("close_price", matched.get("exit_price", 0.0)))
-                        reason = reason_override or matched.get("close_reason", reason)
-                        break
+                    history = self.mcp.get_trade_history(balance_id=self.balance_id, limit=20)
+                    if history is not None:
+                        matched = next(
+                            (h for h in history if 
+                             str(h.get("position_id")) == str(pos_id) or 
+                             str(h.get("order_id")) == str(pos_id) or 
+                             str(h.get("id")) == str(pos_id)),
+                            None
+                        )
+                        if matched:
+                            pnl = float(matched.get("pnl", 0.0))
+                            exit_px = float(matched.get("close_price", matched.get("exit_price", 0.0)))
+                            reason = reason_override or matched.get("close_reason", reason)
+                            break
                 except Exception as he:
                     logger.debug(f"[ICTEngine] History lookup attempt {attempt+1} error: {he}")
                 if attempt < 2:
                     await asyncio.sleep(0.8)
+
+            if pnl is None:
+                logger.warning(f"⚠️ [ICTEngine] Could not confirm PnL from history for {symbol} #{pos_id} - pending settlement")
+                return
+
+            # Settle into PropFirmGuardian exactly once per closed ticket
+            if hasattr(self, "prop_guardian") and self.prop_guardian:
+                try:
+                    await self.prop_guardian.on_trade_closed(
+                        symbol=symbol,
+                        pnl_usd=pnl,
+                        side=ticket["side"],
+                        lots=ticket.get("lots", self.lots),
+                        reason=reason,
+                        trade_id=str(pos_id)
+                    )
+                    logger.info(f"🛡️ [ICTEngine] Settled {symbol} #{pos_id} into PropFirmGuardian (PnL: ${pnl:.2f})")
+                except Exception as pge:
+                    logger.error(f"[ICTEngine] Error settling into PropFirmGuardian: {pge}")
 
             entry_px = ticket["entry_price"]
             if exit_px == 0.0:
@@ -1059,10 +1082,12 @@ class ICTStrategyEngine:
             tag = ticket.get("tag", "Position")
             if pnl > 0:
                 header_line = f"🏆 [ICT WON - {tag.upper()}] {symbol} {pnl_str}"
-            elif pnl == 0:
+            elif pnl == 0.0 and ("breakeven" in reason.lower() or ticket.get("moved_to_be")):
                 header_line = f"🛡️ [ICT BREAKEVEN - {tag.upper()}] {symbol} $0.00"
-            else:
+            elif pnl < 0:
                 header_line = f"❌ [ICT CLOSED - {tag.upper()}] {symbol} {pnl_str}"
+            else:
+                header_line = f"🛡️ [ICT CLOSED - {tag.upper()}] {symbol} {pnl_str}"
 
             caption = (
                 f"{header_line}\n\n"

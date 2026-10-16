@@ -55,10 +55,25 @@ class SensitiveTokenFilter(logging.Filter):
                 record.args = tuple(re.sub(r'bot\d+:[A-Za-z0-9_-]+', 'bot[REDACTED_TOKEN]', str(a)) if isinstance(a, str) else a for a in record.args)
         return True
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
+# Dual-handler logging: INFO/WARNING -> stdout, ERROR -> stderr (prevents Railway marking all logs as error)
+_log_formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+
+class _StdoutFilter(logging.Filter):
+    """Filter records to only allow levels strictly below ERROR."""
+    def filter(self, record):
+        return record.levelno < logging.ERROR
+
+_stdout_handler = logging.StreamHandler(sys.stdout)
+_stdout_handler.setLevel(logging.INFO)
+_stdout_handler.addFilter(_StdoutFilter())
+_stdout_handler.setFormatter(_log_formatter)
+
+_stderr_handler = logging.StreamHandler(sys.stderr)
+_stderr_handler.setLevel(logging.ERROR)
+_stderr_handler.setFormatter(_log_formatter)
+
+logging.root.setLevel(logging.INFO)
+logging.root.handlers = [_stdout_handler, _stderr_handler]
 
 # Silence third-party HTTP libraries that log outgoing URLs containing bot tokens
 logging.getLogger("httpx").setLevel(logging.WARNING)

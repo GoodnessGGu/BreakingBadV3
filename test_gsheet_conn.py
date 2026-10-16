@@ -11,7 +11,9 @@ def main():
     logger = GSheetLogger()
     if logger._connected:
         print(f"[SUCCESS] Connected to Google Sheet ID: {logger.sheet_id}")
-        print(f"Worksheet Name: {logger.sheet.title}")
+        print(f"Spreadsheet Title: {logger.spreadsheet.title}")
+        worksheets = [ws.title for ws in logger.spreadsheet.worksheets()]
+        print(f"Worksheets: {worksheets}")
     else:
         print("[FAILED] Could not connect to Google Sheets.")
         print("\nTroubleshooting steps:")

@@ -12,7 +12,7 @@ import os
 import sys
 import logging
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List, Set, Tuple, Union, Callable
 
 from telegram import Update
@@ -26,6 +26,7 @@ from copiers.channel_manager import ChannelManager
 from strategies.ict_engine import ICTStrategyEngine, INSTRUMENT_PROFILES
 from clients.forex_mcp_client import IQForexMCPClient
 from clients.blitz_mcp_client import IQBlitzMCPClient
+from bot.trade_ledger import TradeLedger
 from bot.keyboards import (
     main_menu_keyboard, channels_menu_keyboard,
     ict_menu_keyboard, settings_menu_keyboard, close_all_confirm_keyboard,
@@ -135,6 +136,7 @@ class TelegramTradingBot:
             phase=1,
             broadcast_func=self.broadcast_alert
         )
+        self.prop_guardian.set_mcp_client(self.forex_mcp)
         if hasattr(self.ict_engine, "prop_guardian"):
             self.ict_engine.prop_guardian = self.prop_guardian
         if hasattr(self.crt_engine, "prop_guardian"):
@@ -148,6 +150,19 @@ class TelegramTradingBot:
         if hasattr(self.channel_mgr, "copiers"):
             for copier in self.channel_mgr.copiers.values():
                 setattr(copier, "prop_guardian", self.prop_guardian)
+
+        # Persistent Trade Ledger (Addendum A)
+        self.trade_ledger = TradeLedger()
+        for eng in (self.ict_engine, self.crt_engine, self.snd_engine, self.trendline_engine, self.straddle_engine):
+            if eng:
+                if hasattr(eng, "set_trade_ledger"):
+                    eng.set_trade_ledger(self.trade_ledger)
+                else:
+                    setattr(eng, "trade_ledger", self.trade_ledger)
+
+        if hasattr(self.channel_mgr, "copiers"):
+            for copier in self.channel_mgr.copiers.values():
+                setattr(copier, "trade_ledger", self.trade_ledger)
 
     def is_admin(self, user_id: int) -> bool:
         return int(user_id) == self.admin_id
@@ -571,29 +586,31 @@ class TelegramTradingBot:
 
     def resolve_asset_name(self, asset_id: Any) -> str:
         """Helper to resolve ticker symbol from asset ID."""
+        ASSET_MAP = {
+            1: "EURUSD", 2: "GBPUSD", 4: "EURJPY", 5: "GBPJPY",
+            6: "USDJPY", 8: "AUDUSD", 10: "EURGBP",
+            54: "Silver (XAGUSD)", 74: "Gold (XAUUSD)",
+            99: "AUDUSD", 100: "USDCAD", 105: "NZDUSD", 108: "USDCHF",
+            212: "EURCAD", 816: "Bitcoin (BTCUSD)", 824: "Ethereum (ETHUSD)",
+            836: "Ripple (XRPUSD)", 886: "Solana (SOLUSD)",
+            946: "EURAUD", 951: "EURNZD", 955: "EURCHF",
+            969: "Crude Oil (Brent)", 971: "Crude Oil (WTI)",
+            1011: "GBPAUD", 1470: "US500", 1471: "US100",
+            1487: "Silver (XAGUSD)", 1979: "Bitcoin Cash (BCH)",
+        }
         try:
             aid = int(asset_id)
-            if aid == 74:
-                return "Gold (XAUUSD)"
-            elif aid in [1487, 54]:
-                return "Silver (XAGUSD)"
-            elif aid == 816:
-                return "Bitcoin (BTCUSD)"
-            elif aid == 1:
-                return "EURUSD"
-            elif aid == 2:
-                return "GBPUSD"
-            elif aid == 1471:
-                return "US100"
-            elif aid == 1470:
-                return "US500"
-            elif aid == 971:
-                return "Crude Oil (WTI)"
-            elif aid == 969:
-                return "Crude Oil (Brent)"
+            if aid in ASSET_MAP:
+                return ASSET_MAP[aid]
             for sym, prof in INSTRUMENT_PROFILES.items():
                 if prof.get("asset_id") == aid:
                     return f"{sym}"
+            for sym, prof in SND_INSTRUMENT_PROFILES.items():
+                if prof.get("asset_id") == aid:
+                    return f"{sym}"
+            for sym, prof in TRENDLINE_PROFILES.items():
+                if prof.get("asset_id") == aid:
+                    return prof.get("name", sym)
             return f"Asset #{aid}"
         except Exception:
             return str(asset_id)
@@ -888,238 +905,277 @@ class TelegramTradingBot:
             return self.ict_engine.balance_id
         return None
 
-    def build_history_view(self, category: str = "all") -> str:
+class HistoryViewResult(str):
+    def __new__(cls, content: str, total_pages: int = 1):
+        obj = str.__new__(cls, content)
+        obj.total_pages = total_pages
+        return obj
+
+    def __iter__(self):
+        return iter((str(self), self.total_pages))
+
+
+    def build_history_view(
+        self,
+        category: str = "all",
+        period: str = "all",
+        page: int = 1,
+        page_size: int = 8
+    ) -> HistoryViewResult:
         """
-        Fetches and compiles prettified trade history categorized by:
-          - Autonomous Trendline Engine (15M 3rd Touch Bounce)
-          - Autonomous CRT Engine (H1 Anchor Judas Sweeps)
-          - Autonomous ICT Engine (FVG / Liquidity Sweeps)
-          - Autonomous S&D Imbalance Engine (Config E Forex)
-          - Marginal CFD Copiers (Callisto / Gold Pips / GSociety / Kingmahn)
-          - Blitz Options (Polycarp VIP)
+        Fetches and compiles prettified trade history using Persistent Trade Ledger:
+          - Reconciles with broker history across endpoints
+          - Shows attribution strictly from ledger 'strategy' column
+          - Aggregates multi-leg trades (Trendline 2 legs, Gold 2 tickets) as ONE trade
+          - Distinguishes confirmed breakeven vs pending settlement
+          - Keeps Blitz options separate from CFD global totals
         """
-        # 1. Fetch Blitz Options History
-        blitz_trades = []
-        try:
-            raw_blitz = self.blitz_mcp.get_trade_history(limit=50) or []
-            for t in raw_blitz:
-                pos_id = t.get("position_id") or t.get("id", "N/A")
-                asset = t.get("asset_name") or t.get("active") or f"Asset {t.get('asset_id', '')}"
-                asset = str(asset).replace("_", " ")
-                res_str = str(t.get("result", "")).lower()
-                profit = float(t.get("profit", 0.0))
-                stake = float(t.get("amount") or t.get("invest") or 0.0)
-                direction = str(t.get("direction") or t.get("type", "CALL")).upper()
-                is_win = (res_str == "win" or profit > 0)
-                is_equal = (res_str == "equal" or (profit == 0 and res_str not in ["loss", "loose"]))
+        cat_lower = (category or "all").lower()
+        per_lower = (period or "all").lower()
+        cur_page = max(1, page)
 
-                ts_raw = t.get("close_time") or t.get("open_time") or t.get("created_at")
-                if isinstance(ts_raw, (int, float)):
-                    ts_str = datetime.fromtimestamp(ts_raw).strftime("%H:%M")
-                elif ts_raw:
-                    ts_str = str(ts_raw)[11:16]
-                else:
-                    ts_str = "--:--"
-
-                blitz_trades.append({
-                    "id": pos_id,
-                    "asset": asset,
-                    "direction": direction,
-                    "stake": stake,
-                    "pnl": profit,
-                    "is_win": is_win,
-                    "is_equal": is_equal,
-                    "time": ts_str
-                })
-        except Exception as e:
-            logger.warning(f"[History] Error fetching Blitz history: {e}")
-
-        # 2. Fetch Marginal CFD History
-        cfd_copier_trades = []
-        ict_trades = []
-        crt_trades = []
-        trendline_trades = []
-        snd_trades = []
-
-        # Get placed position ID sets for 100% accurate engine attribution
-        tl_placed = getattr(self.trendline_engine, 'placed_position_ids', set()) if self.trendline_engine else set()
-        crt_placed = getattr(self.crt_engine, 'placed_position_ids', set()) if self.crt_engine else set()
-        snd_placed = getattr(self.snd_engine, 'placed_position_ids', set()) if self.snd_engine else set()
-        ict_placed = getattr(self.ict_engine, 'placed_position_ids', set()) if self.ict_engine else set()
-
+        # 1. Reconcile with Broker MCP (Failure-aware)
+        sync_note = ""
         try:
             bid = self.get_active_balance_id()
-            raw_cfd = self.forex_mcp.get_trade_history(balance_id=bid, limit=50) or []
-            for t in raw_cfd:
-                pos_id = t.get("position_id") or t.get("id", "N/A")
-                pid_str = str(pos_id)
-                asset_id = t.get("asset_id")
-                asset_name = self.resolve_asset_name(asset_id)
-
-                side = str(t.get("side") or t.get("type", "BUY")).upper()
-                if side == "LONG": side = "BUY"
-                if side == "SHORT": side = "SELL"
-
-                lots = float(t.get("lots") or t.get("count") or 1.0)
-                open_px = float(t.get("open_price", 0.0))
-                close_px = float(t.get("close_price", 0.0))
-                pnl = float(t.get("pnl") or t.get("profit") or 0.0)
-                raw_reason = str(t.get("close_reason", "closed")).lower()
-
-                if "tp" in raw_reason or "take_profit" in raw_reason:
-                    reason = "TP Hit"
-                elif "sl" in raw_reason or "stop_loss" in raw_reason:
-                    reason = "SL Hit"
-                elif "be" in raw_reason or "breakeven" in raw_reason or pnl == 0:
-                    reason = "Breakeven"
-                else:
-                    reason = raw_reason.replace("_", " ").title()
-
-                ts_raw = t.get("close_time") or t.get("open_time")
-                if isinstance(ts_raw, (int, float)):
-                    ts_str = datetime.fromtimestamp(ts_raw).strftime("%H:%M")
-                elif ts_raw:
-                    ts_str = str(ts_raw)[11:16]
-                else:
-                    ts_str = "--:--"
-
-                comment = str(t.get("comment", "")).lower()
-
-                item = {
-                    "id": pos_id,
-                    "asset": asset_name,
-                    "side": side,
-                    "lots": lots,
-                    "open_price": open_px,
-                    "close_price": close_px,
-                    "pnl": pnl,
-                    "reason": reason,
-                    "is_win": pnl > 0,
-                    "is_be": pnl == 0,
-                    "time": ts_str
-                }
-
-                # Multi-stage engine attribution
-                if pid_str in tl_placed or "trendline" in comment or asset_id == 1471:
-                    trendline_trades.append(item)
-                elif pid_str in crt_placed or "crt" in comment:
-                    crt_trades.append(item)
-                elif pid_str in snd_placed or "snd" in comment or "s&d" in comment or asset_id in [214, 216, 217, 218]:
-                    snd_trades.append(item)
-                elif pid_str in ict_placed or "ict" in comment or "ict" in asset_name.lower():
-                    ict_trades.append(item)
-                else:
-                    cfd_copier_trades.append(item)
+            if bid and hasattr(self, "trade_ledger") and self.trade_ledger:
+                recon = self.trade_ledger.reconcile_with_broker(self.forex_mcp, balance_id=bid)
+                if recon.get("partial_sync"):
+                    sync_note = "⚠️ _Broker sync incomplete (rate limited / offline). Showing persistent ledger records._\n\n"
         except Exception as e:
-            logger.warning(f"[History] Error fetching CFD history: {e}")
+            logger.warning(f"[History] Broker reconcile error: {e}")
+            sync_note = "⚠️ _Broker sync unavailable. Showing persistent ledger records._\n\n"
 
-        # Metrics calculation helper
-        def calc_stats(trades: List[Dict[str, Any]], is_blitz: bool = False):
-            cnt = len(trades)
-            if cnt == 0:
-                return {"cnt": 0, "wins": 0, "losses": 0, "be": 0, "pnl": 0.0, "wr": 0.0, "pf": 1.0}
-            wins = sum(1 for t in trades if t["is_win"])
-            be = sum(1 for t in trades if t.get("is_equal" if is_blitz else "is_be", False))
-            losses = cnt - wins - be
-            pnl = sum(t["pnl"] for t in trades)
+        # 2. Blitz-only view
+        if cat_lower == "blitz":
+            blitz_trades = []
+            try:
+                raw_blitz = self.blitz_mcp.get_trade_history(limit=50) or []
+                for t in raw_blitz:
+                    pos_id = t.get("position_id") or t.get("id", "N/A")
+                    asset = t.get("asset_name") or t.get("active") or f"Asset {t.get('asset_id', '')}"
+                    asset = str(asset).replace("_", " ")
+                    res_str = str(t.get("result", "")).lower()
+                    profit = float(t.get("profit", 0.0))
+                    stake = float(t.get("amount") or t.get("invest") or 0.0)
+                    direction = str(t.get("direction") or t.get("type", "CALL")).upper()
+                    is_win = (res_str == "win" or profit > 0)
+                    is_equal = (res_str == "equal" or (profit == 0 and res_str not in ["loss", "loose"]))
+
+                    ts_raw = t.get("close_time") or t.get("open_time") or t.get("created_at")
+                    if isinstance(ts_raw, (int, float)):
+                        ts_str = datetime.fromtimestamp(ts_raw, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+                    elif ts_raw:
+                        ts_str = str(ts_raw)
+                    else:
+                        ts_str = "--"
+
+                    blitz_trades.append({
+                        "id": pos_id, "asset": asset, "direction": direction,
+                        "stake": stake, "pnl": profit, "is_win": is_win,
+                        "is_equal": is_equal, "time": ts_str
+                    })
+            except Exception as e:
+                logger.warning(f"[History] Error fetching Blitz history: {e}")
+
+            tot_blitz = len(blitz_trades)
+            tot_pages = max(1, (tot_blitz + page_size - 1) // page_size)
+            cur_page = min(cur_page, tot_pages)
+            offset = (cur_page - 1) * page_size
+            page_trades = blitz_trades[offset : offset + page_size]
+
+            wins = sum(1 for t in blitz_trades if t["is_win"])
+            ties = sum(1 for t in blitz_trades if t["is_equal"])
+            losses = tot_blitz - wins - ties
+            net_pnl = sum(t["pnl"] for t in blitz_trades)
             wr = (wins / max(1, wins + losses)) * 100.0 if (wins + losses) > 0 else 0.0
-            gross_p = sum(t["pnl"] for t in trades if t["pnl"] > 0)
-            gross_l = abs(sum(t["pnl"] for t in trades if t["pnl"] < 0))
-            pf = (gross_p / gross_l) if gross_l > 0 else (99.0 if gross_p > 0 else 1.0)
-            return {"cnt": cnt, "wins": wins, "losses": losses, "be": be, "pnl": pnl, "wr": wr, "pf": pf}
+            pnl_sign = "+" if net_pnl >= 0 else ""
+            pnl_icon = "🟢" if net_pnl >= 0 else "🔴"
 
-        # Global aggregate metrics
-        all_cfd_trades = cfd_copier_trades + ict_trades + crt_trades + trendline_trades + snd_trades
-        total_trades_list = all_cfd_trades + blitz_trades
-        all_stats = calc_stats(total_trades_list)
+            text = (
+                f"⚡ *Polycarp VIP Blitz Options Ledger*\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"👤 *Account Mode*: `{self.account_type.upper()}` | 📄 *Page*: `{cur_page}/{tot_pages}`\n"
+                f"{pnl_icon} *Realized PnL*: `{pnl_sign}${net_pnl:.2f}`\n"
+                f"🎯 *Win Rate*: `{wr:.1f}%` ({wins}W - {losses}L - {ties}T) | *Count*: `{tot_blitz}`\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            )
+            if page_trades:
+                for t in page_trades:
+                    icon = "🏆" if t["is_win"] else ("🛡️" if t["is_equal"] else "❌")
+                    t_sign = "+" if t["pnl"] >= 0 else ""
+                    text += f"{icon} `[{t['time']}]` *{t['asset']}* {t['direction']} ➔ `{t_sign}${t['pnl']:.2f}`\n"
+            else:
+                text += "• _No Blitz option trades recorded in session._\n"
+            return HistoryViewResult(text, tot_pages)
 
-        pnl_val = all_stats["pnl"]
-        pnl_sign = "+" if pnl_val >= 0 else ""
-        pnl_icon = "🟢" if pnl_val >= 0 else "🔴"
+        # 3. CFD / Autonomous / Ledger History
+        strat_arg = None
+        if cat_lower == "snd":
+            strat_arg = "S&D"
+        elif cat_lower in ("trendline", "trendlines", "tl"):
+            strat_arg = "Trendline"
+        elif cat_lower == "crt":
+            strat_arg = "CRT"
+        elif cat_lower == "ict":
+            strat_arg = "ICT"
+        elif cat_lower in ("cfd", "copiers", "copier"):
+            strat_arg = "cfd"
+        elif cat_lower in ("manual", "unattributed"):
+            strat_arg = "Manual/Unattributed"
 
-        header = (
-            f"📜 *Trading Execution & Ledger History*\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"👤 *Account Mode*: `{self.account_type.upper()}`\n"
-            f"{pnl_icon} *Total Realized PnL*: `{pnl_sign}${pnl_val:.2f}`\n"
-            f"🎯 *Win Rate*: `{all_stats['wr']:.1f}%` ({all_stats['wins']}W - {all_stats['losses']}L - {all_stats['be']}BE)\n"
-            f"📈 *Profit Factor*: `{all_stats['pf']:.2f}` | *Total Closed*: `{all_stats['cnt']}`\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        stats = self.trade_ledger.get_stats(strategy=strat_arg, period=per_lower)
+        total_count = self.trade_ledger.count_grouped_closed_trades(strategy=strat_arg, period=per_lower)
+        tot_pages = max(1, (total_count + page_size - 1) // page_size)
+        cur_page = min(cur_page, tot_pages)
+        offset = (cur_page - 1) * page_size
+        grouped_trades = self.trade_ledger.get_grouped_closed_trades(
+            strategy=strat_arg, period=per_lower, limit=page_size, offset=offset
         )
 
-        def format_section(title: str, icon_title: str, trades: List[Dict[str, Any]], max_items: int = 5, is_blitz: bool = False) -> str:
-            st = calc_stats(trades, is_blitz=is_blitz)
-            if st["cnt"] == 0 and category == "all" and is_blitz:
-                return ""  # Silence Blitz if 0 trades and category is all
-            sign = "+" if st["pnl"] >= 0 else ""
-            sec_pnl_icon = "🟢" if st["pnl"] >= 0 else "🔴"
-            s = f"{icon_title} *{title}*\n"
-            s += f"  {sec_pnl_icon} PnL: `{sign}${st['pnl']:.2f}` | WR: `{st['wr']:.0f}%` ({st['wins']}W - {st['losses']}L) | Trades: `{st['cnt']}`\n"
-            if trades:
-                for t in trades[:max_items]:
-                    if is_blitz:
-                        icon = "🏆" if t["is_win"] else ("🛡️" if t["is_equal"] else "❌")
-                        t_sign = "+" if t["pnl"] >= 0 else ""
-                        s += f"  {icon} `{t['time']}` *{t['asset']}* {t['direction']} ➔ `{t_sign}${t['pnl']:.2f}`\n"
-                    else:
-                        icon = "🏆" if t["is_win"] else ("🛡️" if t["is_be"] else "❌")
-                        t_sign = "+" if t["pnl"] >= 0 else ""
-                        lots_str = f"{t['lots']}L" if t['lots'] else ""
-                        s += f"  {icon} `{t['time']}` *{t['asset']}* {t['side']} {lots_str} ➔ `{t_sign}${t['pnl']:.2f}` ({t['reason']})\n"
-            else:
-                s += "  • No closed trades in current ledger session.\n"
-            s += "\n"
-            return s
+        pnl_val = stats["net_pnl"]
+        pnl_sign = "+" if pnl_val >= 0 else ""
+        pnl_icon = "🟢" if pnl_val >= 0 else "🔴"
+        filter_label = category.upper() if category != "all" else "ALL STRATEGIES"
+        period_label = per_lower.upper() if per_lower != "all" else "ALL TIME"
+
+        header = (
+            f"📜 *Trading Execution & Persistent Ledger*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"👤 *Account*: `{self.account_type.upper()}` | 🏷️ *Strategy*: `{filter_label}`\n"
+            f"⏱️ *Period*: `{period_label}` | 📄 *Page*: `{cur_page}/{tot_pages}`\n"
+            f"{pnl_icon} *Net Realized PnL*: `{pnl_sign}${pnl_val:.2f}`\n"
+            f"🎯 *Win Rate*: `{stats['win_rate']:.1f}%` ({stats['wins']}W - {stats['losses']}L - {stats['breakevens']}BE)\n"
+            f"📈 *Profit Factor*: `{stats['profit_factor']:.2f}` | *Max DD*: `-${stats['max_drawdown']:.2f}`\n"
+            f"📊 *Closed Trades*: `{stats['total_trades']}` (Gross: +${stats['gross_profit']:.2f} / -${stats['gross_loss']:.2f})\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"{sync_note}"
+        )
 
         body = ""
+        if grouped_trades:
+            for t in grouped_trades:
+                legs = t.get("legs", [])
+                has_unconfirmed = t.get("has_unconfirmed_pnl", False)
+                pnl = t.get("pnl", 0.0)
+                symbol = t.get("symbol", "UNKNOWN")
+                side = t.get("side", "BUY")
+                lots = t.get("total_lots", 1.0)
+                strategy = t.get("strategy", "Unknown")
+                exit_reason = t.get("exit_reason", "closed")
+                close_time = t.get("close_time_utc", "--")
 
-        # Section: Trendline Engine
-        if category in ["all", "trendline"]:
-            body += format_section("Autonomous Trendline Engine (15M Bounce)", "📐", trendline_trades, max_items=12 if category == "trendline" else 4)
+                if has_unconfirmed:
+                    icon = "⏳"
+                    pnl_str = "Pending Settlement"
+                elif pnl == 0.0:
+                    icon = "🛡️"
+                    pnl_str = "$0.00 [BREAKEVEN]"
+                elif pnl > 0.0:
+                    icon = "🏆"
+                    pnl_str = f"+${pnl:.2f}"
+                else:
+                    icon = "❌"
+                    pnl_str = f"-${abs(pnl):.2f}"
 
-        # Section: CRT Engine
-        if category in ["all", "crt"]:
-            body += format_section("Autonomous CRT Engine (H1 Judas Sweeps)", "🕯️", crt_trades, max_items=12 if category == "crt" else 4)
+                if len(legs) > 1:
+                    body += f"{icon} `[{close_time}]` *{symbol}* {side} `{lots:.2f}L` ➔ `{pnl_str}` ({exit_reason}) [*{strategy}* - {len(legs)} legs]\n"
+                    for leg in legs:
+                        lpnl = leg.get("pnl")
+                        lpnl_str = f"+${lpnl:.2f}" if lpnl is not None and lpnl >= 0 else (f"-${abs(lpnl):.2f}" if lpnl is not None else "Pending")
+                        body += f"    └─ Leg #{leg.get('position_id')}: `{leg.get('lots')}L` @ `{leg.get('entry_price')}` ➔ `{leg.get('exit_price')}` (`{lpnl_str}`)\n"
+                else:
+                    body += f"{icon} `[{close_time}]` *{symbol}* {side} `{lots:.2f}L` ➔ `{pnl_str}` ({exit_reason}) [*{strategy}*]\n"
+        else:
+            body += "• _No closed trades recorded matching this filter._\n"
 
-        # Section: ICT Engine
-        if category in ["all", "ict"]:
-            body += format_section("Autonomous ICT Engine (Gold/Silver Sweeps)", "🤖", ict_trades, max_items=12 if category == "ict" else 4)
+        # Show concise Blitz summary when category is "all"
+        if cat_lower == "all":
+            try:
+                raw_blitz = self.blitz_mcp.get_trade_history(limit=20) or []
+                if raw_blitz:
+                    b_wins = sum(1 for b in raw_blitz if (str(b.get("result", "")).lower() == "win" or float(b.get("profit", 0.0)) > 0))
+                    b_pnl = sum(float(b.get("profit", 0.0)) for b in raw_blitz)
+                    b_sign = "+" if b_pnl >= 0 else ""
+                    body += f"\n⚡ *Blitz Options Total*: `{b_sign}${b_pnl:.2f}` ({b_wins}W - {len(raw_blitz)-b_wins}L, {len(raw_blitz)} options)\n"
+            except Exception:
+                pass
 
-        # Section: S&D Engine
-        if category in ["all", "snd"]:
-            body += format_section("Autonomous S&D Engine (Config E Forex)", "🏛️", snd_trades, max_items=12 if category == "snd" else 4)
+        total_text = header + "\n" + body
+        # Ensure under 4000 characters for Telegram limit
+        if len(total_text) > 4000:
+            total_text = total_text[:3950] + "\n\n_...(truncated for Telegram length)_"
 
-        # Section: CFD Copiers
-        if category in ["all", "cfd"]:
-            body += format_section("Forex & Gold CFD Copiers", "📈", cfd_copier_trades, max_items=12 if category == "cfd" else 4)
-
-        # Section: Blitz Options
-        if category in ["all", "blitz"]:
-            blitz_sec = format_section("Polycarp Blitz Options", "⚡", blitz_trades, max_items=12 if category == "blitz" else 4, is_blitz=True)
-            body += blitz_sec
-
-        return header + body
+        return HistoryViewResult(total_text, tot_pages)
 
     async def cmd_history(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.is_admin(update.effective_user.id):
             return
         cat = "all"
-        valid_cats = ["all", "cfd", "ict", "crt", "trendline", "snd", "blitz"]
-        if context.args and context.args[0].lower() in valid_cats:
-            cat = context.args[0].lower()
-        msg = self.build_history_view(cat)
+        per = "all"
+        pg = 1
+        valid_cats = ["all", "cfd", "ict", "crt", "trendline", "snd", "blitz", "manual"]
+        if context.args:
+            if context.args[0].lower() in valid_cats:
+                cat = context.args[0].lower()
+            if len(context.args) > 1 and context.args[1].lower() in ["all", "today", "7d", "30d"]:
+                per = context.args[1].lower()
+            if len(context.args) > 2 and context.args[2].isdigit():
+                pg = int(context.args[2])
+
+        res = self.build_history_view(cat, period=per, page=pg)
+        msg = str(res)
+        tot_pages = getattr(res, "total_pages", 1)
+        kb = history_menu_keyboard(category=cat, period=per, page=pg, total_pages=tot_pages)
         try:
             await update.message.reply_text(
                 msg,
                 parse_mode="Markdown",
-                reply_markup=history_menu_keyboard(cat)
+                reply_markup=kb
             )
         except Exception as e:
             logger.warning(f"Markdown error sending history: {e}. Retrying without markdown.")
             await update.message.reply_text(
                 msg,
-                reply_markup=history_menu_keyboard(cat)
+                reply_markup=kb
             )
+
+    async def cmd_export(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Export persistent trade ledger to CSV file."""
+        if not self.is_admin(update.effective_user.id):
+            return
+        cat = "all"
+        per = "all"
+        valid_cats = ["all", "cfd", "ict", "crt", "trendline", "snd", "blitz", "manual"]
+        if context.args:
+            if context.args[0].lower() in valid_cats:
+                cat = context.args[0].lower()
+            if len(context.args) > 1 and context.args[1].lower() in ["all", "today", "7d", "30d"]:
+                per = context.args[1].lower()
+
+        export_dir = os.path.join(os.getcwd(), "data", "exports")
+        os.makedirs(export_dir, exist_ok=True)
+        ts_filename = datetime.now().strftime("%Y%m%d_%H%M%S")
+        export_file = os.path.join(export_dir, f"trades_{cat}_{per}_{ts_filename}.csv")
+        self.trade_ledger.export_csv(export_file, strategy=cat, period=per)
+
+        caption = (
+            f"📁 *Trade Ledger CSV Export*\n"
+            f"• Strategy Filter: `{cat.upper()}`\n"
+            f"• Period Filter: `{per.upper()}`\n"
+            f"• Generated: `{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}`"
+        )
+        try:
+            with open(export_file, "rb") as f:
+                await update.message.reply_document(
+                    document=f,
+                    filename=os.path.basename(export_file),
+                    caption=caption,
+                    parse_mode="Markdown"
+                )
+        except Exception as e:
+            logger.error(f"[Export] Failed to send CSV: {e}")
+            await update.message.reply_text(f"❌ Failed to export CSV: {e}")
 
     async def cmd_account(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.is_admin(update.effective_user.id):
@@ -1516,20 +1572,32 @@ class TelegramTradingBot:
 
         # 6. Settlement to Prop Firm Simulator & fallback closure card for manual positions
         try:
+            # Check if this trade was already settled into PropFirmGuardian (e.g. by SND/Trendline/ICT engine)
+            already_settled = False
+            if hasattr(self, "prop_guardian") and self.prop_guardian:
+                if pid_str in self.prop_guardian.processed_trade_ids:
+                    already_settled = True
+                    logger.info(f"[Cleanup] Trade #{pid_str} was already settled in PropFirmGuardian - skipping duplicate settlement")
+
+            if handled and already_settled:
+                # Engine handled both closure notification and guardian settlement
+                return
+
             bid = self.get_active_balance_id()
             if bid:
                 matched = None
                 for attempt in range(3):
-                    hist = self.forex_mcp.get_trade_history(balance_id=bid, limit=15) or []
-                    matched = next(
-                        (h for h in hist if 
-                         str(h.get("position_id")) == pid_str or 
-                         str(h.get("order_id")) == pid_str or 
-                         str(h.get("id")) == pid_str),
-                        None
-                    )
-                    if matched:
-                        break
+                    hist = self.forex_mcp.get_trade_history(balance_id=bid, limit=20)
+                    if hist is not None:
+                        matched = next(
+                            (h for h in hist if 
+                             str(h.get("position_id")) == pid_str or 
+                             str(h.get("order_id")) == pid_str or 
+                             str(h.get("id")) == pid_str),
+                            None
+                        )
+                        if matched:
+                            break
                     if attempt < 2:
                         await asyncio.sleep(0.8)
 
@@ -1542,8 +1610,8 @@ class TelegramTradingBot:
                     sym = symbol or self.resolve_asset_name(matched.get("asset_id"))
                     r_name = close_reason or matched.get("close_reason", "client_close")
 
-                    # Settle into Prop Firm Evaluation Simulator
-                    if hasattr(self, "prop_guardian") and self.prop_guardian.is_enabled:
+                    # Settle into Prop Firm Evaluation Simulator (idempotent via trade_id)
+                    if not already_settled and hasattr(self, "prop_guardian") and self.prop_guardian.is_enabled:
                         await self.prop_guardian.on_trade_closed(
                             symbol=sym,
                             pnl_usd=pnl,
@@ -1553,14 +1621,33 @@ class TelegramTradingBot:
                             trade_id=pid_str
                         )
 
+                    # Persistent Trade Ledger recording (Addendum A)
+                    if hasattr(self, "trade_ledger") and self.trade_ledger:
+                        try:
+                            self.trade_ledger.record_close(
+                                position_id=pid_str,
+                                exit_price=exit_px,
+                                pnl=pnl,
+                                exit_reason=r_name,
+                                strategy_fallback="Manual/Unattributed",
+                                symbol_fallback=sym,
+                                side_fallback=side,
+                                lots_fallback=lots,
+                                entry_fallback=entry_px
+                            )
+                        except Exception as tle:
+                            logger.debug(f"[Cleanup] Error recording to ledger: {tle}")
+
                     if not handled:
                         pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
                         if pnl > 0:
                             header_line = f"🏆 [TRADE WON] {sym} {pnl_str}"
-                        elif pnl == 0:
+                        elif pnl == 0.0 and ("breakeven" in r_name.lower()):
                             header_line = f"🛡️ [TRADE BREAKEVEN] {sym} $0.00"
-                        else:
+                        elif pnl < 0:
                             header_line = f"❌ [TRADE CLOSED] {sym} {pnl_str}"
+                        else:
+                            header_line = f"🛡️ [TRADE CLOSED] {sym} {pnl_str}"
 
                         card = (
                             f"{header_line}\n\n"
@@ -1757,22 +1844,62 @@ class TelegramTradingBot:
                 parse_mode="Markdown"
             )
 
-        # History Menu & Filtering
-        elif data.startswith("history_cat_"):
-            cat = data.replace("history_cat_", "")
-            txt = self.build_history_view(cat)
+        # History Menu & Filtering (Addendum A)
+        elif data.startswith("hist_") or data.startswith("history_cat_"):
+            if data.startswith("history_cat_"):
+                cat = data.replace("history_cat_", "")
+                per = "all"
+                pg = 1
+            else:
+                parts = data.split("_")
+                cat = parts[1] if len(parts) > 1 else "all"
+                per = parts[2] if len(parts) > 2 else "all"
+                pg = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 1
+
+            res = self.build_history_view(cat, period=per, page=pg)
+            txt = str(res)
+            tot_pages = getattr(res, "total_pages", 1)
+            kb = history_menu_keyboard(category=cat, period=per, page=pg, total_pages=tot_pages)
             try:
                 await query.edit_message_text(
                     txt,
-                    reply_markup=history_menu_keyboard(cat),
+                    reply_markup=kb,
                     parse_mode="Markdown"
                 )
             except Exception as e:
                 logger.warning(f"Markdown error in history button callback: {e}. Retrying without markdown.")
                 await query.edit_message_text(
                     txt,
-                    reply_markup=history_menu_keyboard(cat)
+                    reply_markup=kb
                 )
+
+        elif data.startswith("export_hist_"):
+            parts = data.split("_")
+            cat = parts[2] if len(parts) > 2 else "all"
+            per = parts[3] if len(parts) > 3 else "all"
+            export_dir = os.path.join(os.getcwd(), "data", "exports")
+            os.makedirs(export_dir, exist_ok=True)
+            ts_filename = datetime.now().strftime("%Y%m%d_%H%M%S")
+            export_file = os.path.join(export_dir, f"trades_{cat}_{per}_{ts_filename}.csv")
+            self.trade_ledger.export_csv(export_file, strategy=cat, period=per)
+
+            caption = (
+                f"📁 *Trade Ledger CSV Export*\n"
+                f"• Strategy Filter: `{cat.upper()}`\n"
+                f"• Period Filter: `{per.upper()}`\n"
+                f"• Generated: `{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}`"
+            )
+            try:
+                with open(export_file, "rb") as f:
+                    await query.message.reply_document(
+                        document=f,
+                        filename=os.path.basename(export_file),
+                        caption=caption,
+                        parse_mode="Markdown"
+                    )
+            except Exception as e:
+                logger.error(f"[Export] Failed to send CSV via callback: {e}")
+                await query.answer(f"Failed to export CSV: {e}", show_alert=True)
 
         # Prop Firm Simulator Menu & Callbacks
         elif data == "btn_prop_menu":
@@ -2432,6 +2559,8 @@ class TelegramTradingBot:
         self.app.add_handler(CommandHandler("prop_reset", self.cmd_prop_reset))
         self.app.add_handler(CommandHandler("history", self.cmd_history))
         self.app.add_handler(CommandHandler("stats", self.cmd_history))
+        self.app.add_handler(CommandHandler("export", self.cmd_export))
+        self.app.add_handler(CommandHandler("export_csv", self.cmd_export))
         self.app.add_handler(CommandHandler("close", self.cmd_close))
         self.app.add_handler(CommandHandler("closetrade", self.cmd_close))
         self.app.add_handler(CommandHandler("exit", self.cmd_close))

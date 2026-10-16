@@ -53,6 +53,16 @@ except ImportError:
 
 logger = logging.getLogger("TelegramController")
 
+class HistoryViewResult(str):
+    def __new__(cls, content: str, total_pages: int = 1):
+        obj = str.__new__(cls, content)
+        obj.total_pages = total_pages
+        return obj
+
+    def __iter__(self):
+        return iter((str(self), self.total_pages))
+
+
 class TelegramTradingBot:
     def __init__(self, token: str, admin_id: int, channel_mgr: ChannelManager,
                  ict_engine: ICTStrategyEngine, forex_mcp: IQForexMCPClient, blitz_mcp: IQBlitzMCPClient,
@@ -904,16 +914,6 @@ class TelegramTradingBot:
         if self.ict_engine.balance_id:
             return self.ict_engine.balance_id
         return None
-
-class HistoryViewResult(str):
-    def __new__(cls, content: str, total_pages: int = 1):
-        obj = str.__new__(cls, content)
-        obj.total_pages = total_pages
-        return obj
-
-    def __iter__(self):
-        return iter((str(self), self.total_pages))
-
 
     def build_history_view(
         self,

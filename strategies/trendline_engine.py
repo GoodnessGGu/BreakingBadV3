@@ -322,10 +322,22 @@ class TrendlineStrategyEngine:
         min_l = profile.get("min_lots", 0.001)
         trade_lots = profile.get("default_lots") or self.lots
 
-        # Prop Firm Guardian Gatekeeper
+        # Weekend Protection Gate for Forex/CFD (Bitcoin trades 24/7 on crypto)
+        if symbol != "BTCUSD":
+            now_dt = datetime.now(timezone.utc)
+            if (now_dt.weekday() == 4 and now_dt.hour >= 18) or now_dt.weekday() == 5 or (now_dt.weekday() == 6 and now_dt.hour < 21):
+                logger.info(f"🛡️ [TrendlineEngine] {symbol} trade blocked: Weekend exposure protection active")
+                return
+
+        # Prop Firm Guardian Gatekeeper & Dynamic Risk Sizing
         if getattr(self, "prop_guardian", None) and self.prop_guardian.is_enabled:
             open_pos = self.mcp.list_positions(balance_id=self.balance_id) or []
-            allowed, reason, rec_lots = self.prop_guardian.can_execute_trade(symbol, len(open_pos))
+            allowed, reason, rec_lots = self.prop_guardian.can_execute_trade(
+                symbol=symbol,
+                current_open_count=len(open_pos),
+                entry_price=entry,
+                sl_price=sl
+            )
             if not allowed:
                 logger.warning(f"🛡️ [PropFirm Guard] Trendline trade rejected for {symbol}: {reason}")
                 await self.notify_text(f"🛡️ **[PROP FIRM GUARD] Trendline Trade Skipped ({symbol})**\n\nReason: {reason}")
@@ -711,6 +723,7 @@ class TrendlineStrategyEngine:
                 except Exception:
                     pass
 
+                result_str = "WIN" if (pnl or 0) > 0.0001 else ("LOSS" if (pnl or 0) < -0.0001 else "BREAKEVEN")
                 trade_payload = {
                     "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "asset": f"Trendline {sym_label} ({tag})",
@@ -721,6 +734,7 @@ class TrendlineStrategyEngine:
                     "take_profit": tp_px,
                     "exit_price": exit_px,
                     "pnl": pnl,
+                    "result": result_str,
                     "pips": round(abs(exit_px - entry_px) * (10 ** (digits - 1)), 1),
                     "risk_reward": f"{tag} (1:2.5 Plan)",
                     "exit_reason": reason,

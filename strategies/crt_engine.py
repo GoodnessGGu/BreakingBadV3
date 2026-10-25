@@ -188,15 +188,15 @@ class CRTStrategyEngine:
             await self.notify_text(caption)
 
     def is_killzone_active(self, symbol: str) -> Tuple[bool, str]:
-        """Returns True if within active trading killzones. Crypto is 24/7."""
-        if symbol == "BTCUSD":
-            return True, "CRYPTO_24_7"
+        """Returns True if within active trading killzones. Aligned with quantitative CRT study."""
         now = datetime.now(timezone.utc)
         mins = now.hour * 60 + now.minute
         if 420 <= mins <= 600:
             return True, "LONDON_OPEN"
         if 750 <= mins <= 960:
             return True, "NEW_YORK_OPEN"
+        if symbol == "BTCUSD" and (1080 <= mins <= 1260):
+            return True, "CRYPTO_US_SESSION"
         return False, "OFF_HOURS"
 
     def get_market_price(self, symbol: str) -> Dict[str, float]:
@@ -292,18 +292,27 @@ class CRTStrategyEngine:
         last_h = float(df_5m['High'].iloc[-1])
         last_l = float(df_5m['Low'].iloc[-1])
 
-        # ── 1. H1 ANCHOR RANGE MODE (True 1-Hour Candles) ─────────────
-        if mode == "H1_ANCHOR":
-            raw_h1 = self.mcp.get_candles(asset_id=asset_id, count=15, size=3600)
-            if not raw_h1 or len(raw_h1) < 5:
-                return
-
+        # Fetch 1-Hour Candles for Macro Trend Flow (H1 50-EMA Filter) & Anchor
+        raw_h1 = self.mcp.get_candles(asset_id=asset_id, count=60, size=3600)
+        h1_trend_up = True
+        h1_trend_down = True
+        df_h1 = None
+        if raw_h1 and len(raw_h1) >= 15:
             df_h1 = pd.DataFrame([{
                 "Open": float(c.get("open") or c.get("from", 0.0)),
                 "High": float(c.get("max") or c.get("high", 0.0)),
                 "Low": float(c.get("min") or c.get("low", 0.0)),
                 "Close": float(c.get("close") or c.get("to", 0.0))
             } for c in raw_h1])
+            span_val = min(50, len(df_h1))
+            df_h1['ema50'] = df_h1['Close'].ewm(span=span_val, adjust=False).mean()
+            h1_trend_up = bool(df_h1['Close'].iloc[-1] >= df_h1['ema50'].iloc[-1])
+            h1_trend_down = bool(df_h1['Close'].iloc[-1] <= df_h1['ema50'].iloc[-1])
+
+        # ── 1. H1 ANCHOR RANGE MODE (True 1-Hour Candles) ─────────────
+        if mode == "H1_ANCHOR":
+            if df_h1 is None or len(df_h1) < 5:
+                return
 
             # Anchor is the COMPLETED previous 1-Hour candle (-2 because -1 is forming)
             prev_h1 = df_h1.iloc[-2]
@@ -311,18 +320,11 @@ class CRTStrategyEngine:
             anchor_low = float(prev_h1['Low'])
             anchor_mid = (anchor_high + anchor_low) / 2.0
 
-            # Calculate H1 50-EMA for macro trend flow
-            df_h1['ema50'] = df_h1['Close'].ewm(span=max(3, len(df_h1)//2)).mean()
-            h1_trend_up = df_h1['Close'].iloc[-1] >= df_h1['ema50'].iloc[-1]
-            h1_trend_down = df_h1['Close'].iloc[-1] <= df_h1['ema50'].iloc[-1]
-
         # ── 2. ASIAN JUDAS MODE (EURUSD / GBPUSD) ─────────────────────
         else:
             anchor_high = float(df_5m['High'].iloc[-24:-6].max()) if len(df_5m) >= 24 else float(df_5m['High'].iloc[0:8].max())
             anchor_low = float(df_5m['Low'].iloc[-24:-6].min()) if len(df_5m) >= 24 else float(df_5m['Low'].iloc[0:8].min())
             anchor_mid = (anchor_high + anchor_low) / 2.0
-            h1_trend_up = True
-            h1_trend_down = True
 
         # --- A. Bullish CRT: Sweep Anchor Low -> Displacement Reclaim UP ---
         sweep_d = anchor_low - recent_low
@@ -362,6 +364,30 @@ class CRTStrategyEngine:
 
         min_l = profile.get("min_lots", 0.001)
         trade_lots = profile.get("default_lots") or self.lots
+
+        # Weekend Protection Gate for Forex/CFD (Bitcoin trades 24/7 on crypto)
+        if symbol != "BTCUSD":
+            now_dt = datetime.now(timezone.utc)
+            if (now_dt.weekday() == 4 and now_dt.hour >= 18) or now_dt.weekday() == 5 or (now_dt.weekday() == 6 and now_dt.hour < 21):
+                logger.info(f"🛡️ [CRTEngine] {symbol} trade blocked: Weekend exposure protection active")
+                return
+
+        # Prop Firm Guardian Gatekeeper & Dynamic Risk Sizing
+        if getattr(self, "prop_guardian", None) and self.prop_guardian.is_enabled:
+            open_pos = self.mcp.list_positions(balance_id=self.balance_id) or []
+            allowed, reason, rec_lots = self.prop_guardian.can_execute_trade(
+                symbol=symbol,
+                current_open_count=len(open_pos),
+                entry_price=entry,
+                sl_price=sl
+            )
+            if not allowed:
+                logger.warning(f"🛡️ [PropFirm Guard] CRT trade rejected for {symbol}: {reason}")
+                await self.notify_text(f"🛡️ **[PROP FIRM GUARD] CRT Trade Skipped ({symbol})**\n\nReason: {reason}")
+                return
+            if rec_lots > 0:
+                trade_lots = rec_lots
+
         if symbol == "XAUUSD":
             min_l = 1.0
             trade_lots = max(2.0, float(trade_lots))
@@ -412,6 +438,41 @@ class CRTStrategyEngine:
         if pos1_id: self.placed_position_ids.add(str(pos1_id))
         if pos2_id: self.placed_position_ids.add(str(pos2_id))
 
+        group_id = f"crt_{symbol}_{int(time.time())}"
+        if hasattr(self, "trade_ledger") and self.trade_ledger:
+            if pos1_id:
+                try:
+                    self.trade_ledger.record_open(
+                        position_id=str(pos1_id),
+                        strategy="CRT",
+                        symbol=symbol,
+                        side=side,
+                        lots=lot_tp1,
+                        entry_price=entry,
+                        sl=sl,
+                        tp=tp1,
+                        balance_type=self.account_type,
+                        group_id=group_id
+                    )
+                except Exception as tle:
+                    logger.debug(f"[CRTEngine] TradeLedger open error: {tle}")
+            if pos2_id:
+                try:
+                    self.trade_ledger.record_open(
+                        position_id=str(pos2_id),
+                        strategy="CRT",
+                        symbol=symbol,
+                        side=side,
+                        lots=lot_runner,
+                        entry_price=entry,
+                        sl=sl,
+                        tp=tp2,
+                        balance_type=self.account_type,
+                        group_id=group_id
+                    )
+                except Exception as tle:
+                    logger.debug(f"[CRTEngine] TradeLedger open error: {tle}")
+
         self.active_trades[symbol] = {
             "symbol": symbol,
             "side": side,
@@ -426,7 +487,8 @@ class CRTStrategyEngine:
             "lot_runner": lot_runner,
             "tp1_closed": False,
             "runner_at_be": False,
-            "opened_at": time.time()
+            "opened_at": time.time(),
+            "group_id": group_id
         }
 
         # Telegram Photo Notification
@@ -609,6 +671,18 @@ class CRTStrategyEngine:
             except Exception as pge:
                 logger.error(f"[CRTEngine] Error settling into PropFirmGuardian: {pge}")
 
+        # Record ticket closure in persistent TradeLedger
+        if hasattr(self, "trade_ledger") and self.trade_ledger:
+            try:
+                self.trade_ledger.record_close(
+                    position_id=pid_str,
+                    exit_price=exit_px,
+                    pnl_usd=pnl,
+                    exit_reason=reason
+                )
+            except Exception as tle:
+                logger.debug(f"[CRTEngine] TradeLedger close error: {tle}")
+
         # Sync to Google Sheets
         if gsheet_logger:
             try:
@@ -621,6 +695,7 @@ class CRTStrategyEngine:
                 except Exception:
                     pass
 
+                result_str = "WIN" if (pnl or 0) > 0.0001 else ("LOSS" if (pnl or 0) < -0.0001 else "BREAKEVEN")
                 trade_payload = {
                     "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "asset": f"CRT {symbol} ({tag})",
@@ -631,6 +706,7 @@ class CRTStrategyEngine:
                     "take_profit": tp_px,
                     "exit_price": exit_px,
                     "pnl": pnl,
+                    "result": result_str,
                     "pips": round(abs(exit_px - entry_px) * (10 ** (digits - 1)), 1),
                     "risk_reward": f"{tag} (1:{self.rr_target:.1f} Plan)",
                     "exit_reason": reason,

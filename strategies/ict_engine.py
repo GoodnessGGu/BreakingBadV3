@@ -16,7 +16,7 @@ import time
 import logging
 import asyncio
 import inspect
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List, Set, Callable
 import pandas as pd
 from clients.forex_mcp_client import IQForexMCPClient
@@ -562,10 +562,22 @@ class ICTStrategyEngine:
             min_l = profile.get("min_lots", 0.001)
             trade_lots = profile.get("default_lots") or self.lots
 
-            # Prop Firm Guardian Gatekeeper
+            # Weekend Protection Gate for Forex/CFD (Bitcoin trades 24/7 on crypto)
+            if symbol != "BTCUSD":
+                now_dt = datetime.now(timezone.utc)
+                if (now_dt.weekday() == 4 and now_dt.hour >= 18) or now_dt.weekday() == 5 or (now_dt.weekday() == 6 and now_dt.hour < 21):
+                    logger.info(f"🛡️ [ICTEngine] {symbol} trade blocked: Weekend exposure protection active")
+                    return
+
+            # Prop Firm Guardian Gatekeeper & Dynamic Risk Sizing
             if getattr(self, "prop_guardian", None) and self.prop_guardian.is_enabled:
                 open_pos = self.mcp.list_positions(balance_id=self.balance_id) or []
-                allowed, reason, rec_lots = self.prop_guardian.can_execute_trade(symbol, len(open_pos))
+                allowed, reason, rec_lots = self.prop_guardian.can_execute_trade(
+                    symbol=symbol,
+                    current_open_count=len(open_pos),
+                    entry_price=exec_px,
+                    sl_price=sl
+                )
                 if not allowed:
                     logger.warning(f"🛡️ [PropFirm Guard] ICT trade rejected for {symbol}: {reason}")
                     await self.notify_text(f"🛡️ **[PROP FIRM GUARD] ICT Trade Skipped ({symbol})**\n\nReason: {reason}")
@@ -688,6 +700,7 @@ class ICTStrategyEngine:
             if tickets:
                 self.pending_fvgs.pop(symbol, None)
                 primary_oid = tickets[-1]["order_id"]
+                group_id = f"ict_{symbol}_{int(time.time())}"
                 self.active_trades[symbol] = {
                     "order_id": primary_oid,
                     "position_id": None,
@@ -703,7 +716,8 @@ class ICTStrategyEngine:
                     "moved_to_be": False,
                     "trailing_stage": 0,
                     "opened_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "tickets": tickets
+                    "tickets": tickets,
+                    "group_id": group_id
                 }
                 caption = (
                     f"ICT Dual-Ticket Order Filled | {symbol} ({'BUY' if side == 'BUY' else 'SELL'})\n\n"
@@ -779,6 +793,25 @@ class ICTStrategyEngine:
                         elif not t.get("position_id"):
                             t["position_id"] = p_id
                             assigned_pids.add(p_id)
+
+                # Record newly discovered position ID into persistent TradeLedger
+                if t.get("position_id") and hasattr(self, "trade_ledger") and self.trade_ledger and not t.get("ledger_recorded"):
+                    try:
+                        self.trade_ledger.record_open(
+                            position_id=str(t["position_id"]),
+                            strategy="ICT",
+                            symbol=symbol,
+                            side=t["side"],
+                            lots=float(t.get("lots", self.lots)),
+                            entry_price=float(t["entry_price"]),
+                            sl=float(t.get("sl", 0.0)),
+                            tp=float(t.get("tp", 0.0)),
+                            balance_type=self.account_type,
+                            group_id=trade.get("group_id")
+                        )
+                        t["ledger_recorded"] = True
+                    except Exception as tle:
+                        logger.debug(f"[ICTEngine] TradeLedger open record error: {tle}")
 
         # Sync top-level position_id to runner for backwards compatibility
         runner_tk = next((t for t in tickets if not t["is_tp1"]), tickets[0])
@@ -1068,6 +1101,18 @@ class ICTStrategyEngine:
                     logger.info(f"🛡️ [ICTEngine] Settled {symbol} #{pos_id} into PropFirmGuardian (PnL: ${pnl:.2f})")
                 except Exception as pge:
                     logger.error(f"[ICTEngine] Error settling into PropFirmGuardian: {pge}")
+
+            # Record ticket closure in persistent TradeLedger
+            if hasattr(self, "trade_ledger") and self.trade_ledger:
+                try:
+                    self.trade_ledger.record_close(
+                        position_id=str(pos_id),
+                        exit_price=exit_px if exit_px > 0 else ticket["entry_price"],
+                        pnl_usd=pnl,
+                        exit_reason=reason
+                    )
+                except Exception as tle:
+                    logger.debug(f"[ICTEngine] TradeLedger close record error: {tle}")
 
             entry_px = ticket["entry_price"]
             if exit_px == 0.0:

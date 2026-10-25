@@ -228,6 +228,15 @@ class GSocietyCopier(BaseCopier):
         )
         await self.notify(msg)
 
+        # Prop Firm Guardian Gatekeeper
+        if getattr(self, "prop_guardian", None) and self.prop_guardian.is_enabled:
+            open_pos = self.mcp.list_positions(balance_id=self.balance_id) or []
+            allowed, reason, rec_lots = self.prop_guardian.can_execute_trade("XAUUSD", len(open_pos))
+            if not allowed:
+                logger.warning(f"🛡️ [PropFirm Guard] GSociety trade rejected: {reason}")
+                await self.notify(f"🛡️ **[PROP FIRM GUARD] GSociety Trade Skipped**\n\nReason: {reason}")
+                return
+
         for o in orders_to_place:
             res = self.mcp.place_market_order(
                 side=side.lower(),

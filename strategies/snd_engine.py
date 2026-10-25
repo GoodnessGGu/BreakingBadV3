@@ -46,7 +46,7 @@ SND_INSTRUMENT_PROFILES: Dict[str, Dict[str, Any]] = {
         "contract_size": 100000,
         "target_rr": 2.0,
         "be_trigger_r": 1.0,
-        "disp_mult": 1.2,
+        "disp_mult": 1.5,
         "sl_buf_mult": 0.2,
         "min_fvg_mult": 0.1,
         "pip_unit": 0.0001
@@ -61,7 +61,7 @@ SND_INSTRUMENT_PROFILES: Dict[str, Dict[str, Any]] = {
         "contract_size": 100000,
         "target_rr": 2.0,
         "be_trigger_r": 1.0,
-        "disp_mult": 1.2,
+        "disp_mult": 1.5,
         "sl_buf_mult": 0.2,
         "min_fvg_mult": 0.1,
         "pip_unit": 0.01
@@ -76,7 +76,7 @@ SND_INSTRUMENT_PROFILES: Dict[str, Dict[str, Any]] = {
         "contract_size": 100000,
         "target_rr": 2.0,
         "be_trigger_r": 1.0,
-        "disp_mult": 1.2,
+        "disp_mult": 1.5,
         "sl_buf_mult": 0.2,
         "min_fvg_mult": 0.1,
         "pip_unit": 0.0001
@@ -91,7 +91,7 @@ SND_INSTRUMENT_PROFILES: Dict[str, Dict[str, Any]] = {
         "contract_size": 100000,
         "target_rr": 2.0,
         "be_trigger_r": 1.0,
-        "disp_mult": 1.2,
+        "disp_mult": 1.5,
         "sl_buf_mult": 0.2,
         "min_fvg_mult": 0.1,
         "pip_unit": 0.0001
@@ -391,6 +391,16 @@ class SNDStrategyEngine:
                         logger.info(f"🏛️ [SNDEngine] New Supply Zone for {symbol} @ {entry:.5f} | Distal: {distal:.5f} | SL: {sl:.5f}")
 
     async def _check_pending_zones(self, symbol: str, df: pd.DataFrame, cur_px: Dict[str, float]):
+        # Single Active Trade Rule: Prevent stacking multiple trades on the same asset
+        if self.active_trades.get(symbol) is not None:
+            return
+
+        # Forex Session Liquidity Filter: Entries only permitted during active London & NY sessions (07:00 - 17:00 UTC)
+        now_dt = datetime.now(timezone.utc)
+        mins = now_dt.hour * 60 + now_dt.minute
+        if not (420 <= mins <= 1020):
+            return
+
         zones = self.pending_zones.get(symbol, [])
         if not zones:
             return
@@ -404,7 +414,7 @@ class SNDStrategyEngine:
         mid = cur_px["mid"]
 
         rem = []
-        for z in zones:
+        for idx, z in enumerate(zones):
             side = z["side"]
             entry = z["entry"]
             sl = z["sl"]
@@ -432,15 +442,39 @@ class SNDStrategyEngine:
                     tp = round(entry + (risk * target_rr) if side == "BUY" else entry - (risk * target_rr), digits)
                     executed = await self._execute_snd_trade(symbol, side, entry, sl, tp, risk, df)
                     if executed:
-                        continue  # Do not re-add, zone is fulfilled
+                        # Append any remaining untouched zones and break to avoid multi-order firing
+                        rem.extend(zones[idx + 1:])
+                        break
             rem.append(z)
 
         self.pending_zones[symbol] = rem
 
     async def _execute_snd_trade(self, symbol: str, side: str, entry: float, sl: float, tp: float, risk: float, df: pd.DataFrame) -> bool:
+        # Weekend Protection Gate: Block new Forex/CFD trades after Friday 18:00 UTC through Sunday 21:00 UTC
+        now_dt = datetime.now(timezone.utc)
+        if (now_dt.weekday() == 4 and now_dt.hour >= 18) or now_dt.weekday() == 5 or (now_dt.weekday() == 6 and now_dt.hour < 21):
+            logger.info(f"🛡️ [SNDEngine] {symbol} trade blocked: Weekend exposure protection active")
+            return False
+
         profile = SND_INSTRUMENT_PROFILES[symbol]
         instrument_id = profile["instrument_id"]
         lots = profile.get("default_lots", self.lots)
+
+        # Prop Firm Guardian Gatekeeper & Dynamic Risk Sizing
+        if getattr(self, "prop_guardian", None) and self.prop_guardian.is_enabled:
+            open_pos = self.mcp.list_positions(balance_id=self.balance_id) or []
+            allowed, reason, rec_lots = self.prop_guardian.can_execute_trade(
+                symbol=symbol,
+                current_open_count=len(open_pos),
+                entry_price=entry,
+                sl_price=sl
+            )
+            if not allowed:
+                logger.warning(f"🛡️ [PropFirm Guard] S&D trade rejected for {symbol}: {reason}")
+                await self.notify_text(f"🛡️ **[PROP FIRM GUARD] S&D Trade Skipped ({symbol})**\n\nReason: {reason}")
+                return False
+            if rec_lots > 0:
+                lots = rec_lots
 
         # MTF Higher-Timeframe Trend Confirmation (Addendum C)
         try:

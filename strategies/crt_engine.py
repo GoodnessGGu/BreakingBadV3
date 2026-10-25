@@ -241,10 +241,11 @@ class CRTStrategyEngine:
                     for symbol in list(self.enabled_symbols):
                         if symbol in CRT_INSTRUMENT_PROFILES:
                             await self._evaluate_symbol_cycle(symbol)
+                            await asyncio.sleep(2.0)  # Stagger requests between assets
             except Exception as e:
                 logger.error(f"[CRTEngine] Error in execution cycle: {e}", exc_info=True)
 
-            await asyncio.sleep(15)
+            await asyncio.sleep(20)
 
     async def _evaluate_symbol_cycle(self, symbol: str):
         if time.time() < self.unavailable_cooldown.get(symbol, 0.0):
@@ -274,7 +275,11 @@ class CRTStrategyEngine:
         target_rr = profile["target_rr"]
 
         # Fetch 5-Minute Execution Candles
-        raw_5m = self.mcp.get_candles(asset_id=asset_id, count=30, size=300)
+        try:
+            raw_5m = self.mcp.get_candles(asset_id=asset_id, count=30, size=300)
+        except Exception as e:
+            logger.debug(f"[CRTEngine] 5M candle fetch error for {symbol}: {e}")
+            return
         if not raw_5m or len(raw_5m) < 15:
             return
 
@@ -293,7 +298,11 @@ class CRTStrategyEngine:
         last_l = float(df_5m['Low'].iloc[-1])
 
         # Fetch 1-Hour Candles for Macro Trend Flow (H1 50-EMA Filter) & Anchor
-        raw_h1 = self.mcp.get_candles(asset_id=asset_id, count=60, size=3600)
+        try:
+            raw_h1 = self.mcp.get_candles(asset_id=asset_id, count=60, size=3600)
+        except Exception as e:
+            logger.debug(f"[CRTEngine] H1 candle fetch error for {symbol}: {e}")
+            raw_h1 = None
         h1_trend_up = True
         h1_trend_down = True
         df_h1 = None

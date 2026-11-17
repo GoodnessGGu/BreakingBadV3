@@ -831,31 +831,55 @@ class ICTStrategyEngine:
                 logger.info(f"📊 [ICTEngine] {symbol} {t['tag']} #{pos_id} closed! Syncing Google Sheets...")
                 await self._log_ticket_closure(symbol, t)
 
-                # IF TP1 CLOSED: Immediately shift the Runner leg to Breakeven
+                # IF TP1 CLOSED: Arm all active runner tickets with persistent pending_be
                 if t.get("is_tp1"):
                     for r_tk in tickets:
-                        if not r_tk.get("is_tp1") and r_tk.get("is_open") and not r_tk.get("moved_to_be"):
-                            r_pid = r_tk.get("position_id")
-                            if r_pid:
-                                be_buf = profile["min_fvg_gap"] * 0.5
-                                if symbol == "XAUUSD":
-                                    be_buf = 0.25
-                                be_level = round(trade["entry_price"] + be_buf if trade["side"] == "BUY" else trade["entry_price"] - be_buf, digits)
-                                logger.info(f"🛡️ [ICT Partial Protection] TP1 closed. Shifting Runner #{r_pid} to Breakeven @ {be_level}")
-                                res_be = self.mcp.change_position_stop_loss(position_id=r_pid, level=be_level, endpoint="cfd" if symbol == "XAUUSD" else None)
-                                if not res_be.get("error"):
-                                    r_tk["sl"] = be_level
-                                    r_tk["moved_to_be"] = True
-                                    r_tk["trailing_stage"] = max(r_tk.get("trailing_stage", 0), 2)
-                                    trade["current_sl"] = be_level
-                                    trade["moved_to_be"] = True
-                                    trade["trailing_stage"] = max(trade.get("trailing_stage", 0), 2)
-                                    await self.notify(
-                                        f"🛡️ **[ICT RUNNER RISK-FREE] {symbol} #{r_pid}**\n\n"
-                                        f"• Trigger : TP1 Partial Banked!\n"
-                                        f"• Runner SL shifted to Breakeven: `{be_level:.{digits}f}`\n"
-                                        f"• Target  : `{r_tk['tp']:.{digits}f}` (Risk-Free Run)"
-                                    )
+                        if not r_tk.get("is_tp1") and r_tk.get("is_open"):
+                            r_tk["pending_be"] = True
+                            logger.info(f"🛡️ [ICT Partial Protection] TP1 closed. Armed Runner #{r_tk.get('position_id')} for Breakeven.")
+
+        # 2b. Continuous Breakeven Retry for armed Runner tickets
+        for r_tk in tickets:
+            if not r_tk.get("is_tp1") and r_tk.get("is_open") and r_tk.get("pending_be") and not r_tk.get("moved_to_be"):
+                r_pid = r_tk.get("position_id")
+                if not r_pid:
+                    continue
+
+                be_buf = profile["min_fvg_gap"] * 0.5
+                if symbol == "XAUUSD":
+                    be_buf = 0.25
+                elif symbol in ("EURUSD", "GBPUSD"):
+                    be_buf = profile.get("sl_buffer", 0.0004) * 0.2
+                be_level = round(trade["entry_price"] + be_buf if trade["side"] == "BUY" else trade["entry_price"] - be_buf, digits)
+
+                # Enforce minimum distance to current market price to satisfy broker stop_levels
+                mid = cur_prices.get("mid", 0.0)
+                min_dist = 0.50 if symbol == "XAUUSD" else (0.10 if symbol == "XAGUSD" else profile.get("sl_buffer", 0.0004) * 0.3)
+                dist_to_market = abs(mid - be_level) if mid > 0 else 999.0
+
+                if mid > 0 and dist_to_market < min_dist:
+                    logger.info(f"⏳ [ICT Breakeven] {symbol} #{r_pid} dist to market (${dist_to_market:.{digits}f}) < min allowed (${min_dist:.{digits}f}). Waiting for profit expansion to shift SL.")
+                else:
+                    ep = "cfd" if symbol in ("XAUUSD", "XAGUSD") else ("crypto" if symbol == "BTCUSD" else "forex")
+                    logger.info(f"🛡️ [ICT Breakeven Execution] Shifting Runner #{r_pid} to Breakeven @ {be_level}")
+                    res_be = self.mcp.change_position_stop_loss(position_id=int(r_pid), level=be_level, endpoint=ep)
+                    if not res_be.get("error") and not res_be.get("isError"):
+                        r_tk["sl"] = be_level
+                        r_tk["moved_to_be"] = True
+                        r_tk["pending_be"] = False
+                        r_tk["trailing_stage"] = max(r_tk.get("trailing_stage", 0), 2)
+                        trade["current_sl"] = be_level
+                        trade["moved_to_be"] = True
+                        trade["trailing_stage"] = max(trade.get("trailing_stage", 0), 2)
+                        await self.notify(
+                            f"🛡️ **[ICT RUNNER RISK-FREE] {symbol} #{r_pid}**\n\n"
+                            f"• Trigger : TP1 Partial Banked!\n"
+                            f"• Runner SL shifted to Breakeven: `{be_level:.{digits}f}`\n"
+                            f"• Target  : `{r_tk['tp']:.{digits}f}` (Risk-Free Run)"
+                        )
+                    else:
+                        err_msg = res_be.get("error", {}).get("message", str(res_be.get("error")))
+                        logger.warning(f"⚠️ [ICT Breakeven] Broker rejected SL update for #{r_pid}: {err_msg}. Will retry on next tick.")
 
         # If all tickets closed, cleanup trade
         if all(not t.get("is_open") for t in tickets):
@@ -901,9 +925,9 @@ class ICTStrategyEngine:
         gain_pips = gain * pip_multiplier
         pip_cfg = HYBRID_PIP_THRESHOLDS.get(symbol) if self.use_hybrid_trailing else None
 
-        # Stage 1: +0.5R or pip threshold -> Cut initial risk by 50%
+        # Stage 1: +0.5R or pip threshold -> Cut initial risk by 50% (skip if already pending or moved to BE)
         trigger_stage1 = (r_mult >= 0.5) or (pip_cfg is not None and gain_pips >= pip_cfg["stage1_pips"])
-        if trigger_stage1 and stage < 1:
+        if trigger_stage1 and stage < 1 and not active_runner.get("moved_to_be") and not active_runner.get("pending_be"):
             half_risk_sl = round(entry - (risk_dist * 0.5) if side == "BUY" else entry + (risk_dist * 0.5), digits)
             res = self.mcp.change_position_stop_loss(position_id=pos_id, level=half_risk_sl, endpoint="cfd" if symbol == "XAUUSD" else None)
             if not res.get("error"):
@@ -920,7 +944,7 @@ class ICTStrategyEngine:
 
         # Stage 2: +1.0R or pip threshold -> Move Runner to Breakeven (+ buffer)
         trigger_stage2 = (r_mult >= 1.0) or (pip_cfg is not None and gain_pips >= pip_cfg["stage2_pips"])
-        if trigger_stage2 and stage < 2:
+        if trigger_stage2 and stage < 2 and not active_runner.get("moved_to_be") and not active_runner.get("pending_be"):
             be_buf = profile["min_fvg_gap"] * 0.5
             if symbol == "XAUUSD":
                 be_buf = 0.25

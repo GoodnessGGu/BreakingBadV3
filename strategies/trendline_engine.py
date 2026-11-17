@@ -186,6 +186,23 @@ class TrendlineStrategyEngine:
         else:
             await self.notify_text(caption)
 
+    def get_market_price(self, symbol: str) -> Dict[str, float]:
+        profile = TRENDLINE_PROFILES.get(symbol)
+        if not profile:
+            return {"buy": 0.0, "sell": 0.0, "mid": 0.0}
+
+        try:
+            candles = self.mcp.get_candles(asset_id=profile["asset_id"], size=60, count=2)
+            if candles and len(candles) > 0:
+                last_c = candles[-1]
+                px = float(last_c.get("close", last_c.get("c", 0.0)))
+                if px > 0:
+                    return {"buy": px, "sell": px, "mid": px}
+        except Exception as e:
+            logger.debug(f"[TrendlineEngine] Candle price fetch error for {symbol}: {e}")
+
+        return {"buy": 0.0, "sell": 0.0, "mid": 0.0}
+
     def find_pivots(self, highs: np.ndarray, lows: np.ndarray, window: int = 5) -> Tuple[List[Tuple[int, float]], List[Tuple[int, float]]]:
         pivot_highs = []
         pivot_lows = []
@@ -546,28 +563,11 @@ class TrendlineStrategyEngine:
         leg2_still_open = leg2_id in open_ids and leg2_id != "None"
 
         # 1. Check if Leg 1 (TP1) closed while Leg 2 is still running
-        if not trade["tp1_closed"]:
+        if not trade.get("tp1_closed"):
             if leg1_id and not leg1_still_open and leg1_id != "None":
                 trade["tp1_closed"] = True
-                logger.info(f"🏆 [TrendlineEngine] {symbol} Leg 1 (#{leg1_id}) closed! Moving Leg 2 to Breakeven...")
-
-                # Shift Leg 2 to Breakeven
-                if leg2_still_open:
-                    try:
-                        be_buf = profile.get("sl_buffer", 1.0) * 0.15
-                        be_price = round(entry + be_buf if side == "BUY" else entry - be_buf, profile["digits"])
-                        self.mcp.change_position_stop_loss(position_id=int(leg2_id), level=be_price)
-                        trade["runner_at_be"] = True
-                        logger.info(f"✅ [TrendlineEngine] Leg 2 (#{leg2_id}) SL shifted to Breakeven @ {be_price}!")
-                    except Exception as e:
-                        logger.error(f"[TrendlineEngine] Failed to move Leg 2 to BE: {e}")
-
-                await self.notify_text(
-                    f"🛡️ **[TRENDLINE PARTIAL BANKED] {symbol}**\n\n"
-                    f"• Leg 1 hit TP1 @ `{tp1:.2f}`! Profit banked.\n"
-                    f"• Leg 2 Runner Stop Loss shifted to **Breakeven** (`{entry:.2f}`).\n"
-                    f"• Position is now **100% Risk-Free** targeting `{tp2:.2f}`!"
-                )
+                trade["leg2_pending_be"] = True
+                logger.info(f"🏆 [TrendlineEngine] {symbol} Leg 1 (#{leg1_id}) closed! Arming Leg 2 for Breakeven...")
 
                 # Log Leg 1 closure to Google Sheets
                 await self._log_ticket_closure(
@@ -580,6 +580,41 @@ class TrendlineStrategyEngine:
                     tp_px=tp1,
                     default_reason="take_profit"
                 )
+
+        # 1b. Continuous Breakeven Retry for Leg 2 (Runner)
+        if trade.get("leg2_pending_be") and not trade.get("runner_at_be") and leg2_still_open:
+            if leg2_id and leg2_id != "None":
+                be_buf = profile.get("sl_buffer", 1.0) * 0.15
+                if symbol == "XAUUSD":
+                    be_buf = 0.25
+                elif symbol == "NAS100":
+                    be_buf = 3.0
+                be_price = round(entry + be_buf if side == "BUY" else entry - be_buf, profile["digits"])
+
+                cur_px = self.get_market_price(symbol)
+                mid = cur_px.get("mid", 0.0)
+                min_dist = 0.50 if symbol == "XAUUSD" else (5.0 if symbol == "NAS100" else profile.get("sl_buffer", 1.0) * 0.3)
+                dist_to_market = abs(mid - be_price) if mid > 0 else 999.0
+
+                if mid > 0 and dist_to_market < min_dist:
+                    logger.info(f"⏳ [TrendlineEngine] {symbol} Leg 2 dist to market ({dist_to_market:.2f}) < min allowed ({min_dist:.2f}). Waiting for profit expansion to shift SL.")
+                else:
+                    ep = "cfd" if symbol in ("XAUUSD", "NAS100") else ("crypto" if symbol == "BTCUSD" else "forex")
+                    logger.info(f"🛡️ [TrendlineEngine] Shifting Leg 2 (#{leg2_id}) to Breakeven @ {be_price}...")
+                    res = self.mcp.change_position_stop_loss(position_id=int(leg2_id), level=be_price, endpoint=ep)
+                    if not res.get("error") and not res.get("isError"):
+                        trade["runner_at_be"] = True
+                        trade["leg2_pending_be"] = False
+                        logger.info(f"✅ [TrendlineEngine] Leg 2 (#{leg2_id}) SL shifted to Breakeven @ {be_price}!")
+                        await self.notify_text(
+                            f"🛡️ **[TRENDLINE PARTIAL BANKED] {symbol}**\n\n"
+                            f"• Leg 1 hit TP1 @ `{tp1:.2f}`! Profit banked.\n"
+                            f"• Leg 2 Runner Stop Loss shifted to **Breakeven** (`{be_price:.2f}`).\n"
+                            f"• Position is now **100% Risk-Free** targeting `{tp2:.2f}`!"
+                        )
+                    else:
+                        err_msg = res.get("error", {}).get("message", str(res.get("error")))
+                        logger.warning(f"⚠️ [TrendlineEngine] Broker rejected Leg 2 SL update: {err_msg}. Will retry on next tick.")
 
         # 2. Check if all legs are closed
         if not leg1_still_open and not leg2_still_open:

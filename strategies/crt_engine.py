@@ -551,28 +551,11 @@ class CRTStrategyEngine:
         leg2_still_open = leg2_id in open_ids and leg2_id != "None"
 
         # 1. Check if Leg 1 (TP1) closed while Leg 2 is still running
-        if not trade["tp1_closed"]:
+        if not trade.get("tp1_closed"):
             if leg1_id and not leg1_still_open and leg1_id != "None":
                 trade["tp1_closed"] = True
-                logger.info(f"🏆 [CRTEngine] {symbol} Leg 1 (#{leg1_id}) closed! Snapping Leg 2 to Breakeven @ {entry}...")
-
-                # Shift Leg 2 to Breakeven
-                if leg2_still_open:
-                    try:
-                        be_buf = profile.get("sl_buffer", 1.0) * 0.15
-                        be_price = round(entry + be_buf if side == "BUY" else entry - be_buf, profile["digits"])
-                        self.mcp.change_position_stop_loss(position_id=int(leg2_id), level=be_price)
-                        trade["runner_at_be"] = True
-                        logger.info(f"✅ [CRTEngine] Leg 2 (#{leg2_id}) SL shifted to Breakeven @ {be_price}!")
-                    except Exception as e:
-                        logger.error(f"[CRTEngine] Failed to move Leg 2 to BE: {e}")
-
-                await self.notify_text(
-                    f"🛡️ **[CRT PARTIAL PROFIT BANKED] {symbol}**\n\n"
-                    f"• Leg 1 hit TP1 @ `{tp1}`! Profit locked in.\n"
-                    f"• Leg 2 Runner Stop Loss moved to **Breakeven** (`{entry}`).\n"
-                    f"• Position is now **100% Risk-Free** running to `{tp2}`!"
-                )
+                trade["leg2_pending_be"] = True
+                logger.info(f"🏆 [CRTEngine] {symbol} Leg 1 (#{leg1_id}) closed! Arming Leg 2 for Breakeven...")
 
                 # Log Leg 1 to Google Sheets
                 await self._log_ticket_closure(
@@ -585,6 +568,39 @@ class CRTStrategyEngine:
                     tp_px=tp1,
                     default_reason="take_profit"
                 )
+
+        # 1b. Continuous Breakeven Retry for Leg 2 (Runner)
+        if trade.get("leg2_pending_be") and not trade.get("runner_at_be") and leg2_still_open:
+            if leg2_id and leg2_id != "None":
+                be_buf = profile.get("sl_buffer", 1.0) * 0.15
+                if symbol == "XAUUSD":
+                    be_buf = 0.25
+                elif symbol == "BTCUSD":
+                    be_buf = 25.0
+                be_price = round(entry + be_buf if side == "BUY" else entry - be_buf, profile["digits"])
+
+                min_dist = 0.50 if symbol == "XAUUSD" else (50.0 if symbol == "BTCUSD" else profile.get("sl_buffer", 0.0004) * 0.3)
+                dist_to_market = abs(mid - be_price) if mid > 0 else 999.0
+
+                if mid > 0 and dist_to_market < min_dist:
+                    logger.info(f"⏳ [CRTEngine] {symbol} Leg 2 dist to market ({dist_to_market:.{profile['digits']}f}) < min allowed ({min_dist:.{profile['digits']}f}). Waiting for profit expansion.")
+                else:
+                    ep = "cfd" if symbol == "XAUUSD" else ("crypto" if symbol == "BTCUSD" else "forex")
+                    logger.info(f"🛡️ [CRTEngine] Shifting Leg 2 (#{leg2_id}) to Breakeven @ {be_price}...")
+                    res = self.mcp.change_position_stop_loss(position_id=int(leg2_id), level=be_price, endpoint=ep)
+                    if not res.get("error") and not res.get("isError"):
+                        trade["runner_at_be"] = True
+                        trade["leg2_pending_be"] = False
+                        logger.info(f"✅ [CRTEngine] Leg 2 (#{leg2_id}) SL shifted to Breakeven @ {be_price}!")
+                        await self.notify_text(
+                            f"🛡️ **[CRT PARTIAL PROFIT BANKED] {symbol}**\n\n"
+                            f"• Leg 1 hit TP1 @ `{tp1}`! Profit locked in.\n"
+                            f"• Leg 2 Runner Stop Loss moved to **Breakeven** (`{be_price}`).\n"
+                            f"• Position is now **100% Risk-Free** running to `{tp2}`!"
+                        )
+                    else:
+                        err_msg = res.get("error", {}).get("message", str(res.get("error")))
+                        logger.warning(f"⚠️ [CRTEngine] Broker rejected Leg 2 SL update: {err_msg}. Will retry on next tick.")
 
         # 2. Check if all legs are closed
         if not leg1_still_open and not leg2_still_open:

@@ -145,7 +145,7 @@ def admin_reply_keyboard() -> ReplyKeyboardMarkup:
         [KeyboardButton("⚙️ Settings"), KeyboardButton("👥 User Management")],
         [KeyboardButton("⏸ Pause"), KeyboardButton("▶ Resume")]
     ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, is_persistent=True)
 
 
 def investor_reply_keyboard() -> ReplyKeyboardMarkup:
@@ -155,7 +155,7 @@ def investor_reply_keyboard() -> ReplyKeyboardMarkup:
         [KeyboardButton("⚙️ Settings"), KeyboardButton("ℹ️ Help")],
         [KeyboardButton("📋 Demo Disclaimer"), KeyboardButton("🔄 Refresh Menu")]
     ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, is_persistent=True)
 
 
 def onboarding_inline_keyboard() -> InlineKeyboardMarkup:

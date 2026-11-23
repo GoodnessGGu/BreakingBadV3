@@ -25,7 +25,7 @@ def admin_reply_keyboard() -> ReplyKeyboardMarkup:
         [KeyboardButton("⏸ Pause"), KeyboardButton("▶ Resume")],
         [KeyboardButton("🛑 Close All")]
     ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, is_persistent=True)
 
 
 def investor_reply_keyboard() -> ReplyKeyboardMarkup:
@@ -39,7 +39,7 @@ def investor_reply_keyboard() -> ReplyKeyboardMarkup:
         [KeyboardButton("🌐 Market Sessions"), KeyboardButton("📰 Economic News")],
         [KeyboardButton("📋 Demo Disclaimer"), KeyboardButton("ℹ️ Help & FAQ")]
     ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, is_persistent=True)
 
 
 def onboarding_disclaimer_keyboard() -> InlineKeyboardMarkup:

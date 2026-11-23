@@ -2,8 +2,9 @@
 import sqlite3
 import logging
 from datetime import datetime, timedelta
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple, Any
 import os
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -11,54 +12,103 @@ DATABASE_PATH = os.getenv("DATABASE_PATH", "trades.db")
 
 
 class TradeDatabase:
-    """Manages trade history storage and retrieval using SQLite."""
+    """Manages trade history storage, counterfactual analysis, and multi-user platform state using SQLite."""
     
     def __init__(self, db_path: str = DATABASE_PATH):
         self.db_path = db_path
+        self._lock = threading.Lock()
         self._init_database()
     
     def _init_database(self):
         """Initialize database and create tables if they don't exist."""
         try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS trades (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TEXT NOT NULL,
-                    asset TEXT NOT NULL,
-                    direction TEXT NOT NULL,
-                    amount REAL NOT NULL,
-                    expiry INTEGER NOT NULL,
-                    entry_time TEXT,
-                    exit_time TEXT,
-                    result TEXT,
-                    profit REAL DEFAULT 0,
-                    gale_level INTEGER DEFAULT 0,
-                    signal_source TEXT DEFAULT 'manual',
-                    error_message TEXT
-                )
-            """)
+            with self._lock:
+                conn = sqlite3.connect(self.db_path, timeout=30.0)
+                cursor = conn.cursor()
+                
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS trades (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp TEXT NOT NULL,
+                        asset TEXT NOT NULL,
+                        direction TEXT NOT NULL,
+                        amount REAL NOT NULL,
+                        expiry INTEGER NOT NULL,
+                        entry_time TEXT,
+                        exit_time TEXT,
+                        result TEXT,
+                        profit REAL DEFAULT 0,
+                        gale_level INTEGER DEFAULT 0,
+                        signal_source TEXT DEFAULT 'manual',
+                        error_message TEXT
+                    )
+                """)
 
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS virtual_trades (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TEXT NOT NULL,
-                    asset TEXT NOT NULL,
-                    direction TEXT NOT NULL,
-                    expiry INTEGER NOT NULL,
-                    rejection_reason TEXT NOT NULL,
-                    entry_price REAL,
-                    exit_price REAL,
-                    virtual_result TEXT DEFAULT 'PENDING_VIRTUAL',
-                    features_json TEXT
-                )
-            """)
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS virtual_trades (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp TEXT NOT NULL,
+                        asset TEXT NOT NULL,
+                        direction TEXT NOT NULL,
+                        expiry INTEGER NOT NULL,
+                        rejection_reason TEXT NOT NULL,
+                        entry_price REAL,
+                        exit_price REAL,
+                        virtual_result TEXT DEFAULT 'PENDING_VIRTUAL',
+                        features_json TEXT
+                    )
+                """)
 
-            conn.commit()
-            conn.close()
-            logger.info(f"✅ Trade database & counterfactual virtual trades table initialized: {self.db_path}")
+                # Multi-User Management Tables
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS users (
+                        telegram_id INTEGER PRIMARY KEY,
+                        username TEXT,
+                        first_name TEXT,
+                        last_name TEXT,
+                        role TEXT DEFAULT 'investor',
+                        status TEXT DEFAULT 'approved',
+                        onboarded INTEGER DEFAULT 0,
+                        registered_at TEXT NOT NULL,
+                        last_active_at TEXT NOT NULL
+                    )
+                """)
+
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS user_preferences (
+                        telegram_id INTEGER PRIMARY KEY,
+                        timezone TEXT DEFAULT 'UTC',
+                        notifications_enabled INTEGER DEFAULT 1,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        FOREIGN KEY (telegram_id) REFERENCES users (telegram_id)
+                    )
+                """)
+
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS admin_audit_logs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        admin_id INTEGER NOT NULL,
+                        action TEXT NOT NULL,
+                        target_user_id INTEGER,
+                        details TEXT,
+                        timestamp TEXT NOT NULL
+                    )
+                """)
+
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS user_activity_logs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        telegram_id INTEGER NOT NULL,
+                        action TEXT NOT NULL,
+                        details TEXT,
+                        timestamp TEXT NOT NULL
+                    )
+                """)
+
+                conn.commit()
+                conn.close()
+            logger.info(f"✅ Trade database & multi-user tables initialized: {self.db_path}")
         except Exception as e:
             logger.error(f"❌ Failed to initialize database: {e}")
     
@@ -392,6 +442,353 @@ class TradeDatabase:
         except Exception as e:
             logger.error(f"❌ Failed to compute filter stats: {e}")
             return {'total_rejected': 0, 'saved_losses': 0, 'missed_wins': 0, 'filter_accuracy': 0.0, 'reasons_breakdown': {}}
+
+    # =========================================================================
+    # Multi-User Management & Access Control Layer
+    # =========================================================================
+
+    def register_or_get_user(
+        self,
+        telegram_id: int,
+        username: str = "",
+        first_name: str = "",
+        last_name: str = "",
+        default_role: str = "investor",
+        default_status: str = "approved"
+    ) -> Tuple[Dict[str, Any], bool]:
+        """
+        Retrieves user if exists, or registers a new user with default preferences.
+        Returns (user_dict, is_new).
+        """
+        now = datetime.now().isoformat()
+        try:
+            with self._lock:
+                conn = sqlite3.connect(self.db_path, timeout=30.0)
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+
+                cursor.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,))
+                row = cursor.fetchone()
+
+                if row:
+                    user = dict(row)
+                    # Update username / first_name if changed, and bump last_active_at
+                    cursor.execute("""
+                        UPDATE users
+                        SET username = ?, first_name = ?, last_name = ?, last_active_at = ?
+                        WHERE telegram_id = ?
+                    """, (username or user.get("username"), first_name or user.get("first_name"), last_name or user.get("last_name"), now, telegram_id))
+                    conn.commit()
+                    user["last_active_at"] = now
+                    conn.close()
+                    return user, False
+
+                # Register brand new user
+                cursor.execute("""
+                    INSERT INTO users (
+                        telegram_id, username, first_name, last_name, role, status, onboarded, registered_at, last_active_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)
+                """, (telegram_id, username, first_name, last_name, default_role, default_status, now, now))
+
+                cursor.execute("""
+                    INSERT OR IGNORE INTO user_preferences (
+                        telegram_id, timezone, notifications_enabled, created_at, updated_at
+                    ) VALUES (?, 'UTC', 1, ?, ?)
+                """, (telegram_id, now, now))
+
+                conn.commit()
+
+                cursor.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,))
+                new_user = dict(cursor.fetchone())
+                conn.close()
+
+                logger.info(f"👤 [UserManager] New Telegram user registered: #{telegram_id} (@{username or 'no_user'}) [{default_role}]")
+                return new_user, True
+        except Exception as e:
+            logger.error(f"❌ Failed to register/get user #{telegram_id}: {e}")
+            return {
+                "telegram_id": telegram_id,
+                "username": username,
+                "first_name": first_name,
+                "last_name": last_name,
+                "role": default_role,
+                "status": default_status,
+                "onboarded": 0,
+                "registered_at": now,
+                "last_active_at": now
+            }, False
+
+    def get_user(self, telegram_id: int) -> Optional[Dict[str, Any]]:
+        """Fetch user record by Telegram ID."""
+        try:
+            with self._lock:
+                conn = sqlite3.connect(self.db_path, timeout=30.0)
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                cursor.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,))
+                row = cursor.fetchone()
+                conn.close()
+                return dict(row) if row else None
+        except Exception as e:
+            logger.error(f"❌ Failed to get user #{telegram_id}: {e}")
+            return None
+
+    def update_user_status(self, telegram_id: int, status: str) -> bool:
+        """Update access status ('approved', 'pending', 'suspended')."""
+        try:
+            with self._lock:
+                conn = sqlite3.connect(self.db_path, timeout=30.0)
+                cursor = conn.cursor()
+                cursor.execute("""
+                    UPDATE users
+                    SET status = ?
+                    WHERE telegram_id = ?
+                """, (status.lower(), telegram_id))
+                updated = cursor.rowcount > 0
+                conn.commit()
+                conn.close()
+                logger.info(f"🔒 [UserManager] User #{telegram_id} status changed to: {status}")
+                return updated
+        except Exception as e:
+            logger.error(f"❌ Failed to update status for user #{telegram_id}: {e}")
+            return False
+
+    def update_user_role(self, telegram_id: int, role: str) -> bool:
+        """Update role ('admin', 'investor')."""
+        try:
+            with self._lock:
+                conn = sqlite3.connect(self.db_path, timeout=30.0)
+                cursor = conn.cursor()
+                cursor.execute("""
+                    UPDATE users
+                    SET role = ?
+                    WHERE telegram_id = ?
+                """, (role.lower(), telegram_id))
+                updated = cursor.rowcount > 0
+                conn.commit()
+                conn.close()
+                return updated
+        except Exception as e:
+            logger.error(f"❌ Failed to update role for user #{telegram_id}: {e}")
+            return False
+
+    def complete_onboarding(self, telegram_id: int) -> bool:
+        """Mark user as having completed disclaimer onboarding."""
+        now = datetime.now().isoformat()
+        try:
+            with self._lock:
+                conn = sqlite3.connect(self.db_path, timeout=30.0)
+                cursor = conn.cursor()
+                cursor.execute("""
+                    UPDATE users
+                    SET onboarded = 1, last_active_at = ?
+                    WHERE telegram_id = ?
+                """, (now, telegram_id))
+                updated = cursor.rowcount > 0
+                conn.commit()
+                conn.close()
+                logger.info(f"✅ [UserManager] User #{telegram_id} completed demo disclaimer onboarding.")
+                return updated
+        except Exception as e:
+            logger.error(f"❌ Failed to mark onboarding complete for user #{telegram_id}: {e}")
+            return False
+
+    def update_last_active(self, telegram_id: int) -> bool:
+        """Touch last_active_at timestamp."""
+        now = datetime.now().isoformat()
+        try:
+            with self._lock:
+                conn = sqlite3.connect(self.db_path, timeout=30.0)
+                cursor = conn.cursor()
+                cursor.execute("UPDATE users SET last_active_at = ? WHERE telegram_id = ?", (now, telegram_id))
+                conn.commit()
+                conn.close()
+                return True
+        except Exception as e:
+            logger.error(f"❌ Failed to touch last_active for user #{telegram_id}: {e}")
+            return False
+
+    def list_users(self, status: Optional[str] = None) -> List[Dict[str, Any]]:
+        """List registered users, optionally filtered by status."""
+        try:
+            with self._lock:
+                conn = sqlite3.connect(self.db_path, timeout=30.0)
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                if status:
+                    cursor.execute("SELECT * FROM users WHERE status = ? ORDER BY registered_at DESC", (status.lower(),))
+                else:
+                    cursor.execute("SELECT * FROM users ORDER BY registered_at DESC")
+                rows = cursor.fetchall()
+                conn.close()
+                return [dict(r) for r in rows]
+        except Exception as e:
+            logger.error(f"❌ Failed to list users: {e}")
+            return []
+
+    def get_user_counts(self) -> Dict[str, int]:
+        """Return total, active/approved, pending, and suspended user counts."""
+        try:
+            with self._lock:
+                conn = sqlite3.connect(self.db_path, timeout=30.0)
+                cursor = conn.cursor()
+                cursor.execute("SELECT status, COUNT(*) FROM users GROUP BY status")
+                rows = cursor.fetchall()
+                conn.close()
+                stats = {"total": 0, "approved": 0, "pending": 0, "suspended": 0}
+                for status_name, count in rows:
+                    stats[status_name] = count
+                    stats["total"] += count
+                return stats
+        except Exception as e:
+            logger.error(f"❌ Failed to get user counts: {e}")
+            return {"total": 0, "approved": 0, "pending": 0, "suspended": 0}
+
+    def get_user_preferences(self, telegram_id: int) -> Dict[str, Any]:
+        """Fetch user-specific preferences (timezone, notifications)."""
+        try:
+            with self._lock:
+                conn = sqlite3.connect(self.db_path, timeout=30.0)
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                cursor.execute("SELECT * FROM user_preferences WHERE telegram_id = ?", (telegram_id,))
+                row = cursor.fetchone()
+                conn.close()
+                if row:
+                    return dict(row)
+                return {"telegram_id": telegram_id, "timezone": "UTC", "notifications_enabled": 1}
+        except Exception as e:
+            logger.error(f"❌ Failed to fetch preferences for user #{telegram_id}: {e}")
+            return {"telegram_id": telegram_id, "timezone": "UTC", "notifications_enabled": 1}
+
+    def set_user_preferences(
+        self,
+        telegram_id: int,
+        timezone: Optional[Any] = None,
+        notifications_enabled: Optional[bool] = None,
+        **kwargs
+    ) -> bool:
+        """Update user-specific display timezone or notification preferences."""
+        if isinstance(timezone, dict):
+            pref_dict = timezone
+            timezone = pref_dict.get("timezone")
+            if "notifications_enabled" in pref_dict:
+                notifications_enabled = pref_dict["notifications_enabled"]
+        if "timezone" in kwargs:
+            timezone = kwargs["timezone"]
+        if "notifications_enabled" in kwargs:
+            notifications_enabled = kwargs["notifications_enabled"]
+
+        now = datetime.now().isoformat()
+        try:
+            with self._lock:
+                conn = sqlite3.connect(self.db_path, timeout=30.0)
+                cursor = conn.cursor()
+                cursor.execute("SELECT * FROM user_preferences WHERE telegram_id = ?", (telegram_id,))
+                exists = cursor.fetchone() is not None
+
+                if exists:
+                    updates = []
+                    params = []
+                    if timezone is not None:
+                        updates.append("timezone = ?")
+                        params.append(timezone)
+                    if notifications_enabled is not None:
+                        updates.append("notifications_enabled = ?")
+                        params.append(1 if notifications_enabled else 0)
+                    updates.append("updated_at = ?")
+                    params.append(now)
+                    params.append(telegram_id)
+
+                    query = f"UPDATE user_preferences SET {', '.join(updates)} WHERE telegram_id = ?"
+                    cursor.execute(query, tuple(params))
+                else:
+                    cursor.execute("""
+                        INSERT INTO user_preferences (
+                            telegram_id, timezone, notifications_enabled, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?)
+                    """, (
+                        telegram_id,
+                        timezone or "UTC",
+                        1 if notifications_enabled or notifications_enabled is None else 0,
+                        now,
+                        now
+                    ))
+                conn.commit()
+                conn.close()
+                return True
+        except Exception as e:
+            logger.error(f"❌ Failed to set preferences for user #{telegram_id}: {e}")
+            return False
+
+    def log_admin_action(
+        self,
+        admin_id: int,
+        action: str,
+        target_user_id: Optional[int] = None,
+        details: Optional[str] = None
+    ) -> bool:
+        """Audit record of administrator actions."""
+        now = datetime.now().isoformat()
+        try:
+            with self._lock:
+                conn = sqlite3.connect(self.db_path, timeout=30.0)
+                cursor = conn.cursor()
+                cursor.execute("""
+                    INSERT INTO admin_audit_logs (
+                        admin_id, action, target_user_id, details, timestamp
+                    ) VALUES (?, ?, ?, ?, ?)
+                """, (admin_id, action, target_user_id, details or "", now))
+                conn.commit()
+                conn.close()
+                logger.info(f"🛡️ [AdminAudit] Admin #{admin_id} action '{action}' on target #{target_user_id}: {details}")
+                return True
+        except Exception as e:
+            logger.error(f"❌ Failed to log admin action: {e}")
+            return False
+
+    def log_user_activity(
+        self,
+        telegram_id: int,
+        action: str,
+        details: Optional[str] = None
+    ) -> bool:
+        """Log user activities."""
+        now = datetime.now().isoformat()
+        try:
+            with self._lock:
+                conn = sqlite3.connect(self.db_path, timeout=30.0)
+                cursor = conn.cursor()
+                cursor.execute("""
+                    INSERT INTO user_activity_logs (
+                        telegram_id, action, details, timestamp
+                    ) VALUES (?, ?, ?, ?)
+                """, (telegram_id, action, details or "", now))
+                conn.commit()
+                conn.close()
+                return True
+        except Exception as e:
+            logger.error(f"❌ Failed to log user activity for #{telegram_id}: {e}")
+            return False
+
+    def get_recent_audit_logs(self, limit: int = 25) -> List[Dict[str, Any]]:
+        """Retrieve recent administrative audit logs."""
+        try:
+            with self._lock:
+                conn = sqlite3.connect(self.db_path, timeout=30.0)
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT * FROM admin_audit_logs
+                    ORDER BY timestamp DESC
+                    LIMIT ?
+                """, (limit,))
+                rows = cursor.fetchall()
+                conn.close()
+                return [dict(r) for r in rows]
+        except Exception as e:
+            logger.error(f"❌ Failed to retrieve audit logs: {e}")
+            return []
 
 
 # Global database instance

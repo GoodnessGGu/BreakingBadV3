@@ -27,6 +27,7 @@ legacy/
 test_*.py
 !tests/test_bugfixes.py
 !tests/test_persistent_breakeven.py
+!tests/test_multiuser_onboarding.py
 check_*.py
 backtest_*.py
 run_*_backtest.py
@@ -36,3 +37,4 @@ find_btc.py
 create_fresh_session.py
 *.png
 *.pine
+scratch/

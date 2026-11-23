@@ -6,13 +6,21 @@ from telegram import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMa
 from typing import Dict, Any, List, Optional
 
 
-def persistent_reply_keyboard() -> ReplyKeyboardMarkup:
+def persistent_reply_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
+    """Returns the persistent reply keyboard tailored to the user's role."""
+    if is_admin:
+        return admin_reply_keyboard()
+    return investor_reply_keyboard()
+
+
+def admin_reply_keyboard() -> ReplyKeyboardMarkup:
+    """Full super-administrator control keyboard."""
     keyboard = [
         [KeyboardButton("📊 Status"), KeyboardButton("💰 Balance")],
         [KeyboardButton("🤖 Gold ICT"), KeyboardButton("🕯️ CRT Engine"), KeyboardButton("📐 Trendlines")],
         [KeyboardButton("🏛️ S&D Engine"), KeyboardButton("🎯 Mission & Strategies")],
         [KeyboardButton("📡 Channels"), KeyboardButton("📋 Active Setups")],
-        [KeyboardButton("🏆 Prop Firm 5K"), KeyboardButton("📜 History"), KeyboardButton("⚙️ Risk & Sizing")],
+        [KeyboardButton("👥 User Management"), KeyboardButton("📜 History"), KeyboardButton("⚙️ Risk & Sizing")],
         [KeyboardButton("🌐 Market Sessions"), KeyboardButton("📰 Economic News")],
         [KeyboardButton("⏸ Pause"), KeyboardButton("▶ Resume")],
         [KeyboardButton("🛑 Close All")]
@@ -20,7 +28,81 @@ def persistent_reply_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 
-def main_menu_keyboard() -> InlineKeyboardMarkup:
+def investor_reply_keyboard() -> ReplyKeyboardMarkup:
+    """Investor demonstration environment keyboard (strictly read-only and safe exploration)."""
+    keyboard = [
+        [KeyboardButton("📊 Status"), KeyboardButton("💰 Balance")],
+        [KeyboardButton("🤖 Gold ICT"), KeyboardButton("🕯️ CRT Engine"), KeyboardButton("📐 Trendlines")],
+        [KeyboardButton("🏛️ S&D Engine"), KeyboardButton("🎯 Mission & Strategies")],
+        [KeyboardButton("📋 Active Setups"), KeyboardButton("📜 History")],
+        [KeyboardButton("🏆 Prop Firm 5K"), KeyboardButton("⚙️ View Config")],
+        [KeyboardButton("🌐 Market Sessions"), KeyboardButton("📰 Economic News")],
+        [KeyboardButton("📋 Demo Disclaimer"), KeyboardButton("ℹ️ Help & FAQ")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+
+def onboarding_disclaimer_keyboard() -> InlineKeyboardMarkup:
+    """Onboarding disclaimer acceptance button for new Telegram users."""
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ I Understand & Agree to Demo Disclaimer", callback_data="btn_accept_disclaimer")
+        ]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def user_management_keyboard() -> InlineKeyboardMarkup:
+    """Super-administrator user management menu keyboard."""
+    keyboard = [
+        [
+            InlineKeyboardButton("👥 Refresh User List", callback_data="btn_users_refresh"),
+            InlineKeyboardButton("📜 Admin Audit Logs", callback_data="btn_users_audit_logs")
+        ],
+        [
+            InlineKeyboardButton("🔙 Back to Main Menu", callback_data="btn_back_main")
+        ]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def investor_main_menu_keyboard() -> InlineKeyboardMarkup:
+    """Investor dashboard main menu (read-only and demonstration controls)."""
+    keyboard = [
+        [
+            InlineKeyboardButton("📊 Balance & Status", callback_data="btn_status"),
+            InlineKeyboardButton("🎯 Mission & Strategies", callback_data="btn_mission_strategies")
+        ],
+        [
+            InlineKeyboardButton("🤖 ICT Multi-Engine", callback_data="btn_ict_menu"),
+            InlineKeyboardButton("🕯️ CRT Engine", callback_data="btn_crt_menu")
+        ],
+        [
+            InlineKeyboardButton("📐 Trendline Engine", callback_data="btn_trendline_menu"),
+            InlineKeyboardButton("🏛️ S&D Imbalance Engine", callback_data="btn_snd_menu")
+        ],
+        [
+            InlineKeyboardButton("📋 Active Setups", callback_data="btn_active_trades"),
+            InlineKeyboardButton("📜 Trade History", callback_data="history_cat_all")
+        ],
+        [
+            InlineKeyboardButton("🏆 Prop Firm 5K Sim", callback_data="btn_prop_menu"),
+            InlineKeyboardButton("⚙️ View Config", callback_data="btn_view_config")
+        ],
+        [
+            InlineKeyboardButton("🌐 Market Sessions", callback_data="btn_sessions"),
+            InlineKeyboardButton("📰 Economic News", callback_data="btn_news")
+        ],
+        [
+            InlineKeyboardButton("📋 Demo Disclaimer", callback_data="btn_disclaimer")
+        ]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def main_menu_keyboard(is_admin: bool = True) -> InlineKeyboardMarkup:
+    if not is_admin:
+        return investor_main_menu_keyboard()
     keyboard = [
         [
             InlineKeyboardButton("📊 Balance & Status", callback_data="btn_status"),
@@ -47,7 +129,8 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("🌐 Market Sessions", callback_data="btn_sessions")
         ],
         [
-            InlineKeyboardButton("📰 Economic News", callback_data="btn_news")
+            InlineKeyboardButton("📰 Economic News", callback_data="btn_news"),
+            InlineKeyboardButton("👥 User Management", callback_data="btn_users_menu")
         ],
         [
             InlineKeyboardButton("🛑 EMERGENCY CLOSE ALL", callback_data="btn_close_all_confirm")

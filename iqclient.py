@@ -235,6 +235,9 @@ class IQOptionAPI:
         Returns:
             bool: True if switch successful, False if already on target account
         """
+        if str(account_type).lower() in ("real", "regular", "live"):
+            logger.warning("🚨 [Security] Attempt to switch IQOptionAPI to REAL account blocked.")
+            raise PermissionError("REAL account mode is prohibited in Shared Demo Mode.")
         self._ensure_connected()
         if account_type.lower() == self.account_manager.current_account_type:
             logger.warning(f'Already on {account_type.lower()} account. No switch needed.')

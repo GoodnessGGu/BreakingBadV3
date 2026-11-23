@@ -196,6 +196,10 @@ class AccountManager:
         Args:
             account_type (str): Target account type ('real' or 'demo').
         """
+        # Strict Demo Enforcement in Shared Demo Mode
+        if str(account_type).lower() in ('real', 'regular', 'live'):
+            logger.warning("🚨 [Security] Blocked attempt to switch to REAL account in Shared Demo Mode.")
+            raise PermissionError("Switching to REAL account is strictly prohibited. BreakingBad V3 operates in Shared Demonstration Mode.")
 
         # Validate the requested account type
         if not self._validate_account_type(account_type):

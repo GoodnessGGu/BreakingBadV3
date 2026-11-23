@@ -114,6 +114,10 @@ class TradeManager:
             raise InvalidTradeParametersError(f"Expiry must be positive integer, got: {expiry}")
         if not self.account_manager.current_account_id:
             raise TradeExecutionError("No active account available")
+        # Enforce DEMO account mode at the execution layer
+        curr_type = str(getattr(self.account_manager, "current_account_type", "demo")).lower()
+        if curr_type not in ("demo", "practice", "training"):
+            raise TradeExecutionError(f"Execution rejected: Account mode '{curr_type.upper()}' is forbidden. Bot operates strictly in Shared Demo Mode.")
             
     # ========== TRADE OUTCOME ==========
     async def get_trade_outcome(self, order_id: int, expiry:int=1):

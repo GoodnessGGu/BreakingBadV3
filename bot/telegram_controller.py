@@ -33,8 +33,10 @@ from bot.keyboards import (
     persistent_reply_keyboard, history_menu_keyboard, active_setups_keyboard,
     news_menu_keyboard, crt_menu_keyboard, mission_menu_keyboard,
     individual_close_keyboard, snd_menu_keyboard, trendline_menu_keyboard,
-    prop_firm_menu_keyboard
+    prop_firm_menu_keyboard, onboarding_disclaimer_keyboard, user_management_keyboard,
+    investor_main_menu_keyboard, investor_reply_keyboard, admin_reply_keyboard
 )
+from user_manager import user_manager
 from bot.session_notifier import MarketSessionNotifier
 from bot.news_engine import EconomicNewsEngine
 from bot.prop_firm_manager import PropFirmGuardian
@@ -439,51 +441,129 @@ class TelegramTradingBot:
     # ==========================================
 
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not self.is_admin(update.effective_user.id):
-            await update.message.reply_text("⛔ Unauthorized access.")
+        user = update.effective_user
+        if not user:
             return
 
-        # Show persistent keyboard buttons
-        await update.message.reply_text(
-            "👑 *BreakingBad V3 Bot is Online & Ready!*\nUse the buttons below for quick control:",
-            reply_markup=persistent_reply_keyboard(),
-            parse_mode="Markdown"
-        )
-        text = self.build_status_text()
-        await update.message.reply_text(
-            text=text,
-            reply_markup=main_menu_keyboard(),
-            parse_mode="Markdown"
-        )
+        allowed, status, udata = user_manager.check_access(user.id, user.username, user.first_name)
+
+        if status == "suspended":
+            await update.message.reply_text(
+                "🚫 *Access Suspended*\n"
+                "Your access to BreakingBad V3 has been suspended by the administrator.\n"
+                "Please contact the administrator for further details.",
+                parse_mode="Markdown"
+            )
+            return
+
+        if status == "pending":
+            await update.message.reply_text(
+                "⏳ *Registration Pending*\n"
+                "Your account is registered and awaiting administrator approval.\n"
+                "You will receive access once approved by the administrator.",
+                parse_mode="Markdown"
+            )
+            return
+
+        if status == "needs_onboarding":
+            welcome_msg = (
+                f"👋 *Welcome to BreakingBad V3, {user.first_name}!* 🧪📈\n\n"
+                "BreakingBad V3 is an AI-augmented automated institutional trading system for IQ Option "
+                "(Blitz Options, Forex, Indices & Gold).\n\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "🏢 *SHARED DEMO ACCOUNT ENVIRONMENT*\n"
+                "• This environment operates in **Shared Demo Mode** using the owner's IQ Option Demo connection.\n"
+                "• All trades, setups, and signals are executed strictly inside this simulated practice environment.\n"
+                "• You do **not** need to provide your own IQ Option credentials.\n"
+                "• Real-money account execution is strictly disabled.\n\n"
+                "🎯 *Features Available to You:*\n"
+                "• Real-time bot engine status & market session monitoring\n"
+                "• Shared demo account balance & equity tracking\n"
+                "• Live trade signals, active setups & economic calendar\n"
+                "• Verified historical trade performance & statistics\n"
+                "• Institutional strategies (Gold ICT, CRT, S&D, Trendlines)\n\n"
+                "⚠️ *Risk Disclaimer:*\n"
+                "Trading financial markets and binary options involves substantial risk of loss. "
+                "Demonstration results are simulated and for educational/evaluative purposes only.\n\n"
+                "Please tap *'I Understand & Accept'* below to complete registration and enter the demo dashboard."
+            )
+            await update.message.reply_text(
+                welcome_msg,
+                parse_mode="Markdown",
+                reply_markup=onboarding_disclaimer_keyboard()
+            )
+            return
+
+        # User is approved or admin
+        is_admin = self.is_admin(user.id)
+        if is_admin:
+            await update.message.reply_text(
+                "👑 *BreakingBad V3 Bot is Online & Ready!*\nUse the buttons below for administrator control:",
+                reply_markup=admin_reply_keyboard(),
+                parse_mode="Markdown"
+            )
+            text = self.build_status_text()
+            await update.message.reply_text(
+                text=text,
+                reply_markup=main_menu_keyboard(is_admin=True),
+                parse_mode="Markdown"
+            )
+        else:
+            await update.message.reply_text(
+                f"👋 *Welcome back, {user.first_name}!* 🧪\n"
+                "BreakingBad V3 Shared Demo Environment is active.\n"
+                "Use the reply buttons below to monitor performance, check balance, or view trading history:",
+                reply_markup=investor_reply_keyboard(),
+                parse_mode="Markdown"
+            )
+            text = self.build_status_text()
+            await update.message.reply_text(
+                text=text,
+                reply_markup=investor_main_menu_keyboard(),
+                parse_mode="Markdown"
+            )
 
     async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not self.is_admin(update.effective_user.id):
+        user = update.effective_user
+        if not user:
             return
+        allowed, status, _ = user_manager.check_access(user.id, user.username, user.first_name)
+        if not allowed:
+            await update.message.reply_text("⛔ Unauthorized. Please send /start to begin onboarding.")
+            return
+
         text = self.build_status_text()
-        await update.message.reply_text(text=text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
+        kb = main_menu_keyboard(is_admin=True) if self.is_admin(user.id) else investor_main_menu_keyboard()
+        await update.message.reply_text(text=text, reply_markup=kb, parse_mode="Markdown")
 
     async def cmd_balance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not self.is_admin(update.effective_user.id):
+        user = update.effective_user
+        if not user:
             return
-        fx_bal = self.forex_mcp.get_training_balance() if self.account_type == "training" else self.forex_mcp.get_real_balance()
+        allowed, status, _ = user_manager.check_access(user.id, user.username, user.first_name)
+        if not allowed:
+            await update.message.reply_text("⛔ Unauthorized. Please send /start to begin onboarding.")
+            return
+
+        fx_bal = self.forex_mcp.get_training_balance()
         fx_eq = fx_bal.get("equity", 0.0) if fx_bal else 0.0
         fx_avail = fx_bal.get("available", fx_bal.get("balance", 0.0)) if fx_bal else 0.0
 
-        blitz_bal = self.blitz_mcp.get_training_balance() if self.account_type == "training" else self.blitz_mcp.get_real_balance()
+        blitz_bal = self.blitz_mcp.get_training_balance()
         blitz_amt = blitz_bal.get("amount", 0.0) if blitz_bal else 0.0
 
-        mode_lbl = "🟡 PRACTICE (Training)" if self.account_type == "training" else "🔴 REAL MONEY (Regular)"
         msg = (
-            f"💰 *Trading Account Balances*\n\n"
-            f"💼 *Mode*: {mode_lbl}\n\n"
+            f"💰 *Shared Demo Account Balances*\n\n"
+            f"💼 *Mode*: 🟡 PRACTICE (Training / Shared Demo)\n\n"
             f"📈 *Forex / CFD Account*:\n"
             f"  • Equity: `${fx_eq:,.2f}`\n"
             f"  • Available: `${fx_avail:,.2f}`\n\n"
             f"⚡ *Blitz Options Account*:\n"
             f"  • Balance: `${blitz_amt:,.2f}`\n\n"
-            f"💡 Adjust sizing via ⚙️ Risk & Sizing or `/account <real/demo>`."
+            f"🛡️ *Demo Environment*: All users share this single demo account. Real execution is strictly disabled."
         )
-        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=persistent_reply_keyboard())
+        reply_kb = admin_reply_keyboard() if self.is_admin(user.id) else investor_reply_keyboard()
+        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=reply_kb)
 
     async def cmd_pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.is_admin(update.effective_user.id):
@@ -882,7 +962,12 @@ class TelegramTradingBot:
                 await asyncio.sleep(4)
 
     async def cmd_active_trades(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not self.is_admin(update.effective_user.id):
+        user = update.effective_user
+        if not user:
+            return
+        allowed, status, _ = user_manager.check_access(user.id, user.username, user.first_name)
+        if not allowed:
+            await update.message.reply_text("⛔ Unauthorized. Please send /start.")
             return
         text = self.build_active_setups_view()
         kb = active_setups_keyboard(is_live=True, open_positions=self.last_open_positions)
@@ -892,14 +977,14 @@ class TelegramTradingBot:
                 parse_mode="Markdown",
                 reply_markup=kb
             )
-            if sent_msg:
+            if sent_msg and self.is_admin(user.id):
                 self.start_active_view_refresh_task(update.effective_chat.id, sent_msg.message_id)
         except Exception:
             sent_msg = await update.message.reply_text(
                 text,
                 reply_markup=kb
             )
-            if sent_msg:
+            if sent_msg and self.is_admin(user.id):
                 self.start_active_view_refresh_task(update.effective_chat.id, sent_msg.message_id)
 
     def get_active_balance_id(self) -> Optional[int]:
@@ -1109,7 +1194,12 @@ class TelegramTradingBot:
         return HistoryViewResult(total_text, tot_pages)
 
     async def cmd_history(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not self.is_admin(update.effective_user.id):
+        user = update.effective_user
+        if not user:
+            return
+        allowed, status, _ = user_manager.check_access(user.id, user.username, user.first_name)
+        if not allowed:
+            await update.message.reply_text("⛔ Unauthorized. Please send /start.")
             return
         cat = "all"
         per = "all"
@@ -1179,58 +1269,91 @@ class TelegramTradingBot:
 
     async def cmd_account(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.is_admin(update.effective_user.id):
+            await update.message.reply_text("⛔ Administrator access required.")
             return
         if not context.args:
             await update.message.reply_text(
-                f"💼 Current Account Mode: *{self.account_type.upper()}*\nUsage: `/account <training/regular>` or `/set_account <real/demo>`",
+                f"💼 Shared Demo Mode: *TRAINING (DEMO)*\n\n"
+                f"🛡️ *Note*: Strict Demo Mode is enforced across all bot engines.\n"
+                f"Real account execution is strictly disabled in this shared demonstration environment.",
                 parse_mode="Markdown",
-                reply_markup=persistent_reply_keyboard()
+                reply_markup=admin_reply_keyboard() if self.is_admin(update.effective_user.id) else investor_reply_keyboard()
             )
             return
         arg = context.args[0].lower()
         if arg in ["real", "regular", "live"]:
-            target = "regular"
+            await update.message.reply_text(
+                "⚠️ *Strict Demo Mode Enforced*\n"
+                "Switching to real money accounts is strictly disabled in this shared demonstration environment.",
+                parse_mode="Markdown"
+            )
+            return
         elif arg in ["demo", "training", "practice"]:
             target = "training"
         else:
-            await update.message.reply_text("❌ Invalid account mode. Use: `real` or `demo`", parse_mode="Markdown")
+            await update.message.reply_text("❌ Invalid account mode. Use: `demo`", parse_mode="Markdown")
             return
 
-        self.account_type = target
-        bal_fx = self.forex_mcp.get_real_balance() if target == "regular" else self.forex_mcp.get_training_balance()
+        self.account_type = "training"
+        bal_fx = self.forex_mcp.get_training_balance()
         if bal_fx:
             bid = bal_fx["balance_id"]
-            self.ict_engine.set_balance(bid, target)
+            self.ict_engine.set_balance(bid, "training")
             if self.straddle_engine:
-                self.straddle_engine.set_balance(bid, target)
+                self.straddle_engine.set_balance(bid, "training")
             if self.crt_engine:
-                self.crt_engine.set_balance(bid, target)
+                self.crt_engine.set_balance(bid, "training")
             if self.snd_engine:
-                self.snd_engine.set_balance(bid, target)
+                self.snd_engine.set_balance(bid, "training")
             if self.trendline_engine:
-                self.trendline_engine.set_balance(bid, target)
+                self.trendline_engine.set_balance(bid, "training")
             for c in self.channel_mgr.copiers.values():
                 if hasattr(c, "set_balance"):
-                    c.set_balance(bid, target)
+                    c.set_balance(bid, "training")
 
-        bal_blitz = self.blitz_mcp.get_real_balance() if target == "regular" else self.blitz_mcp.get_training_balance()
+        bal_blitz = self.blitz_mcp.get_training_balance()
         if bal_blitz:
             p_copier = self.channel_mgr.get_copier("polycarpvip")
             if p_copier and hasattr(p_copier, "set_balance"):
-                p_copier.set_balance(bal_blitz["balance_id"], target)
+                p_copier.set_balance(bal_blitz["balance_id"], "training")
 
-        lbl = "🔴 REAL MONEY (Regular)" if target == "regular" else "🟡 PRACTICE (Training)"
         await update.message.reply_text(
-            f"✅ Switched to *{lbl}* Account mode across all engines.",
+            "✅ Re-synchronized to *🟡 PRACTICE (Training / Shared Demo)* Account mode across all engines.",
             parse_mode="Markdown",
-            reply_markup=persistent_reply_keyboard()
+            reply_markup=admin_reply_keyboard()
         )
 
     async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not self.is_admin(update.effective_user.id):
+        user = update.effective_user
+        if not user:
             return
+        allowed, status, _ = user_manager.check_access(user.id, user.username, user.first_name)
+        if not allowed:
+            await update.message.reply_text("⛔ Unauthorized. Please send /start.")
+            return
+
+        if not self.is_admin(user.id):
+            msg = (
+                "ℹ️ *BreakingBad V3 — Investor Quick Guide*\n\n"
+                "Welcome to the shared demonstration portal of BreakingBad V3.\n\n"
+                "📱 *Available Commands & Features:*\n"
+                "• `/status` - Complete bot and strategy status\n"
+                "• `/balance` - View shared demo account equity\n"
+                "• `/setups` or `/active` - Live institutional orderflow setups\n"
+                "• `/history` or `/stats` - Verified trade performance & win rates\n"
+                "• `/news` or `/calendar` - High-impact macroeconomic calendar\n"
+                "• `/sessions` - Global market trading sessions\n"
+                "• `/help` - View this help guide\n"
+                "• `/disclaimer` - Review shared demo rules and risk disclaimer\n"
+                "• `/set_timezone <tz>` - Customize display timezone (e.g. UTC, US/Eastern)\n"
+                "• `/notifications <on/off>` - Enable or disable personal trade alerts\n\n"
+                "🛡️ *Demo Environment*: All operations execute strictly on the owner's IQ Option Demo connection."
+            )
+            await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=investor_reply_keyboard())
+            return
+
         msg = (
-            "ℹ️ *BreakingBad V3 Command Center*\n\n"
+            "ℹ️ *BreakingBad V3 Command Center (Administrator)*\n\n"
             "🖱 *Quick Buttons:*\n"
             "Use the bottom keyboard for one-tap balance, status, setups, news, and pause/resume.\n\n"
             "⚡ *Core Commands:*\n"
@@ -1248,23 +1371,38 @@ class TelegramTradingBot:
             "• `/history` - View categorized trade & PnL history\n"
             "• `/pause` / `/resume` - Master trading pause/resume\n"
             "• `/close [id|sym]` - Interactively or directly close an open position\n"
-            "• `/closeall` - Emergency close all open positions\n\n"
+            "• `/closeall` - Emergency close all open positions\n"
+            "• `/users` - User management & RBAC list\n"
+            "• `/suspend <id>` - Suspend user access\n"
+            "• `/activate <id>` - Activate/approve user access\n"
+            "• `/audit_logs` - View administrative audit trail\n\n"
             "📊 *Sizing Commands:*\n"
             "• `/lots <val>` - Set global Forex lot size (e.g. `/lots 0.5`)\n"
             "• `/leverage <val>` - Set global leverage (e.g. `/leverage 100`)\n"
             "• `/stake <val>` - Set Blitz base stake (e.g. `/stake 5.0`)\n"
-            "• `/account <real/demo>` - Switch account mode"
+            "• `/account <demo>` - Sync demo account mode"
         )
-        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=persistent_reply_keyboard())
+        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=admin_reply_keyboard())
 
     async def cmd_sessions(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not self.is_admin(update.effective_user.id):
+        user = update.effective_user
+        if not user:
+            return
+        allowed, status, _ = user_manager.check_access(user.id, user.username, user.first_name)
+        if not allowed:
+            await update.message.reply_text("⛔ Unauthorized. Please send /start.")
             return
         text = self.session_notifier.get_session_dashboard()
-        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=persistent_reply_keyboard())
+        kb = admin_reply_keyboard() if self.is_admin(user.id) else investor_reply_keyboard()
+        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=kb)
 
     async def cmd_news(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not self.is_admin(update.effective_user.id):
+        user = update.effective_user
+        if not user:
+            return
+        allowed, status, _ = user_manager.check_access(user.id, user.username, user.first_name)
+        if not allowed:
+            await update.message.reply_text("⛔ Unauthorized. Please send /start.")
             return
         # Ensure fresh calendar data
         await self.news_engine.fetch_calendar()
@@ -1317,10 +1455,20 @@ class TelegramTradingBot:
         """Processes taps on the persistent reply keyboard."""
         if not update.message or not update.message.text:
             return
-        if not self.is_admin(update.effective_user.id):
+
+        user = update.effective_user
+        if not user:
             return
 
+        allowed, status, _ = user_manager.check_access(user.id, user.username, user.first_name)
+        if not allowed:
+            await update.message.reply_text("⛔ Unauthorized. Please send /start to begin onboarding.")
+            return
+
+        is_adm = self.is_admin(user.id)
         text = update.message.text.strip()
+
+        # Investor & Admin shared permitted buttons
         if text in ["📊 Status", "Status"]:
             await self.cmd_status(update, context)
         elif text in ["💰 Balance", "Balance"]:
@@ -1339,72 +1487,136 @@ class TelegramTradingBot:
             await self.cmd_trendline(update, context)
         elif text in ["🎯 Mission & Strategies", "🎯 Mission", "Mission", "Strategies"]:
             await self.cmd_mission(update, context)
-        elif text in ["📡 Channels", "Channels"]:
-            await self.cmd_channels(update, context)
-        elif text in ["⚙️ Risk & Sizing", "Risk & Sizing", "Settings", "⚙️ Settings"]:
-            await self.cmd_settings(update, context)
         elif text in ["📋 Active Setups", "Active Setups", "Active", "📈 Active Trades"]:
             await self.cmd_active_trades(update, context)
         elif text in ["🏆 Prop Firm 5K", "Prop Firm 5K", "🏆 Prop Firm", "Prop Firm"]:
             await self.cmd_prop(update, context)
         elif text in ["📜 History", "History", "📋 History", "Trade History", "📊 Stats"]:
             await self.cmd_history(update, context)
-        elif text in ["⏸ Pause", "Pause"]:
-            await self.cmd_pause(update, context)
-        elif text in ["▶ Resume", "Resume"]:
-            await self.cmd_resume(update, context)
-        elif text in ["🛑 Close All", "Close All"]:
-            await self.cmd_closeall(update, context)
         elif text in ["ℹ️ Help", "Help"]:
             await self.cmd_help(update, context)
+        elif text in ["🏢 Shared Demo Notice", "Demo Notice", "Disclaimer"]:
+            await self.cmd_disclaimer(update, context)
+        elif text in ["⚙️ My Preferences", "Preferences"]:
+            pref = user_manager.get_user_preferences(user.id)
+            tz = pref.get("timezone", "UTC")
+            notif = "ON" if pref.get("notifications_enabled", 1) else "OFF"
+            msg = (
+                f"⚙️ *Your Personal Preferences*\n\n"
+                f"• Timezone: `{tz}` (Change with `/set_timezone <tz>`)\n"
+                f"• Notifications: `{notif}` (Toggle with `/notifications <on/off>`)\n\n"
+                f"🛡️ *Note*: Global trading parameters are managed by the administrator."
+            )
+            await update.message.reply_text(msg, parse_mode="Markdown")
+
+        # Admin-only buttons
+        elif text in ["📡 Channels", "Channels"]:
+            if not is_adm:
+                await update.message.reply_text("⛔ Administrator access required.")
+                return
+            await self.cmd_channels(update, context)
+        elif text in ["⚙️ Risk & Sizing", "Risk & Sizing", "Settings", "⚙️ Settings"]:
+            if not is_adm:
+                await update.message.reply_text("⛔ Administrator access required.")
+                return
+            await self.cmd_settings(update, context)
+        elif text in ["👥 Users", "Users", "👥 User Management"]:
+            if not is_adm:
+                await update.message.reply_text("⛔ Administrator access required.")
+                return
+            await self.cmd_users(update, context)
+        elif text in ["⏸ Pause", "Pause"]:
+            if not is_adm:
+                await update.message.reply_text("⛔ Administrator access required.")
+                return
+            await self.cmd_pause(update, context)
+        elif text in ["▶ Resume", "Resume"]:
+            if not is_adm:
+                await update.message.reply_text("⛔ Administrator access required.")
+                return
+            await self.cmd_resume(update, context)
+        elif text in ["🛑 Close All", "Close All"]:
+            if not is_adm:
+                await update.message.reply_text("⛔ Administrator access required.")
+                return
+            await self.cmd_closeall(update, context)
 
     async def cmd_ict(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not self.is_admin(update.effective_user.id):
+        user = update.effective_user
+        if not user:
+            return
+        allowed, status, _ = user_manager.check_access(user.id, user.username, user.first_name)
+        if not allowed:
+            await update.message.reply_text("⛔ Unauthorized. Please send /start.")
             return
         ict_st = self.ict_engine.get_status()
+        kb = ict_menu_keyboard(ict_st) if self.is_admin(user.id) else None
         await update.message.reply_text(
             self.build_ict_dashboard(),
-            reply_markup=ict_menu_keyboard(ict_st),
+            reply_markup=kb,
             parse_mode="Markdown"
         )
 
     async def cmd_crt(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not self.is_admin(update.effective_user.id):
+        user = update.effective_user
+        if not user:
+            return
+        allowed, status, _ = user_manager.check_access(user.id, user.username, user.first_name)
+        if not allowed:
+            await update.message.reply_text("⛔ Unauthorized. Please send /start.")
             return
         crt_st = self.crt_engine.get_status() if self.crt_engine else {"enabled": False, "enabled_symbols": []}
+        kb = crt_menu_keyboard(crt_st) if self.is_admin(user.id) else None
         await update.message.reply_text(
-            "🕯️ *Autonomous Candle Range Theory (CRT) Engine*\nConfigure active Forex / Crypto instruments & sizing:",
-            reply_markup=crt_menu_keyboard(crt_st),
+            "🕯️ *Autonomous Candle Range Theory (CRT) Engine*\nActive Forex / Crypto instruments & setup status:",
+            reply_markup=kb,
             parse_mode="Markdown"
         )
 
     async def cmd_snd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not self.is_admin(update.effective_user.id):
+        user = update.effective_user
+        if not user:
+            return
+        allowed, status, _ = user_manager.check_access(user.id, user.username, user.first_name)
+        if not allowed:
+            await update.message.reply_text("⛔ Unauthorized. Please send /start.")
             return
         snd_st = self.snd_engine.get_status() if self.snd_engine else {"enabled": False, "enabled_symbols": []}
+        kb = snd_menu_keyboard(snd_st) if self.is_admin(user.id) else None
         await update.message.reply_text(
             "🏛️ *Autonomous Supply & Demand + Imbalance Engine (Config E)*\n"
             "Trading top-performing pairs: NZD/USD (+27.0R), USD/JPY (+17.0R), AUD/USD (+15.0R), USD/CAD (+7.0R):\n\n"
-            "Configure active pairs, lots, and leverage:",
-            reply_markup=snd_menu_keyboard(snd_st),
+            "Current instrument tracking & orderflow status:",
+            reply_markup=kb,
             parse_mode="Markdown"
         )
 
     async def cmd_trendline(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not self.is_admin(update.effective_user.id):
+        user = update.effective_user
+        if not user:
+            return
+        allowed, status, _ = user_manager.check_access(user.id, user.username, user.first_name)
+        if not allowed:
+            await update.message.reply_text("⛔ Unauthorized. Please send /start.")
             return
         tl_st = self.trendline_engine.get_status() if self.trendline_engine else {"enabled": False, "enabled_symbols": []}
+        kb = trendline_menu_keyboard(tl_st) if self.is_admin(user.id) else None
         await update.message.reply_text(
             "📐 *Autonomous Trendline Bounce Strategy Engine (15M)*\n"
             "Model 1: 3rd Touch Trendline Bounces with 50 EMA Macro Alignment.\n"
             "Validated on **NAS100 (67.3% WR)** and **Gold (62.0% WR)**.\n\n"
-            "Configure active assets and master switches:",
-            reply_markup=trendline_menu_keyboard(tl_st),
+            "Current status & signals:",
+            reply_markup=kb,
             parse_mode="Markdown"
         )
 
     async def cmd_mission(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not self.is_admin(update.effective_user.id):
+        user = update.effective_user
+        if not user:
+            return
+        allowed, status, _ = user_manager.check_access(user.id, user.username, user.first_name)
+        if not allowed:
+            await update.message.reply_text("⛔ Unauthorized. Please send /start.")
             return
         text = self.build_mission_text()
         await update.message.reply_text(
@@ -1788,11 +2000,130 @@ class TelegramTradingBot:
 
     async def cmd_closeall(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.is_admin(update.effective_user.id):
+            await update.message.reply_text("⛔ Administrator access required.")
             return
         await update.message.reply_text(
             "⚠️ Are you sure you want to CLOSE ALL open positions?",
             reply_markup=close_all_confirm_keyboard()
         )
+
+    async def cmd_users(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.is_admin(update.effective_user.id):
+            await update.message.reply_text("⛔ Administrator access required.")
+            return
+        users = user_manager.list_all_users()
+        counts = user_manager.get_user_counts()
+        msg = f"👥 *Registered Bot Users* ({counts.get('total', 0)} total, {counts.get('approved', 0)} approved)\n\n"
+        for u in users[:25]:
+            status_icon = "🟢" if u["access_status"] == "approved" else "🟡" if u["access_status"] == "pending" else "🔴"
+            role_icon = "👑" if u["role"] == "admin" else "👤"
+            uname = f"@{u['username']}" if u["username"] else "No username"
+            msg += f"{status_icon} {role_icon} *{u['first_name']}* ({uname})\n"
+            msg += f"   ID: `{u['telegram_id']}` | Status: `{u['access_status']}`\n"
+        msg += "\n💡 Admin commands:\n• `/suspend <id>`\n• `/activate <id>`\n• `/user <id>`\n• `/audit_logs`"
+        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=user_management_keyboard())
+
+    async def cmd_suspend(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.is_admin(update.effective_user.id):
+            await update.message.reply_text("⛔ Administrator access required.")
+            return
+        if not context.args:
+            await update.message.reply_text("Usage: `/suspend <telegram_id>`", parse_mode="Markdown")
+            return
+        try:
+            target_id = int(context.args[0])
+            user_manager.suspend_user(target_id, admin_id=update.effective_user.id)
+            await update.message.reply_text(f"✅ User `{target_id}` has been SUSPENDED.", parse_mode="Markdown")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error suspending user: {e}")
+
+    async def cmd_activate(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.is_admin(update.effective_user.id):
+            await update.message.reply_text("⛔ Administrator access required.")
+            return
+        if not context.args:
+            await update.message.reply_text("Usage: `/activate <telegram_id>`", parse_mode="Markdown")
+            return
+        try:
+            target_id = int(context.args[0])
+            user_manager.approve_user(target_id, admin_id=update.effective_user.id)
+            await update.message.reply_text(f"✅ User `{target_id}` has been ACTIVATED/APPROVED.", parse_mode="Markdown")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error activating user: {e}")
+
+    async def cmd_user(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.is_admin(update.effective_user.id):
+            await update.message.reply_text("⛔ Administrator access required.")
+            return
+        if not context.args:
+            await update.message.reply_text("Usage: `/user <telegram_id>`", parse_mode="Markdown")
+            return
+        try:
+            target_id = int(context.args[0])
+            u = user_manager.get_user(target_id)
+            if not u:
+                await update.message.reply_text("❌ User not found.")
+                return
+            msg = (
+                f"👤 *User Details*\n\n"
+                f"• ID: `{u['telegram_id']}`\n"
+                f"• Name: *{u.get('first_name', '')}*\n"
+                f"• Username: @{u.get('username', 'N/A')}\n"
+                f"• Role: `{u.get('role', 'investor')}`\n"
+                f"• Status: `{u.get('access_status', 'approved')}`\n"
+                f"• Registered: `{u.get('created_at', 'N/A')}`\n"
+                f"• Last Active: `{u.get('last_active', 'N/A')}`\n"
+                f"• Onboarded: `{'Yes' if u.get('onboarding_completed') else 'No'}`\n"
+            )
+            await update.message.reply_text(msg, parse_mode="Markdown")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error fetching user: {e}")
+
+    async def cmd_audit_logs(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.is_admin(update.effective_user.id):
+            await update.message.reply_text("⛔ Administrator access required.")
+            return
+        logs = user_manager.get_audit_logs(limit=15)
+        if not logs:
+            await update.message.reply_text("📋 No administrative audit logs found.")
+            return
+        msg = "📜 *Recent Administrative Audit Logs*\n\n"
+        for l in logs:
+            msg += f"• `[{l.get('timestamp', '')[:19]}]` Admin `{l.get('admin_id')}`: *{l.get('action')}* on user `{l.get('target_user_id')}`\n"
+        await update.message.reply_text(msg, parse_mode="Markdown")
+
+    async def cmd_set_tz(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+        if not user:
+            return
+        if not context.args:
+            await update.message.reply_text("Usage: `/set_timezone <e.g. UTC, America/New_York, Europe/London>`", parse_mode="Markdown")
+            return
+        tz_name = context.args[0].strip()
+        user_manager.set_user_preference(user.id, "timezone", tz_name)
+        await update.message.reply_text(f"✅ Your preferred display timezone is set to `{tz_name}`.", parse_mode="Markdown")
+
+    async def cmd_notifications(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+        if not user:
+            return
+        if not context.args:
+            await update.message.reply_text("Usage: `/notifications <on/off>`", parse_mode="Markdown")
+            return
+        setting = 1 if context.args[0].lower() in ["on", "1", "true", "yes"] else 0
+        user_manager.set_user_preference(user.id, "notifications_enabled", setting)
+        status_txt = "ENABLED" if setting else "DISABLED"
+        await update.message.reply_text(f"✅ Your trade notifications are now *{status_txt}*.", parse_mode="Markdown")
+
+    async def cmd_disclaimer(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        msg = (
+            "⚠️ *BreakingBad V3 Shared Demo Environment Disclaimer*\n\n"
+            "1. **Simulated Demonstration Account**: All operations, signals, and executions run on the owner's IQ Option Demo account.\n"
+            "2. **Risk Disclosure**: Binary options and CFD trading carry high risk. Information provided is for demonstration only.\n"
+            "3. **Zero Credentials Needed**: You will never be asked for your IQ Option password or credentials.\n"
+            "4. **Strict Demo Mode**: Real-money mode is permanently disabled for all users in this environment."
+        )
+        await update.message.reply_text(msg, parse_mode="Markdown")
 
     # ==========================================
     # Callback Query Handler
@@ -1805,10 +2136,75 @@ class TelegramTradingBot:
         except Exception:
             pass
 
-        if not self.is_admin(query.from_user.id):
+        data = query.data
+
+        # Onboarding disclaimer acceptance & informational callbacks
+        if data == "btn_accept_disclaimer":
+            user_manager.complete_user_onboarding(query.from_user.id)
+            await query.edit_message_text(
+                "✅ *Onboarding Completed!*\n\n"
+                "Welcome to the BreakingBad V3 Shared Demonstration Environment.\n"
+                "You now have access to live strategy monitoring, shared demo balances, and verified history.",
+                parse_mode="Markdown"
+            )
+            await query.message.reply_text(
+                "📱 Use the reply menu below to explore BreakingBad V3:",
+                reply_markup=investor_reply_keyboard()
+            )
             return
 
-        data = query.data
+        elif data == "btn_disclaimer":
+            disclaimer_text = (
+                "⚠️ *BreakingBad V3 Shared Demo Environment Disclaimer*\n\n"
+                "1. **Simulated Demonstration Account**: All operations, signals, and executions run on the owner's IQ Option Demo account.\n"
+                "2. **Risk Disclosure**: Binary options and CFD trading carry high risk. Information provided is for demonstration only.\n"
+                "3. **Zero Credentials Needed**: You will never be asked for your IQ Option password or credentials.\n"
+                "4. **Strict Demo Mode**: Real-money mode is permanently disabled for all users in this environment."
+            )
+            await query.message.reply_text(disclaimer_text, parse_mode="Markdown")
+            return
+
+        elif data == "btn_view_config":
+            cfg_text = (
+                "⚙️ *Current Shared Demo Configuration*\n\n"
+                "• Mode: `🟡 PRACTICE (Training)`\n"
+                "• Strategy Engines: `Gold ICT, CRT, S&D Config E, Trendlines`\n"
+                "• Signal Copiers: `CallistoFx, Gold Pips Hunter, Polycarp VIP Blitz`\n"
+                "• Base Blitz Stake: `$2.00` | Blitz Martingale: `2-Step Smart Recovery`\n"
+                "• Forex Sizing: `1.00 Lot` | `100x Leverage`\n"
+                "• Account Protection: `Prop Firm 5K Guardian`\n\n"
+                "🛡️ *Note*: Global trading parameters are managed by the administrator."
+            )
+            await query.message.reply_text(cfg_text, parse_mode="Markdown")
+            return
+
+        elif data == "btn_investor_menu":
+            text = self.build_status_text()
+            await query.edit_message_text(text=text, reply_markup=investor_main_menu_keyboard(), parse_mode="Markdown")
+            return
+
+        # Check user authorization for standard buttons
+        user = query.from_user
+        allowed, status, _ = user_manager.check_access(user.id, user.username, user.first_name)
+        if not allowed:
+            try:
+                await query.answer("⛔ Access denied or suspended.", show_alert=True)
+            except Exception:
+                pass
+            return
+
+        investor_allowed_prefixes = (
+            "btn_status", "btn_main_menu", "btn_investor_menu", "hist_", "history_cat_",
+            "btn_active_trades", "btn_news_menu", "btn_sessions", "btn_mission_menu",
+            "btn_snd_menu", "btn_trendline_menu", "btn_crt_menu", "btn_ict_menu",
+            "btn_prop_menu", "btn_disclaimer", "btn_view_config", "btn_accept_disclaimer"
+        )
+        if not self.is_admin(user.id) and not any(data.startswith(p) for p in investor_allowed_prefixes):
+            try:
+                await query.answer("⛔ Administrator access required for this action.", show_alert=True)
+            except Exception:
+                pass
+            return
 
         if not data.startswith("btn_active_trades"):
             self.stop_active_view_refresh_task()
@@ -1819,11 +2215,13 @@ class TelegramTradingBot:
         # Main Navigation
         if data == "btn_main_menu":
             text = self.build_status_text()
-            await query.edit_message_text(text=text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
+            kb = main_menu_keyboard(is_admin=True) if self.is_admin(user.id) else investor_main_menu_keyboard()
+            await query.edit_message_text(text=text, reply_markup=kb, parse_mode="Markdown")
 
         elif data == "btn_status":
             text = self.build_status_text()
-            await query.edit_message_text(text=text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
+            kb = main_menu_keyboard(is_admin=True) if self.is_admin(user.id) else investor_main_menu_keyboard()
+            await query.edit_message_text(text=text, reply_markup=kb, parse_mode="Markdown")
 
         # Channels Menu
         elif data == "btn_channels_menu":
@@ -2363,32 +2761,14 @@ class TelegramTradingBot:
             )
 
         elif data == "set_acc_regular":
-            self.account_type = "regular"
-            bal_fx = self.forex_mcp.get_real_balance()
-            if bal_fx:
-                bid = bal_fx["balance_id"]
-                self.ict_engine.set_balance(bid, "regular")
-                if self.straddle_engine:
-                    self.straddle_engine.set_balance(bid, "regular")
-                if self.crt_engine:
-                    self.crt_engine.set_balance(bid, "regular")
-                if self.snd_engine:
-                    self.snd_engine.set_balance(bid, "regular")
-                if self.trendline_engine:
-                    self.trendline_engine.set_balance(bid, "regular")
-                for c in self.channel_mgr.copiers.values():
-                    if hasattr(c, "set_balance"):
-                        c.set_balance(bid, "regular")
-
-            bal_blitz = self.blitz_mcp.get_real_balance()
-            if bal_blitz:
-                p_copier = self.channel_mgr.get_copier("polycarpvip")
-                if p_copier and hasattr(p_copier, "set_balance"):
-                    p_copier.set_balance(bal_blitz["balance_id"], "regular")
-
+            try:
+                await query.answer("⚠️ Strict Demo Mode Enforced. Real accounts disabled.", show_alert=True)
+            except Exception:
+                pass
             await query.edit_message_text(
-                "🚨 Switched to *REAL MONEY (Regular)* Account mode!",
-                reply_markup=settings_menu_keyboard(self.account_type, self.lots, self.leverage, self.blitz_stake),
+                "⚠️ *Strict Demo Mode Enforced*\n"
+                "Switching to real money accounts is strictly disabled in this shared demonstration environment.",
+                reply_markup=settings_menu_keyboard("training", self.lots, self.leverage, self.blitz_stake),
                 parse_mode="Markdown"
             )
 
@@ -2566,6 +2946,15 @@ class TelegramTradingBot:
         self.app.add_handler(CommandHandler("exit", self.cmd_close))
         self.app.add_handler(CommandHandler("closeall", self.cmd_closeall))
         self.app.add_handler(CommandHandler("help", self.cmd_help))
+        self.app.add_handler(CommandHandler("users", self.cmd_users))
+        self.app.add_handler(CommandHandler("suspend", self.cmd_suspend))
+        self.app.add_handler(CommandHandler("activate", self.cmd_activate))
+        self.app.add_handler(CommandHandler("user", self.cmd_user))
+        self.app.add_handler(CommandHandler("audit_logs", self.cmd_audit_logs))
+        self.app.add_handler(CommandHandler("set_timezone", self.cmd_set_tz))
+        self.app.add_handler(CommandHandler("timezone", self.cmd_set_tz))
+        self.app.add_handler(CommandHandler("notifications", self.cmd_notifications))
+        self.app.add_handler(CommandHandler("disclaimer", self.cmd_disclaimer))
         self.app.add_handler(CallbackQueryHandler(self.on_button_click))
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_reply_button))
 

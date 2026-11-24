@@ -12,6 +12,7 @@ import os
 import sys
 import logging
 import asyncio
+import httpx
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List, Set, Tuple, Union, Callable
 

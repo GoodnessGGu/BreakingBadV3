@@ -132,6 +132,8 @@ class CRTStrategyEngine:
         self.unavailable_cooldown: Dict[str, float] = {}
         self.placed_position_ids: Set[str] = set()
         self.logged_trade_ids: Set[str] = set()
+        self.last_trade_bar: Dict[str, str] = {}
+        self.last_trade_time: Dict[str, float] = {}
 
     def set_notification_callback(self, cb: Callable):
         self.notify_cb = cb
@@ -251,6 +253,10 @@ class CRTStrategyEngine:
         if time.time() < self.unavailable_cooldown.get(symbol, 0.0):
             return
 
+        # Cooldown guard: enforce spacing between trades on the same symbol (5 mins)
+        if (time.time() - self.last_trade_time.get(symbol, 0.0)) < 300:
+            return
+
         profile = CRT_INSTRUMENT_PROFILES[symbol]
         asset_id = profile["asset_id"]
 
@@ -258,10 +264,46 @@ class CRTStrategyEngine:
         if not cur_px or cur_px.get("mid", 0.0) <= 0:
             return
 
-        # Manage active dual-ticket trade if open
+        # 1. Manage active dual-ticket trade if open in memory
         if self.active_trades.get(symbol):
             await self._manage_active_trade(symbol, cur_px)
             return
+
+        # 2. Broker-Level Position Check: NEVER open duplicate if broker already has open positions
+        try:
+            open_positions = self.mcp.list_positions(balance_id=self.balance_id)
+            if open_positions is not None:
+                asset_open = [p for p in open_positions if p.get("asset_id") == asset_id]
+                if asset_open:
+                    logger.info(f"🔄 [CRTEngine] Found {len(asset_open)} existing broker position(s) for {symbol} (Asset {asset_id}). Reconnecting active trade tracking.")
+                    first_pos = asset_open[0]
+                    p1 = str(asset_open[0].get("position_id") or asset_open[0].get("id"))
+                    p2 = str(asset_open[1].get("position_id") or asset_open[1].get("id")) if len(asset_open) >= 2 else None
+                    side = (first_pos.get("direction") or first_pos.get("side") or "buy").upper()
+                    entry_px = float(first_pos.get("open_price") or cur_px["mid"])
+                    sl_px = float(first_pos.get("stop_loss") or 0.0)
+                    tp_px = float(first_pos.get("take_profit") or 0.0)
+                    self.active_trades[symbol] = {
+                        "symbol": symbol,
+                        "side": side,
+                        "entry_price": entry_px,
+                        "sl_price": sl_px,
+                        "initial_sl": sl_px,
+                        "tp1": tp_px,
+                        "tp2": tp_px,
+                        "leg1_pos_id": p1 if p2 else None,
+                        "leg2_pos_id": p2 if p2 else p1,
+                        "lot_tp1": float(first_pos.get("count") or self.lots * 0.5),
+                        "lot_runner": float(asset_open[1].get("count") if p2 else first_pos.get("count") or self.lots * 0.5),
+                        "tp1_closed": p2 is None,
+                        "runner_at_be": False,
+                        "opened_at": time.time(),
+                        "group_id": f"crt_{symbol}_{int(time.time())}"
+                    }
+                    await self._manage_active_trade(symbol, cur_px)
+                    return
+        except Exception as be_err:
+            logger.debug(f"[CRTEngine] Broker open position check error for {symbol}: {be_err}")
 
         in_kz, kz_name = self.is_killzone_active(symbol)
         if not in_kz:
@@ -281,6 +323,11 @@ class CRTStrategyEngine:
             logger.debug(f"[CRTEngine] 5M candle fetch error for {symbol}: {e}")
             return
         if not raw_5m or len(raw_5m) < 15:
+            return
+
+        # Bar-Lock: Max 1 execution per 5-Minute Candle Bar
+        cur_bar_time = str(raw_5m[-1].get("from") or raw_5m[-1].get("time") or raw_5m[-1].get("to") or "")
+        if cur_bar_time and self.last_trade_bar.get(symbol) == cur_bar_time:
             return
 
         df_5m = pd.DataFrame([{
@@ -347,7 +394,7 @@ class CRTStrategyEngine:
                 if risk > sl_buffer:
                     tp1 = round(entry + risk, digits)
                     tp2 = round(entry + (risk * target_rr), digits)
-                    await self._execute_dual_ticket_crt_trade(symbol, "BUY", entry, sl, tp1, tp2, anchor_mid, kz_name, df_5m)
+                    await self._execute_dual_ticket_crt_trade(symbol, "BUY", entry, sl, tp1, tp2, anchor_mid, kz_name, df_5m, bar_time=cur_bar_time)
 
         # --- B. Bearish CRT: Sweep Anchor High -> Displacement Reclaim DOWN ---
         sweep_u = recent_high - anchor_high
@@ -361,11 +408,11 @@ class CRTStrategyEngine:
                 if risk > sl_buffer:
                     tp1 = round(entry - risk, digits)
                     tp2 = round(entry - (risk * target_rr), digits)
-                    await self._execute_dual_ticket_crt_trade(symbol, "SELL", entry, sl, tp1, tp2, anchor_mid, kz_name, df_5m)
+                    await self._execute_dual_ticket_crt_trade(symbol, "SELL", entry, sl, tp1, tp2, anchor_mid, kz_name, df_5m, bar_time=cur_bar_time)
 
     async def _execute_dual_ticket_crt_trade(
         self, symbol: str, side: str, entry: float, sl: float, tp1: float, tp2: float,
-        mid: float, kz_name: str, df: pd.DataFrame
+        mid: float, kz_name: str, df: pd.DataFrame, bar_time: Optional[str] = None
     ):
         profile = CRT_INSTRUMENT_PROFILES[symbol]
         instrument_id = profile["instrument_id"]
@@ -444,8 +491,28 @@ class CRTStrategyEngine:
 
         pos1_id = res1.get("position_id") or res1.get("order_id") if isinstance(res1, dict) else None
         pos2_id = res2.get("position_id") or res2.get("order_id") if isinstance(res2, dict) else None
+
+        # Allow broker 1.0s to register actual position IDs
+        await asyncio.sleep(1.0)
+        try:
+            open_pos = self.mcp.list_positions(balance_id=self.balance_id)
+            if open_pos:
+                asset_open = [p for p in open_pos if p.get("asset_id") == asset_id]
+                if len(asset_open) >= 2:
+                    p1 = asset_open[0].get("position_id") or asset_open[0].get("id")
+                    p2 = asset_open[1].get("position_id") or asset_open[1].get("id")
+                    if p1: pos1_id = p1
+                    if p2: pos2_id = p2
+                elif len(asset_open) == 1:
+                    p2 = asset_open[0].get("position_id") or asset_open[0].get("id")
+                    if p2: pos2_id = p2
+        except Exception as res_err:
+            logger.debug(f"[CRTEngine] Post-entry position resolution error: {res_err}")
+
         if pos1_id: self.placed_position_ids.add(str(pos1_id))
         if pos2_id: self.placed_position_ids.add(str(pos2_id))
+        if bar_time: self.last_trade_bar[symbol] = bar_time
+        self.last_trade_time[symbol] = time.time()
 
         group_id = f"crt_{symbol}_{int(time.time())}"
         if hasattr(self, "trade_ledger") and self.trade_ledger:
@@ -543,12 +610,48 @@ class CRTStrategyEngine:
             logger.warning(f"⚠️ [CRTEngine] list_positions failed for {symbol} - keeping trade active (will retry next tick)")
             return
 
-        open_ids = [str(p.get("position_id") or p.get("id")) for p in open_positions]
+        # Build comprehensive set of all open IDs (position_id, id, order_id)
+        open_ids = set()
+        for p in open_positions:
+            for k in ["position_id", "id", "order_id"]:
+                v = p.get(k)
+                if v:
+                    open_ids.add(str(v))
 
         leg1_id = str(trade.get("leg1_pos_id"))
         leg2_id = str(trade.get("leg2_pos_id"))
+
+        # Re-resolve if IDs still match broker open positions by asset_id
+        asset_open = [p for p in open_positions if p.get("asset_id") == profile.get("asset_id")]
+        if (leg1_id not in open_ids and leg2_id not in open_ids) and asset_open:
+            if len(asset_open) >= 2:
+                p1 = str(asset_open[0].get("position_id") or asset_open[0].get("id"))
+                p2 = str(asset_open[1].get("position_id") or asset_open[1].get("id"))
+                trade["leg1_pos_id"] = p1
+                trade["leg2_pos_id"] = p2
+                leg1_id, leg2_id = p1, p2
+                open_ids.add(p1)
+                open_ids.add(p2)
+            elif len(asset_open) == 1:
+                p2 = str(asset_open[0].get("position_id") or asset_open[0].get("id"))
+                trade["leg1_pos_id"] = None
+                trade["leg2_pos_id"] = p2
+                leg1_id = "None"
+                leg2_id = p2
+                open_ids.add(p2)
+
         leg1_still_open = leg1_id in open_ids and leg1_id != "None"
         leg2_still_open = leg2_id in open_ids and leg2_id != "None"
+
+        # Fallback safeguard: If asset_open still has positions, trade is NOT closed!
+        if not leg1_still_open and not leg2_still_open and asset_open:
+            p_rem = str(asset_open[0].get("position_id") or asset_open[0].get("id"))
+            trade["leg1_pos_id"] = None
+            trade["leg2_pos_id"] = p_rem
+            leg1_id = "None"
+            leg2_id = p_rem
+            leg2_still_open = True
+            open_ids.add(p_rem)
 
         # 1. Check if Leg 1 (TP1) closed while Leg 2 is still running
         if not trade.get("tp1_closed"):
@@ -604,6 +707,10 @@ class CRTStrategyEngine:
 
         # 2. Check if all legs are closed
         if not leg1_still_open and not leg2_still_open:
+            if asset_open:
+                logger.warning(f"⚠️ [CRTEngine] {symbol} legs {leg1_id}/{leg2_id} not in open_ids, but {len(asset_open)} positions remain on broker. Keeping active.")
+                return
+
             logger.info(f"🏁 [CRTEngine] {symbol} All trade legs closed. Cycle complete.")
 
             # Log Leg 2 (Runner) to Google Sheets
@@ -633,6 +740,7 @@ class CRTStrategyEngine:
                 )
 
             self.active_trades[symbol] = None
+            self.last_trade_time[symbol] = time.time()
 
     async def _log_ticket_closure(
         self, symbol: str, tag: str, pos_id: Any, lots: float,

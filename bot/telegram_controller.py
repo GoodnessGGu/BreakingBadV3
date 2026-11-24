@@ -2057,8 +2057,8 @@ class TelegramTradingBot:
         for u in users[:25]:
             status_icon = "🟢" if u["access_status"] == "approved" else "🟡" if u["access_status"] == "pending" else "🔴"
             role_icon = "👑" if u["role"] == "admin" else "👤"
-            raw_uname = u.get("username") or ""
-            safe_uname = f"@{raw_uname.replace('_', '\\_')}" if raw_uname else "No username"
+            raw_uname = (u.get("username") or "").replace("_", "\\_")
+            safe_uname = f"@{raw_uname}" if raw_uname else "No username"
             safe_fname = (u.get("first_name") or "").replace("_", "\\_").replace("*", "\\*")
             msg += f"{status_icon} {role_icon} *{safe_fname}* ({safe_uname})\n"
             msg += f"   ID: `{u['telegram_id']}` | Status: `{u['access_status']}`\n"
@@ -2107,8 +2107,8 @@ class TelegramTradingBot:
                 await update.message.reply_text("❌ User not found.")
                 return
             safe_fname = (u.get("first_name") or "").replace("_", "\\_").replace("*", "\\*")
-            raw_uname = u.get("username") or ""
-            safe_uname = f"@{raw_uname.replace('_', '\\_')}" if raw_uname else "N/A"
+            raw_uname = (u.get("username") or "").replace("_", "\\_")
+            safe_uname = f"@{raw_uname}" if raw_uname else "N/A"
             msg = (
                 f"👤 *User Details*\n\n"
                 f"• ID: `{u['telegram_id']}`\n"

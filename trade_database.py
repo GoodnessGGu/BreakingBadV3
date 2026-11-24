@@ -806,6 +806,23 @@ class TradeDatabase:
             logger.error(f"❌ Failed to clear trade database history: {e}")
             return False
 
+    def clear_trades_before_today(self) -> bool:
+        """Purge trades before today while preserving today's trades and user tables."""
+        try:
+            today_start = datetime.now(timezone.utc).strftime("%Y-%m-%d 00:00:00")
+            with self._lock:
+                conn = sqlite3.connect(self.db_path, timeout=30.0)
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM trades WHERE created_at < ?", (today_start,))
+                cursor.execute("DELETE FROM virtual_trades WHERE created_at < ?", (today_start,))
+                conn.commit()
+                conn.close()
+                logger.info(f"🧹 [TradeDatabase] Cleared trades prior to {today_start} UTC")
+                return True
+        except Exception as e:
+            logger.error(f"❌ Failed to clear pre-today trades: {e}")
+            return False
+
 
 # Global database instance
 db = TradeDatabase()

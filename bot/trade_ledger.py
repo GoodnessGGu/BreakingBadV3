@@ -137,6 +137,25 @@ class TradeLedger:
             logger.error(f"[Ledger] Error clearing trade history: {e}")
             return False
 
+    def clear_trades_before_today(self) -> bool:
+        """Purges trades closed/opened before today 00:00:00 UTC and sets cleared_at to start of today."""
+        try:
+            today_start = datetime.now(timezone.utc).strftime("%Y-%m-%d 00:00:00")
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    DELETE FROM trades 
+                    WHERE (close_time_utc IS NOT NULL AND close_time_utc < ?)
+                       OR (close_time_utc IS NULL AND open_time_utc < ?)
+                """, (today_start, today_start))
+                cursor.execute("INSERT OR REPLACE INTO ledger_meta (key, value) VALUES ('cleared_at', ?)", (today_start,))
+                conn.commit()
+            logger.info(f"🧹 [Ledger] Cleared pre-today trades (prior to {today_start} UTC), retaining only today's trades")
+            return True
+        except Exception as e:
+            logger.error(f"[Ledger] Error clearing pre-today trades: {e}")
+            return False
+
     def record_open(
         self,
         position_id: Any,

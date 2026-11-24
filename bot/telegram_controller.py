@@ -166,6 +166,8 @@ class TelegramTradingBot:
 
         # Persistent Trade Ledger (Addendum A)
         self.trade_ledger = TradeLedger()
+        self.trade_ledger.clear_trades_before_today()
+        db.clear_trades_before_today()
         for eng in (self.ict_engine, self.crt_engine, self.snd_engine, self.trendline_engine, self.straddle_engine):
             if eng:
                 if hasattr(eng, "set_trade_ledger"):
@@ -1221,7 +1223,7 @@ class TelegramTradingBot:
             await update.message.reply_text("⛔ Unauthorized. Please send /start.")
             return
         cat = "all"
-        per = "all"
+        per = "today"
         pg = 1
         valid_cats = ["all", "cfd", "ict", "crt", "trendline", "snd", "blitz", "manual"]
         if context.args:
@@ -1251,7 +1253,7 @@ class TelegramTradingBot:
             )
 
     async def cmd_clear_history(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Purges recorded trades and resets history to start fresh."""
+        """Purges recorded trades prior to today and resets history to retain only today's trades."""
         user = update.effective_user
         if not user or not self.is_admin(user.id):
             if update.message:
@@ -1259,14 +1261,14 @@ class TelegramTradingBot:
             return
 
         if hasattr(self, "trade_ledger") and self.trade_ledger:
-            self.trade_ledger.clear_all_trades()
-        db.clear_trade_history()
-        user_manager.log_admin_action(user.id, "clear_trade_history", "Cleared ledger and trade databases")
+            self.trade_ledger.clear_trades_before_today()
+        db.clear_trades_before_today()
+        user_manager.log_admin_action(user.id, "clear_trade_history", "Cleared pre-today trades, retaining only today")
         if update.message:
             await update.message.reply_text(
                 "🧹 *Trade History Cleared Successfully!*\n\n"
-                "All recorded CFD, options, and persistent ledger trades have been purged. "
-                "History views will start fresh from this moment forward.",
+                "All trades prior to today have been purged. "
+                "The history view now retains and displays **only trades from today**.",
                 parse_mode="Markdown"
             )
 
@@ -2063,7 +2065,12 @@ class TelegramTradingBot:
             msg += f"{status_icon} {role_icon} *{safe_fname}* ({safe_uname})\n"
             msg += f"   ID: `{u['telegram_id']}` | Status: `{u['access_status']}`\n"
         msg += "\n💡 Admin commands:\n• `/suspend <id>`\n• `/activate <id>`\n• `/user <id>`\n• `/audit_logs`"
-        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=user_management_keyboard())
+        try:
+            await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=user_management_keyboard())
+        except Exception as e:
+            logger.warning(f"Markdown send failed in cmd_users: {e}. Retrying without markdown.")
+            plain_msg = msg.replace("*", "").replace("`", "").replace("\\_", "_")
+            await update.message.reply_text(plain_msg, reply_markup=user_management_keyboard())
 
     async def cmd_suspend(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.is_admin(update.effective_user.id):
@@ -2342,12 +2349,12 @@ class TelegramTradingBot:
                 await query.answer("⛔ Administrator access required.", show_alert=True)
                 return
             if hasattr(self, "trade_ledger") and self.trade_ledger:
-                self.trade_ledger.clear_all_trades()
-            db.clear_trade_history()
-            user_manager.log_admin_action(user.id, "clear_trade_history", "Cleared ledger and trade databases via Telegram button")
-            await query.answer("🧹 Trade history cleared successfully!", show_alert=True)
-            res = self.build_history_view(category="all", period="all", page=1)
-            kb = history_menu_keyboard(category="all", period="all", page=1, total_pages=res.total_pages, is_admin=True)
+                self.trade_ledger.clear_trades_before_today()
+            db.clear_trades_before_today()
+            user_manager.log_admin_action(user.id, "clear_trade_history", "Cleared pre-today trades, retaining only today via Telegram button")
+            await query.answer("🧹 Cleared pre-today trades! Retaining only today's trades.", show_alert=True)
+            res = self.build_history_view(category="all", period="today", page=1)
+            kb = history_menu_keyboard(category="all", period="today", page=1, total_pages=res.total_pages, is_admin=True)
             await query.edit_message_text(str(res), reply_markup=kb, parse_mode="Markdown")
             return
 

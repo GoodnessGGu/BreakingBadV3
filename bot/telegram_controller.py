@@ -28,6 +28,7 @@ from strategies.ict_engine import ICTStrategyEngine, INSTRUMENT_PROFILES
 from clients.forex_mcp_client import IQForexMCPClient
 from clients.blitz_mcp_client import IQBlitzMCPClient
 from bot.trade_ledger import TradeLedger
+from trade_database import db
 from bot.keyboards import (
     main_menu_keyboard, channels_menu_keyboard,
     ict_menu_keyboard, settings_menu_keyboard, close_all_confirm_keyboard,

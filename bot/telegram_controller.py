@@ -2057,8 +2057,10 @@ class TelegramTradingBot:
         for u in users[:25]:
             status_icon = "🟢" if u["access_status"] == "approved" else "🟡" if u["access_status"] == "pending" else "🔴"
             role_icon = "👑" if u["role"] == "admin" else "👤"
-            uname = f"@{u['username']}" if u["username"] else "No username"
-            msg += f"{status_icon} {role_icon} *{u['first_name']}* ({uname})\n"
+            raw_uname = u.get("username") or ""
+            safe_uname = f"@{raw_uname.replace('_', '\\_')}" if raw_uname else "No username"
+            safe_fname = (u.get("first_name") or "").replace("_", "\\_").replace("*", "\\*")
+            msg += f"{status_icon} {role_icon} *{safe_fname}* ({safe_uname})\n"
             msg += f"   ID: `{u['telegram_id']}` | Status: `{u['access_status']}`\n"
         msg += "\n💡 Admin commands:\n• `/suspend <id>`\n• `/activate <id>`\n• `/user <id>`\n• `/audit_logs`"
         await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=user_management_keyboard())
@@ -2104,11 +2106,14 @@ class TelegramTradingBot:
             if not u:
                 await update.message.reply_text("❌ User not found.")
                 return
+            safe_fname = (u.get("first_name") or "").replace("_", "\\_").replace("*", "\\*")
+            raw_uname = u.get("username") or ""
+            safe_uname = f"@{raw_uname.replace('_', '\\_')}" if raw_uname else "N/A"
             msg = (
                 f"👤 *User Details*\n\n"
                 f"• ID: `{u['telegram_id']}`\n"
-                f"• Name: *{u.get('first_name', '')}*\n"
-                f"• Username: @{u.get('username', 'N/A')}\n"
+                f"• Name: *{safe_fname}*\n"
+                f"• Username: {safe_uname}\n"
                 f"• Role: `{u.get('role', 'investor')}`\n"
                 f"• Status: `{u.get('access_status', 'approved')}`\n"
                 f"• Registered: `{u.get('created_at', 'N/A')}`\n"

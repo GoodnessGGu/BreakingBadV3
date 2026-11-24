@@ -124,8 +124,8 @@ class PolycarpCopier(BaseCopier):
         self.stake_amount = max(1.0, round(float(stake), 2))
         logger.info(f"⚡ [Polycarp] Blitz base stake set to: ${self.stake_amount:.2f}")
 
-    async def handle_message(self, text: str, message_id: int, event: Any = None, msg_date: Any = None):
-        if not self.is_enabled:
+    async def handle_message(self, text: str, message_id: int, event: Any = None, msg_date: Any = None, is_startup_scan: bool = False):
+        if not self.is_enabled or is_startup_scan:
             return
         if message_id in self.processed_msg_ids:
             return
@@ -158,7 +158,7 @@ class PolycarpCopier(BaseCopier):
             if delay > 0 and delay <= 900:
                 logger.info(f"⏳ [Polycarp] Signal scheduled in {int(delay)}s at {entry_time.strftime('%H:%M:%S')}")
                 await self.notify(
-                    f"⏳ **[POLYCARP VIP SCHEDULED] {pair} {direction.upper()} in {int(delay)}s**\n\n"
+                    f"⏳ **[BLITZ ORDER SCHEDULED] {pair} {direction.upper()} in {int(delay)}s**\n\n"
                     f"• Pair     : `{pair}`\n"
                     f"• Direction: `{direction.upper()}`\n"
                     f"• Expiry   : `{sig['expiry_mins']} min`\n"
@@ -167,14 +167,14 @@ class PolycarpCopier(BaseCopier):
                 await asyncio.sleep(delay)
             elif delay < -120:
                 logger.warning(f"⏰ [Polycarp] Signal arrived too late ({int(-delay)}s past entry). Skipping.")
-                await self.notify(f"⚠️ **[POLYCARP] Skipped Expired Signal** (`{pair}` was {int(-delay)}s ago).")
+                await self.notify(f"⚠️ **[BLITZ] Skipped Expired Signal** (`{pair}` was {int(-delay)}s ago).")
                 return
 
         # 2. Match Asset in Blitz MCP
         asset = self.blitz.find_asset(pair)
         if not asset:
             logger.error(f"❌ [Polycarp] Asset not found in Blitz MCP for '{pair}'")
-            await self.notify(f"❌ **[POLYCARP] Asset '{pair}' Not Found** on Blitz engine.")
+            await self.notify(f"❌ **[BLITZ] Asset '{pair}' Not Found** on Blitz engine.")
             return
 
         asset_id = asset.get("asset_id")
@@ -184,7 +184,7 @@ class PolycarpCopier(BaseCopier):
 
         if not is_open:
             logger.warning(f"⚠️ [Polycarp] Asset {pair} (ID: {asset_id}) is currently CLOSED on Blitz options.")
-            await self.notify(f"⚠️ **[POLYCARP] {pair} Currently CLOSED** for trading.")
+            await self.notify(f"⚠️ **[BLITZ] {pair} Currently CLOSED** for trading.")
             return
 
         # Match closest expiration
@@ -197,7 +197,7 @@ class PolycarpCopier(BaseCopier):
         gale_tag = f" [Gale {gale_level}]" if gale_level > 0 else ""
         logger.info(f"🚀 [Polycarp] Executing Blitz trade{gale_tag}: {pair} (ID: {asset_id}) {direction.upper()} ${stake} ({chosen_exp}s)")
         await self.notify(
-            f"⚡ **[POLYCARP VIP EXECUTING] {pair} {direction.upper()} ${stake:.2f}{gale_tag}**\n\n"
+            f"⚡ **[BLITZ EXECUTING] {pair} {direction.upper()} ${stake:.2f}{gale_tag}**\n\n"
             f"• Asset    : `{asset.get('name')}`\n"
             f"• Direction: `{direction.upper()}`\n"
             f"• Stake    : `${stake:.2f}`\n"
@@ -229,11 +229,11 @@ class PolycarpCopier(BaseCopier):
                 "opened_at": time.time(),
                 "sig": sig
             }
-            await self.notify(f"✅ **[POLYCARP OPENED] #{pos_id} {pair} {direction.upper()}{gale_tag}**")
+            await self.notify(f"✅ **[BLITZ OPENED] #{pos_id} {pair} {direction.upper()}{gale_tag}**")
             asyncio.create_task(self.monitor_settlement(pos_id, chosen_exp, gale_level))
         else:
             logger.error(f"❌ [Polycarp] Blitz trade failed: {res}")
-            await self.notify(f"❌ **[POLYCARP FAILED]**: {res.get('error', res)}")
+            await self.notify(f"❌ **[BLITZ FAILED]**: {res.get('error', res)}")
 
     async def monitor_settlement(self, pos_id: int, exp_secs: int, gale_level: int = 0):
         """Wait for position expiration, handle result, and execute Martingale if loss."""
@@ -267,7 +267,7 @@ class PolycarpCopier(BaseCopier):
             if is_win:
                 logger.info(f"🏆 [Polycarp] WIN on #{pos_id}{gale_label}! Profit: +${pnl:.2f}")
                 await self.notify(
-                    f"🏆 **[POLYCARP VIP WIN{gale_label}] +${pnl:.2f}**\n\n"
+                    f"🏆 **[BLITZ WIN{gale_label}] +${pnl:.2f}**\n\n"
                     f"• Position : `#{pos_id}` ({pair} `{direction.upper()}`)\n"
                     f"• Net PnL  : `+${pnl:.2f}`\n"
                     f"🎯 _Martingale reset to Base._"
@@ -278,7 +278,7 @@ class PolycarpCopier(BaseCopier):
                     next_gale = gale_level + 1
                     next_stake = round(self.stake_amount * (self.martingale_multiplier ** next_gale), 2)
                     await self.notify(
-                        f"🔄 **[POLYCARP MARTINGALE — GALE {next_gale}/{self.max_gales}]**\n\n"
+                        f"🔄 **[BLITZ RECOVERY — STEP {next_gale}/{self.max_gales}]**\n\n"
                         f"• Loss on `#{pos_id}`{gale_label}\n"
                         f"• Re-entering `{pair}` `{direction.upper()}` with `${next_stake:.2f}`..."
                     )
@@ -286,7 +286,7 @@ class PolycarpCopier(BaseCopier):
                     asyncio.create_task(self.schedule_and_execute(sig, gale_level=next_gale))
                 else:
                     await self.notify(
-                        f"❌ **[POLYCARP MAX GALE REACHED] {pair}**\n\n"
+                        f"❌ **[BLITZ CYCLE COMPLETED] {pair}**\n\n"
                         f"• Position `#{pos_id}` ended in loss after {self.max_gales} recovery step(s).\n"
                         f"• Stopping Martingale sequence."
                     )
@@ -313,7 +313,7 @@ class PolycarpCopier(BaseCopier):
                     next_gale = gale_level + 1
                     next_stake = round(self.stake_amount * (self.martingale_multiplier ** next_gale), 2)
                     await self.notify(
-                        f"🔄 **[POLYCARP MARTINGALE — GALE {next_gale}/{self.max_gales}]**\n\n"
+                        f"🔄 **[BLITZ RECOVERY — STEP {next_gale}/{self.max_gales}]**\n\n"
                         f"• Loss on `#{pos_id}`{gale_label}\n"
                         f"• Re-entering `{pair}` `{direction.upper()}` with `${next_stake:.2f}`..."
                     )
@@ -321,7 +321,7 @@ class PolycarpCopier(BaseCopier):
                     asyncio.create_task(self.schedule_and_execute(sig, gale_level=next_gale))
                 else:
                     await self.notify(
-                        f"❌ **[POLYCARP MAX GALE REACHED] {pair}**\n\n"
+                        f"❌ **[BLITZ CYCLE COMPLETED] {pair}**\n\n"
                         f"• Position `#{pos_id}` ended in loss after {self.max_gales} recovery step(s).\n"
                         f"• Stopping Martingale sequence."
                     )

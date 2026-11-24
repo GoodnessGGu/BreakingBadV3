@@ -103,7 +103,39 @@ class TradeLedger:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_close_time ON trades(close_time_utc)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_group_id ON trades(group_id)")
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS ledger_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
+                )
+            """)
             conn.commit()
+
+    def get_cleared_at(self) -> Optional[str]:
+        """Returns the UTC timestamp string when history was last cleared, if any."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT value FROM ledger_meta WHERE key = 'cleared_at'")
+                row = cursor.fetchone()
+                return row["value"] if row else None
+        except Exception:
+            return None
+
+    def clear_all_trades(self) -> bool:
+        """Purges all trade rows and records the cleared_at timestamp."""
+        try:
+            now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM trades")
+                cursor.execute("INSERT OR REPLACE INTO ledger_meta (key, value) VALUES ('cleared_at', ?)", (now_utc,))
+                conn.commit()
+            logger.info(f"🧹 [Ledger] Cleared all trade history at {now_utc} UTC")
+            return True
+        except Exception as e:
+            logger.error(f"[Ledger] Error clearing trade history: {e}")
+            return False
 
     def record_open(
         self,
@@ -466,6 +498,7 @@ class TradeLedger:
 
         updated_count = 0
         inserted_count = 0
+        cleared_at = self.get_cleared_at()
 
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -488,6 +521,12 @@ class TradeLedger:
                 reason = b_trade.get("close_reason") or "broker_close"
                 close_time = _parse_to_utc_string(b_trade.get("close_time") or b_trade.get("time"))
                 open_time = _parse_to_utc_string(b_trade.get("open_time") or b_trade.get("time"))
+
+                # Skip historical broker trades closed before the last clear
+                if cleared_at:
+                    trade_ref = close_time or open_time
+                    if trade_ref and trade_ref < cleared_at:
+                        continue
 
                 cursor.execute("SELECT position_id, pnl FROM trades WHERE position_id = ?", (pid,))
                 row = cursor.fetchone()

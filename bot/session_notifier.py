@@ -152,8 +152,7 @@ class MarketSessionNotifier:
                 f"👑 **Asset**: Spot Gold (`XAUUSD` / Marginal CFD #74)\n\n"
                 f"🎯 **Trading Engines Activated**:\n"
                 f"  • 🤖 **ICT Autonomous SMC Engine** (Scanning 15M Sweeps & FVGs)\n"
-                f"  • 📡 **Gold Pips Hunter Signal Copier** (Listening for live setups)\n"
-                f"  • 📊 **CallistoFx Zone Watcher**\n\n"
+                f"  • 📊 **Institutional Gold Zone & Scalp Engine**\n\n"
                 f"💰 Let's have a profitable and disciplined week!"
             )
             await trigger_event("gold_week_open", msg)

@@ -225,7 +225,7 @@ class CallistoCopier(BaseCopier):
             if opp_pos:
                 pos_id = opp_pos.get("position_id") or opp_pos.get("id")
                 logger.warning(f"⚠️ [Callisto] Skipped {side} — An active {opp_side.upper()} position (#{pos_id}) already exists on Gold.")
-                await self.notify(f"⚠️ [Callisto] Skipped {side} — Opposing {opp_side.upper()} position #{pos_id} already active on Gold.")
+                await self.notify(f"⚠️ [Gold Zone] Skipped {side} — Opposing {opp_side.upper()} position #{pos_id} already active on Gold.")
                 return
         except Exception as e:
             logger.warning(f"[Callisto] Error checking open positions: {e}")
@@ -255,8 +255,8 @@ class CallistoCopier(BaseCopier):
             open_pos = self.mcp.list_positions(balance_id=self.balance_id) or []
             allowed, reason, rec_lots = self.prop_guardian.can_execute_trade("XAUUSD", len(open_pos))
             if not allowed:
-                logger.warning(f"🛡️ [PropFirm Guard] Callisto trade rejected: {reason}")
-                await self.notify(f"🛡️ **[PROP FIRM GUARD] Callisto Trade Skipped**\n\nReason: {reason}")
+                logger.warning(f"🛡️ [PropFirm Guard] Gold trade rejected: {reason}")
+                await self.notify(f"🛡️ **[PROP FIRM GUARD] Gold Trade Skipped**\n\nReason: {reason}")
                 return
             if rec_lots > 0:
                 target_lots = rec_lots
@@ -287,7 +287,7 @@ class CallistoCopier(BaseCopier):
 
         plan_desc = "\n".join([f"  • {o['tag']}: `{o['lots']}`L | TP: `{o['tp']:.2f}`" for o in orders_to_place])
         msg = (
-            f"⚡ **[CALLISTO CONFIRMATION] {side} @ {exec_price:.2f}**\n\n"
+            f"⚡ **[ZONE CONFIRMATION] {side} @ {exec_price:.2f}**\n\n"
             f"• Entry : `{exec_price:.2f}` (TF {conf.get('tf')}s)\n"
             f"• SL    : `{sl:.2f}`\n"
             f"• Zone  : `{zone.get('zone_low', 0):.2f}` – `{zone.get('zone_high', 0):.2f}`\n"
@@ -327,11 +327,11 @@ class CallistoCopier(BaseCopier):
                     "trailing_stage": 0,
                     "opened_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 }
-                await self.notify(f"✅ [CALLISTO EXECUTED] #{order_id} {side} {o['lots']}L @ {exec_price:.2f}")
+                await self.notify(f"✅ [ZONE ORDER EXECUTED] #{order_id} {side} {o['lots']}L @ {exec_price:.2f}")
                 asyncio.create_task(self._monitor_position(order_id))
             else:
                 logger.error(f"❌ [Callisto] {o['tag']} order failed: {res}")
-                await self.notify(f"❌ [CALLISTO FAILED] {o['tag']}: {res.get('error', res)}")
+                await self.notify(f"❌ [ZONE ORDER FAILED] {o['tag']}: {res.get('error', res)}")
 
     async def trigger_manual_breakeven(self, reason: str = "Channel Broadcast"):
         """Shifts all active Callisto positions to Breakeven."""
@@ -379,7 +379,7 @@ class CallistoCopier(BaseCopier):
                 pos["pending_be"] = False
                 pos["trailing_stage"] = max(pos.get("trailing_stage", 0), 2)
                 await self.notify(
-                    f"🛡️ [CALLISTO BREAKEVEN] #{pos_id} ({side})\n\n"
+                    f"🛡️ [BREAKEVEN ACTIVATED] #{pos_id} ({side})\n\n"
                     f"• Trigger: {reason}\n"
                     f"• Trade is now Risk-Free! SL shifted to: {be_level:.2f}"
                 )
@@ -504,7 +504,7 @@ class CallistoCopier(BaseCopier):
                             pos["trailing_stage"] = 1
                             logger.info(f"🛡️ [Callisto +30 Pips] Risk cut 50% on #{pos_id}! SL: {half_risk_sl}")
                             await self.notify(
-                                f"🛡️ **[CALLISTO DEFENSE +30 PIPS] #{pos_id} ({tag})**\n\n"
+                                f"🛡️ **[RISK DEFENSE +30 PIPS] #{pos_id} ({tag})**\n\n"
                                 f"• Risk reduced by 50% | New SL: `{half_risk_sl:.2f}`"
                             )
 
@@ -519,7 +519,7 @@ class CallistoCopier(BaseCopier):
                             pos["trailing_stage"] = 2
                             logger.info(f"🛡️ [Callisto +50 Pips / 1R] Breakeven activated on #{pos_id}! SL: {be_level}")
                             await self.notify(
-                                f"🛡️ **[CALLISTO BREAKEVEN +50 PIPS] #{pos_id} ({tag})**\n\n"
+                                f"🛡️ **[BREAKEVEN +50 PIPS] #{pos_id} ({tag})**\n\n"
                                 f"• Trade is now Risk-Free! SL shifted to: `{be_level:.2f}`"
                             )
 
@@ -532,7 +532,7 @@ class CallistoCopier(BaseCopier):
                             pos["trailing_stage"] = 3
                             logger.info(f"💰 [Callisto +100 Pips] Secured +50 Pips on #{pos_id}! SL: {lock_50}")
                             await self.notify(
-                                f"🔒 **[CALLISTO PROFIT LOCK +100 PIPS] #{pos_id} ({tag})**\n\n"
+                                f"🔒 **[PROFIT LOCK +100 PIPS] #{pos_id} ({tag})**\n\n"
                                 f"• Secured +50 Pips profit! New SL: `{lock_50:.2f}`"
                             )
 
@@ -545,7 +545,7 @@ class CallistoCopier(BaseCopier):
                             pos["trailing_stage"] = 4
                             logger.info(f"💰 [Callisto +150 Pips] Secured +100 Pips on #{pos_id}! SL: {lock_100}")
                             await self.notify(
-                                f"🔒 **[CALLISTO PROFIT LOCK +150 PIPS] #{pos_id} ({tag})**\n\n"
+                                f"🔒 **[PROFIT LOCK +150 PIPS] #{pos_id} ({tag})**\n\n"
                                 f"• Secured +100 Pips profit! New SL: `{lock_100:.2f}`"
                             )
 
@@ -604,11 +604,11 @@ class CallistoCopier(BaseCopier):
 
         pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
         if pnl > 0:
-            header_line = f"🏆 [CALLISTO WON] {tag} {pnl_str}"
+            header_line = f"🏆 [ZONE WON] {tag} {pnl_str}"
         elif pnl == 0:
-            header_line = f"🛡️ [CALLISTO BREAKEVEN] {tag} $0.00"
+            header_line = f"🛡️ [BREAKEVEN ACTIVATED] {tag} $0.00"
         else:
-            header_line = f"❌ [CALLISTO CLOSED] {tag} {pnl_str}"
+            header_line = f"❌ [ZONE CLOSED] {tag} {pnl_str}"
 
         # 1. Dispatch Telegram Settlement Notification IMMEDIATELY
         await self.notify(
@@ -644,7 +644,7 @@ class CallistoCopier(BaseCopier):
         except Exception as e:
             logger.warning(f"[Callisto] GSheet background dispatch error: {e}")
 
-    async def handle_message(self, text: str, message_id: int, event: Any = None, msg_date: Any = None):
+    async def handle_message(self, text: str, message_id: int, event: Any = None, msg_date: Any = None, is_startup_scan: bool = False):
         if not self.is_enabled:
             return
         if message_id in self.processed_msg_ids:
@@ -660,11 +660,13 @@ class CallistoCopier(BaseCopier):
             side  = item.get("side")
             if itype == "INVALIDATE":
                 self.invalidate_zone(side)
-                await self.notify(f"🚫 [CALLISTO] {side} Zone Retired (Target Completed).")
+                if not is_startup_scan:
+                    await self.notify(f"🚫 {side.upper()} Zone Retired (Target Completed).")
             elif itype == "INVALIDATE_ALL":
                 for s in list(self.active_zones.keys()):
                     self.invalidate_zone(s)
-                await self.notify("🚫 [CALLISTO] Active Zones Retired (Full Target Hit).")
+                if not is_startup_scan:
+                    await self.notify("🚫 Active Zones Retired (Full Target Hit).")
             elif itype == "BREAKEVEN":
                 logger.info("📢 [Callisto] Received BREAKEVEN / SECURE PROFIT broadcast from channel!")
                 await self.trigger_manual_breakeven(reason="Channel Broadcast")
@@ -677,14 +679,21 @@ class CallistoCopier(BaseCopier):
                     "created_at": time.time()
                 }
                 self.set_zone(side, zone_data)
+
+                # Do not broadcast alerts to chat during initial startup scan
+                if is_startup_scan:
+                    continue
+
+                zone_type = "BUY ZONE DETECTED" if str(side).upper() in ("BUY", "CALL", "LONG") else "SELL ZONE DETECTED"
                 target_str = f" | Target: {zone_data['target']:.2f}" if zone_data['target'] else ""
                 caption = (
-                    f"📍 [CALLISTO ZONE DETECTED] {side}\n\n"
+                    f"📍 [{zone_type}]\n\n"
+                    f"• Asset: XAUUSD (Gold)\n"
                     f"• Range: {zone_data['zone_low']:.2f} – {zone_data['zone_high']:.2f}{target_str}\n"
                     f"• Status: Monitoring for candle confirmation..."
                 )
 
-                # Generate TradingView Pro Candlestick Chart for Callisto Zone
+                # Generate TradingView Pro Candlestick Chart for Zone
                 chart_bytes = None
                 try:
                     candles = self.mcp.get_candles(asset_id=GOLD_ASSET_ID, size=300, count=40)

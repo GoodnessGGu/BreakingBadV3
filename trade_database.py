@@ -790,6 +790,22 @@ class TradeDatabase:
             logger.error(f"❌ Failed to retrieve audit logs: {e}")
             return []
 
+    def clear_trade_history(self) -> bool:
+        """Purge all recorded trades and virtual trades while preserving users and preferences."""
+        try:
+            with self._lock:
+                conn = sqlite3.connect(self.db_path, timeout=30.0)
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM trades")
+                cursor.execute("DELETE FROM virtual_trades")
+                conn.commit()
+                conn.close()
+                logger.info("🧹 [TradeDatabase] Cleared trades and virtual_trades tables successfully.")
+                return True
+        except Exception as e:
+            logger.error(f"❌ Failed to clear trade database history: {e}")
+            return False
+
 
 # Global database instance
 db = TradeDatabase()

@@ -139,7 +139,7 @@ def main_menu_keyboard(is_admin: bool = True) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
 
 
-def history_menu_keyboard(category: str = "all", period: str = "all", page: int = 1, total_pages: int = 1) -> InlineKeyboardMarkup:
+def history_menu_keyboard(category: str = "all", period: str = "all", page: int = 1, total_pages: int = 1, is_admin: bool = False) -> InlineKeyboardMarkup:
     cat = (category or "all").lower()
     per = (period or "all").lower()
     pg = max(1, page)
@@ -154,7 +154,7 @@ def history_menu_keyboard(category: str = "all", period: str = "all", page: int 
         [
             InlineKeyboardButton(f"{'✅ ' if cat == 'crt' else ''}🕯️ CRT", callback_data=f"hist_crt_{per}_1"),
             InlineKeyboardButton(f"{'✅ ' if cat == 'ict' else ''}🤖 ICT", callback_data=f"hist_ict_{per}_1"),
-            InlineKeyboardButton(f"{'✅ ' if cat == 'cfd' else ''}📈 Copiers", callback_data=f"hist_cfd_{per}_1")
+            InlineKeyboardButton(f"{'✅ ' if cat == 'cfd' else ''}📈 Scalp / Zones", callback_data=f"hist_cfd_{per}_1")
         ],
         [
             InlineKeyboardButton(f"{'✅ ' if cat == 'blitz' else ''}⚡ Blitz", callback_data=f"hist_blitz_{per}_1"),
@@ -178,11 +178,14 @@ def history_menu_keyboard(category: str = "all", period: str = "all", page: int 
     keyboard.append(nav_row)
 
     # Actions row
-    keyboard.append([
+    action_row = [
         InlineKeyboardButton("📥 Export CSV", callback_data=f"export_hist_{cat}_{per}"),
-        InlineKeyboardButton("🔄 Refresh", callback_data=f"hist_{cat}_{per}_{pg}"),
-        InlineKeyboardButton("🔙 Main Menu", callback_data="btn_main_menu")
-    ])
+        InlineKeyboardButton("🔄 Refresh", callback_data=f"hist_{cat}_{per}_{pg}")
+    ]
+    if is_admin:
+        action_row.append(InlineKeyboardButton("🗑️ Clear History", callback_data="clear_history_prompt"))
+    action_row.append(InlineKeyboardButton("🔙 Main Menu", callback_data="btn_main_menu"))
+    keyboard.append(action_row)
 
     return InlineKeyboardMarkup(keyboard)
 

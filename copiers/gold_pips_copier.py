@@ -134,7 +134,7 @@ class GoldPipsCopier(BaseCopier):
             pass
         return {"buy": 0.0, "sell": 0.0, "mid": 0.0}
 
-    async def handle_message(self, text: str, message_id: int, event: Any = None, msg_date: Any = None):
+    async def handle_message(self, text: str, message_id: int, event: Any = None, msg_date: Any = None, is_startup_scan: bool = False):
         if not self.is_enabled:
             return
         if message_id in self.processed_msg_ids:
@@ -185,7 +185,7 @@ class GoldPipsCopier(BaseCopier):
             if opp_pos:
                 pos_id = opp_pos.get("position_id") or opp_pos.get("id")
                 logger.warning(f"⚠️ [GoldPips] Skipped {side} — An active {opp_side.upper()} position (#{pos_id}) already exists on Gold.")
-                await self.notify(f"⚠️ [Gold Pips] Skipped {side} — Opposing {opp_side.upper()} position #{pos_id} already active on Gold.")
+                await self.notify(f"⚠️ [Gold Momentum] Skipped {side} — Opposing {opp_side.upper()} position #{pos_id} already active on Gold.")
                 return
         except Exception as e:
             logger.warning(f"[GoldPips] Error checking open positions: {e}")
@@ -198,11 +198,11 @@ class GoldPipsCopier(BaseCopier):
             zone_high = max(emin, emax or emin)
             if side == "BUY" and cur_mid > (zone_high + self.max_slippage):
                 logger.warning(f"[GoldPips] Price {cur_mid:.2f} slipped too far above entry {zone_high:.2f}. Skipping.")
-                await self.notify(f"⚠️ [Gold Pips] BUY skipped — Price slipped too far ({cur_mid:.2f} vs {zone_high:.2f})")
+                await self.notify(f"⚠️ [Gold Momentum] BUY skipped — Price slipped too far ({cur_mid:.2f} vs {zone_high:.2f})")
                 return
             elif side == "SELL" and cur_mid < (zone_low - self.max_slippage):
                 logger.warning(f"[GoldPips] Price {cur_mid:.2f} slipped too far below entry {zone_low:.2f}. Skipping.")
-                await self.notify(f"⚠️ [Gold Pips] SELL skipped — Price slipped too far ({cur_mid:.2f} vs {zone_low:.2f})")
+                await self.notify(f"⚠️ [Gold Momentum] SELL skipped — Price slipped too far ({cur_mid:.2f} vs {zone_low:.2f})")
                 return
 
         sl = sig.get("sl")
@@ -256,7 +256,7 @@ class GoldPipsCopier(BaseCopier):
 
         plan_desc = "\n".join([f"  • {o['tag']}: `{o['lots']}`L | TP: `{o['tp']:.2f}`" if o.get("tp") else f"  • {o['tag']}: `{o['lots']}`L" for o in orders_to_place])
         await self.notify(
-            f"⚡ [GOLD PIPS SIGNAL] {side} @ ~{exec_price:.2f}\n\n"
+            f"⚡ [GOLD MOMENTUM SIGNAL] {side} @ ~{exec_price:.2f}\n\n"
             f"• Side: {side}\n"
             f"• Entry: ~{exec_price:.2f}\n"
             f"• SL: {sl if sl else 'None'}\n"
@@ -269,7 +269,7 @@ class GoldPipsCopier(BaseCopier):
             allowed, reason, rec_lots = self.prop_guardian.can_execute_trade("XAUUSD", len(open_pos))
             if not allowed:
                 logger.warning(f"🛡️ [PropFirm Guard] GoldPips trade rejected: {reason}")
-                await self.notify(f"🛡️ **[PROP FIRM GUARD] GoldPips Trade Skipped**\n\nReason: {reason}")
+                await self.notify(f"🛡️ **[PROP FIRM GUARD] Gold Trade Skipped**\n\nReason: {reason}")
                 return
 
         for o in orders_to_place:
@@ -306,7 +306,7 @@ class GoldPipsCopier(BaseCopier):
                 asyncio.create_task(self._monitor_position(order_id))
             else:
                 logger.error(f"❌ [GoldPips] {o['tag']} failed: {res}")
-                await self.notify(f"❌ [GOLD PIPS FAILED]: {o['tag']} {res.get('error', res)}")
+                await self.notify(f"❌ [GOLD SCALP FAILED]: {o['tag']} {res.get('error', res)}")
 
     async def _monitor_position(self, order_id: int):
         """Monitors active Gold Pips trade and logs settlement."""
@@ -431,11 +431,11 @@ class GoldPipsCopier(BaseCopier):
 
         pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
         if pnl > 0:
-            header_line = f"🏆 [GOLD PIPS WON] {pnl_str}"
+            header_line = f"🏆 [GOLD SCALP WON] {pnl_str}"
         elif pnl == 0:
-            header_line = f"🛡️ [GOLD PIPS BREAKEVEN] $0.00"
+            header_line = f"🛡️ [GOLD BREAKEVEN] $0.00"
         else:
-            header_line = f"❌ [GOLD PIPS CLOSED] {pnl_str}"
+            header_line = f"❌ [GOLD SCALP CLOSED] {pnl_str}"
 
         # 1. Dispatch Telegram Settlement Notification IMMEDIATELY
         await self.notify(
@@ -520,7 +520,7 @@ class GoldPipsCopier(BaseCopier):
                 pos["pending_be"] = False
                 count += 1
                 await self.notify(
-                    f"🛡️ [GOLD PIPS BREAKEVEN] #{pos_id} ({side})\n\n"
+                    f"🛡️ [GOLD BREAKEVEN] #{pos_id} ({side})\n\n"
                     f"• Trade is now Risk-Free! SL shifted to: {be_level:.2f}"
                 )
             else:
@@ -541,7 +541,7 @@ class GoldPipsCopier(BaseCopier):
                     count += 1
         self.open_positions.clear()
         if count > 0:
-            await self.notify(f"🛑 [GOLD PIPS] Closed {count} position(s)")
+            await self.notify(f"🛑 [GOLD SCALP] Closed {count} position(s)")
 
     def get_status(self) -> Dict[str, Any]:
         return {

@@ -166,7 +166,7 @@ class KingmahnCopier(BaseCopier):
             if opp_pos:
                 pos_id = opp_pos.get("position_id") or opp_pos.get("id")
                 logger.warning(f"⚠️ [KingmahnTribe] Skipped {side} — An active {opp_side.upper()} position (#{pos_id}) already exists on Gold.")
-                await self.notify(f"⚠️ [Kingmahn's Tribe] Skipped {side} — Opposing {opp_side.upper()} position #{pos_id} already active on Gold.")
+                await self.notify(f"⚠️ [Gold Swing] Skipped {side} — Opposing {opp_side.upper()} position #{pos_id} already active on Gold.")
                 return
         except Exception as e:
             logger.warning(f"[KingmahnTribe] Error checking open positions: {e}")
@@ -177,11 +177,11 @@ class KingmahnCopier(BaseCopier):
         if emin and emax:
             if side == "BUY" and exec_price > (emax + self.max_slippage):
                 logger.warning(f"⚠️ [KingmahnTribe] Market price {exec_price:.2f} slipped too far above entry max {emax:.2f}")
-                await self.notify(f"⚠️ [Kingmahn's Tribe] Skipped BUY — Price {exec_price:.2f} slipped > {self.max_slippage} above max entry {emax:.2f}")
+                await self.notify(f"⚠️ [Gold Swing] Skipped BUY — Price {exec_price:.2f} slipped > {self.max_slippage} above max entry {emax:.2f}")
                 return
             elif side == "SELL" and exec_price < (emin - self.max_slippage):
                 logger.warning(f"⚠️ [KingmahnTribe] Market price {exec_price:.2f} slipped too far below entry min {emin:.2f}")
-                await self.notify(f"⚠️ [Kingmahn's Tribe] Skipped SELL — Price {exec_price:.2f} slipped > {self.max_slippage} below min entry {emin:.2f}")
+                await self.notify(f"⚠️ [Gold Swing] Skipped SELL — Price {exec_price:.2f} slipped > {self.max_slippage} below min entry {emin:.2f}")
                 return
 
         sl = sig["sl"]
@@ -237,7 +237,7 @@ class KingmahnCopier(BaseCopier):
             allowed, reason, rec_lots = self.prop_guardian.can_execute_trade("XAUUSD", len(open_pos))
             if not allowed:
                 logger.warning(f"🛡️ [PropFirm Guard] Kingmahn trade rejected: {reason}")
-                await self.notify(f"🛡️ **[PROP FIRM GUARD] Kingmahn Trade Skipped**\n\nReason: {reason}")
+                await self.notify(f"🛡️ **[PROP FIRM GUARD] Gold Trade Skipped**\n\nReason: {reason}")
                 return
 
         for o in orders_to_place:
@@ -272,11 +272,11 @@ class KingmahnCopier(BaseCopier):
                     "trailing_stage": 0,
                     "opened_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 }
-                await self.notify(f"✅ **[KINGMAHN EXECUTED] #{order_id} {side} {o['lots']}L @ {exec_price:.2f}**")
+                await self.notify(f"✅ **[GOLD SWING EXECUTED] #{order_id} {side} {o['lots']}L @ {exec_price:.2f}**")
                 asyncio.create_task(self._monitor_position(order_id))
             else:
                 logger.error(f"❌ [KingmahnTribe] {o['tag']} failed: {res}")
-                await self.notify(f"❌ **[KINGMAHN FAILED] {o['tag']}**: {res.get('error', res)}")
+                await self.notify(f"❌ **[GOLD SWING FAILED] {o['tag']}**: {res.get('error', res)}")
 
     async def trigger_manual_breakeven(self, reason: str = "Channel Broadcast"):
         """Shifts all active Kingmahn positions to Breakeven."""
@@ -324,7 +324,7 @@ class KingmahnCopier(BaseCopier):
                 pos["pending_be"] = False
                 pos["trailing_stage"] = max(pos.get("trailing_stage", 0), 2)
                 await self.notify(
-                    f"🛡️ **[KINGMAHN BREAKEVEN] #{pos_id} ({side})**\n\n"
+                    f"🛡️ **[BREAKEVEN ACTIVATED] #{pos_id} ({side})**\n\n"
                     f"• Trigger: {reason}\n"
                     f"• Trade is now Risk-Free! SL shifted to: `{be_level:.2f}`"
                 )
@@ -447,7 +447,7 @@ class KingmahnCopier(BaseCopier):
                             pos["trailing_stage"] = 1
                             logger.info(f"🛡️ [Kingmahn +30 Pips] Risk cut 50% on #{pos_id}! SL: {half_risk_sl}")
                             await self.notify(
-                                f"🛡️ **[KINGMAHN DEFENSE +30 PIPS] #{pos_id} ({tag})**\n\n"
+                                f"🛡️ **[RISK DEFENSE +30 PIPS] #{pos_id} ({tag})**\n\n"
                                 f"• Risk reduced by 50% | New SL: `{half_risk_sl:.2f}`"
                             )
 
@@ -462,7 +462,7 @@ class KingmahnCopier(BaseCopier):
                             pos["trailing_stage"] = 2
                             logger.info(f"🛡️ [Kingmahn +50 Pips / 1R] Breakeven activated on #{pos_id}! SL: {be_level}")
                             await self.notify(
-                                f"🛡️ **[KINGMAHN BREAKEVEN +50 PIPS] #{pos_id} ({tag})**\n\n"
+                                f"🛡️ **[BREAKEVEN +50 PIPS] #{pos_id} ({tag})**\n\n"
                                 f"• Trade is now Risk-Free! SL shifted to: `{be_level:.2f}`"
                             )
 
@@ -475,7 +475,7 @@ class KingmahnCopier(BaseCopier):
                             pos["trailing_stage"] = 3
                             logger.info(f"💰 [Kingmahn +100 Pips] Secured +50 Pips on #{pos_id}! SL: {lock_50}")
                             await self.notify(
-                                f"🔒 **[KINGMAHN PROFIT LOCK +100 PIPS] #{pos_id} ({tag})**\n\n"
+                                f"🔒 **[PROFIT LOCK +100 PIPS] #{pos_id} ({tag})**\n\n"
                                 f"• Secured +50 Pips profit! New SL: `{lock_50:.2f}`"
                             )
 
@@ -488,7 +488,7 @@ class KingmahnCopier(BaseCopier):
                             pos["trailing_stage"] = 4
                             logger.info(f"💰 [Kingmahn +150 Pips] Secured +100 Pips on #{pos_id}! SL: {lock_100}")
                             await self.notify(
-                                f"🔒 **[KINGMAHN PROFIT LOCK +150 PIPS] #{pos_id} ({tag})**\n\n"
+                                f"🔒 **[PROFIT LOCK +150 PIPS] #{pos_id} ({tag})**\n\n"
                                 f"• Secured +100 Pips profit! New SL: `{lock_100:.2f}`"
                             )
 
@@ -546,11 +546,11 @@ class KingmahnCopier(BaseCopier):
 
         pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
         if pnl > 0:
-            header_line = f"🏆 [KINGMAHN WON] {tag} {pnl_str}"
+            header_line = f"🏆 [GOLD SWING WON] {tag} {pnl_str}"
         elif pnl == 0:
-            header_line = f"🛡️ [KINGMAHN BREAKEVEN] {tag} $0.00"
+            header_line = f"🛡️ [BREAKEVEN ACTIVATED] {tag} $0.00"
         else:
-            header_line = f"❌ [KINGMAHN CLOSED] {tag} {pnl_str}"
+            header_line = f"❌ [GOLD SWING CLOSED] {tag} {pnl_str}"
 
         # 1. Dispatch Telegram Settlement Notification IMMEDIATELY
         await self.notify(
@@ -586,7 +586,7 @@ class KingmahnCopier(BaseCopier):
         except Exception as e:
             logger.warning(f"[KingmahnTribe] GSheet background dispatch error: {e}")
 
-    async def handle_message(self, text: str, message_id: int, event: Any = None, msg_date: Any = None):
+    async def handle_message(self, text: str, message_id: int, event: Any = None, msg_date: Any = None, is_startup_scan: bool = False):
         if not self.is_enabled:
             return
         if message_id in self.processed_msg_ids:

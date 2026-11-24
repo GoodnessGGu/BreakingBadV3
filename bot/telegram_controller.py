@@ -289,12 +289,6 @@ class TelegramTradingBot:
         blitz_bal = self.blitz_mcp.get_training_balance() if self.account_type == "training" else self.blitz_mcp.get_real_balance()
         blitz_amt = blitz_bal.get("amount", 0.0) if blitz_bal else 0.0
 
-        # Copiers
-        copier_lines = []
-        for c in self.channel_mgr.list_copiers():
-            icon = "🟢" if c["enabled"] else "🔴"
-            copier_lines.append(f"  • {icon} {c['name']}: `{'ON' if c['enabled'] else 'OFF'}`")
-
         # ICT Engine
         ict_st = self.ict_engine.get_status()
         ict_icon = "🟢" if ict_st["enabled"] else "🔴"
@@ -327,7 +321,6 @@ class TelegramTradingBot:
             f"⚙️ *Risk & Order Sizing*:\n"
             f"  • 📊 Forex / Gold Lots: `{self.lots:.2f}` | Lev: `{self.leverage}x`\n"
             f"  • ⚡ Blitz Base Stake: `${self.blitz_stake:.2f}` *(2-Step Martingale)*\n\n"
-            f"📡 *Signal Copiers*:\n" + "\n".join(copier_lines) + "\n\n"
             f"🤖 *Autonomous ICT Engine (Metals)*:\n"
             f"  • {ict_icon} Master Switch: `{'ON' if ict_st['enabled'] else 'OFF'}`\n"
             f"  • {hybrid_icon} Hybrid Profit Lock: `{'ON' if hybrid_on else 'OFF'}`\n"
@@ -430,9 +423,9 @@ class TelegramTradingBot:
             "• *Core Logic*: Calculates the tight pre-news consolidation range 60 seconds prior to release and places dual breakout triggers (±$1.50) to capture explosive multi-dollar volatility spikes.\n"
             "• *Targets*: **+$15.00** Expansion Take Profit with rapid **+$4.00** Breakeven lock.\n\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            "📡 *5. Signal Copiers & Blitz Options*\n"
-            "• *CFD Copiers*: CallistoFx, Gold Pips Hunter, GSociety, Kingmahn.\n"
-            "• *Polycarp VIP*: High-frequency Blitz Binary Options with a controlled 2-step Martingale recovery buffer.\n\n"
+            "⚡ *5. Institutional Gold Zones & Blitz Options*\n"
+            "• *Gold Confirmation Zones*: Quantitative confirmation zones and liquidity sweeps on XAUUSD.\n"
+            "• *High-Frequency Blitz Options*: Algorithmic short-term volatility options with a controlled 2-step Martingale recovery buffer.\n\n"
             "🛡️ *Golden Rule*: Capital preservation first. Never trade without invalidation."
         )
 
@@ -792,11 +785,11 @@ class TelegramTradingBot:
                         if hasattr(c_inst, "open_positions"):
                             for oid, opos in c_inst.open_positions.items():
                                 if opos.get("position_id") == pos_id or oid == pos_id:
-                                    if "callisto" in c_name.lower(): origin_tag = " [Callisto Fx]"
-                                    elif "gold" in c_name.lower(): origin_tag = " [Gold Pips]"
-                                    elif "gsociety" in c_name.lower() or "society" in c_name.lower(): origin_tag = " [G Society]"
-                                    elif "king" in c_name.lower(): origin_tag = " [Kingmahn]"
-                                    else: origin_tag = f" [{c_inst.name}]"
+                                    if "callisto" in c_name.lower(): origin_tag = " [Gold Zone]"
+                                    elif "gold" in c_name.lower(): origin_tag = " [Gold Scalp]"
+                                    elif "gsociety" in c_name.lower() or "society" in c_name.lower(): origin_tag = " [Gold Breakout]"
+                                    elif "king" in c_name.lower(): origin_tag = " [Gold Swing]"
+                                    else: origin_tag = " [Quant Setup]"
                                     break
                         if origin_tag:
                             break
@@ -876,20 +869,22 @@ class TelegramTradingBot:
             else:
                 fvg_txt = "  • No pending FVG retests waiting."
 
-            # 4. Callisto Active Zones
+            # 4. Institutional Confirmation Zones (Gold)
             c_copier = self.channel_mgr.get_copier("callistofx")
             zones = getattr(c_copier, "active_zones", {}) if c_copier else {}
             if zones:
                 zones_lines = []
                 for s, z in zones.items():
-                    live_p = self.get_live_price(s)
+                    side_label = "BUY ZONE" if str(s).upper() in ("BUY", "CALL", "LONG") else ("SELL ZONE" if str(s).upper() in ("SELL", "SHORT") else str(s))
+                    live_p = self.get_live_price("XAUUSD")
                     p_str = f" | Live: ${live_p:.2f}" if live_p > 0 else ""
-                    zones_lines.append(f"  • *{s}*: {z['zone_low']:.2f} – {z['zone_high']:.2f}{p_str} (Target: {z.get('target', 'N/A')})")
+                    target_str = f" (Target: {z.get('target'):.2f})" if z.get("target") else ""
+                    zones_lines.append(f"  • *{side_label}*: {z['zone_low']:.2f} – {z['zone_high']:.2f}{p_str}{target_str}")
                 zones_txt = "\n".join(zones_lines)
             else:
-                zones_txt = "  • No active zones currently watching."
+                zones_txt = "  • No active confirmation zones currently watching."
 
-            # 5. Polycarp Blitz Trades
+            # 5. Active Blitz Option Trades
             p_copier = self.channel_mgr.get_copier("polycarpvip")
             blitz_trades = getattr(p_copier, "open_trades", {}) if p_copier else {}
             if blitz_trades:
@@ -911,8 +906,8 @@ class TelegramTradingBot:
                 f"💼 *Open Broker CFD Positions*:\n{cfd_txt}\n\n"
                 f"🎯 *ICT Autonomous Setups*:\n{ict_trade_txt}\n\n"
                 f"🔥 *ICT Pending FVGs*:\n{fvg_txt}\n\n"
-                f"📍 *Callisto Active Zones*:\n{zones_txt}\n\n"
-                f"⚡ *Polycarp Blitz Trades*:\n{blitz_txt}\n\n"
+                f"📍 *Active Buy/Sell Zones (Gold)*:\n{zones_txt}\n\n"
+                f"⚡ *Active Blitz Option Trades*:\n{blitz_txt}\n\n"
                 f"📡 _Live streaming price & PnL updates every 4s..._"
             )
             return text
@@ -1034,6 +1029,7 @@ class TelegramTradingBot:
         # 2. Blitz-only view
         if cat_lower == "blitz":
             blitz_trades = []
+            cleared_at = self.trade_ledger.get_cleared_at() if hasattr(self, "trade_ledger") and self.trade_ledger else None
             try:
                 raw_blitz = self.blitz_mcp.get_trade_history(limit=50) or []
                 for t in raw_blitz:
@@ -1050,10 +1046,16 @@ class TelegramTradingBot:
                     ts_raw = t.get("close_time") or t.get("open_time") or t.get("created_at")
                     if isinstance(ts_raw, (int, float)):
                         ts_str = datetime.fromtimestamp(ts_raw, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+                        ts_check = datetime.fromtimestamp(ts_raw, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
                     elif ts_raw:
                         ts_str = str(ts_raw)
+                        ts_check = str(ts_raw)
                     else:
                         ts_str = "--"
+                        ts_check = "--"
+
+                    if cleared_at and ts_check != "--" and ts_check < cleared_at:
+                        continue
 
                     blitz_trades.append({
                         "id": pos_id, "asset": asset, "direction": direction,
@@ -1078,7 +1080,7 @@ class TelegramTradingBot:
             pnl_icon = "🟢" if net_pnl >= 0 else "🔴"
 
             text = (
-                f"⚡ *Polycarp VIP Blitz Options Ledger*\n"
+                f"⚡ *Blitz Options Execution Ledger*\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"👤 *Account Mode*: `{self.account_type.upper()}` | 📄 *Page*: `{cur_page}/{tot_pages}`\n"
                 f"{pnl_icon} *Realized PnL*: `{pnl_sign}${net_pnl:.2f}`\n"
@@ -1146,7 +1148,23 @@ class TelegramTradingBot:
                 symbol = t.get("symbol", "UNKNOWN")
                 side = t.get("side", "BUY")
                 lots = t.get("total_lots", 1.0)
-                strategy = t.get("strategy", "Unknown")
+                raw_strat = t.get("strategy", "Unknown")
+                strat_l = str(raw_strat).lower()
+                if "callisto" in strat_l:
+                    strategy = "Gold Zone"
+                elif "gold" in strat_l:
+                    strategy = "Gold Scalp"
+                elif "gsociety" in strat_l or "society" in strat_l:
+                    strategy = "Gold Breakout"
+                elif "king" in strat_l:
+                    strategy = "Gold Swing"
+                elif "polycarp" in strat_l:
+                    strategy = "Blitz Option"
+                elif strat_l in ("cfd", "copier", "copiers"):
+                    strategy = "Gold Setup"
+                else:
+                    strategy = raw_strat
+
                 exit_reason = t.get("exit_reason", "closed")
                 close_time = t.get("close_time_utc", "--")
 
@@ -1216,7 +1234,8 @@ class TelegramTradingBot:
         res = self.build_history_view(cat, period=per, page=pg)
         msg = str(res)
         tot_pages = getattr(res, "total_pages", 1)
-        kb = history_menu_keyboard(category=cat, period=per, page=pg, total_pages=tot_pages)
+        is_adm = self.is_admin(user.id) if user else False
+        kb = history_menu_keyboard(category=cat, period=per, page=pg, total_pages=tot_pages, is_admin=is_adm)
         try:
             await update.message.reply_text(
                 msg,
@@ -1228,6 +1247,26 @@ class TelegramTradingBot:
             await update.message.reply_text(
                 msg,
                 reply_markup=kb
+            )
+
+    async def cmd_clear_history(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Purges recorded trades and resets history to start fresh."""
+        user = update.effective_user
+        if not user or not self.is_admin(user.id):
+            if update.message:
+                await update.message.reply_text("⛔ Administrator access required for this command.")
+            return
+
+        if hasattr(self, "trade_ledger") and self.trade_ledger:
+            self.trade_ledger.clear_all_trades()
+        db.clear_trade_history()
+        user_manager.log_admin_action(user.id, "clear_trade_history", "Cleared ledger and trade databases")
+        if update.message:
+            await update.message.reply_text(
+                "🧹 *Trade History Cleared Successfully!*\n\n"
+                "All recorded CFD, options, and persistent ledger trades have been purged. "
+                "History views will start fresh from this moment forward.",
+                parse_mode="Markdown"
             )
 
     async def cmd_export(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2169,7 +2208,7 @@ class TelegramTradingBot:
                 "⚙️ *Current Shared Demo Configuration*\n\n"
                 "• Mode: `🟡 PRACTICE (Training)`\n"
                 "• Strategy Engines: `Gold ICT, CRT, S&D Config E, Trendlines`\n"
-                "• Signal Copiers: `CallistoFx, Gold Pips Hunter, Polycarp VIP Blitz`\n"
+                "• Execution Engines: `Gold Confirmation Zones, Momentum Scalp, Blitz Options`\n"
                 "• Base Blitz Stake: `$2.00` | Blitz Martingale: `2-Step Smart Recovery`\n"
                 "• Forex Sizing: `1.00 Lot` | `100x Leverage`\n"
                 "• Account Protection: `Prop Firm 5K Guardian`\n\n"
@@ -2257,7 +2296,8 @@ class TelegramTradingBot:
             res = self.build_history_view(cat, period=per, page=pg)
             txt = str(res)
             tot_pages = getattr(res, "total_pages", 1)
-            kb = history_menu_keyboard(category=cat, period=per, page=pg, total_pages=tot_pages)
+            is_adm = self.is_admin(user.id)
+            kb = history_menu_keyboard(category=cat, period=per, page=pg, total_pages=tot_pages, is_admin=is_adm)
             try:
                 await query.edit_message_text(
                     txt,
@@ -2270,6 +2310,40 @@ class TelegramTradingBot:
                     txt,
                     reply_markup=kb
                 )
+
+        elif data == "clear_history_prompt":
+            if not self.is_admin(user.id):
+                await query.answer("⛔ Administrator access required.", show_alert=True)
+                return
+            prompt_text = (
+                "⚠️ *Are you sure you want to clear all trade history?*\n\n"
+                "This will purge all CFD, options, and persistent ledger records. "
+                "History views will start fresh from this point forward."
+            )
+            confirm_kb = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("⚠️ YES, CLEAR ALL TRADE HISTORY", callback_data="action_clear_history_execute")
+                ],
+                [
+                    InlineKeyboardButton("❌ CANCEL", callback_data="btn_history_menu")
+                ]
+            ])
+            await query.edit_message_text(prompt_text, reply_markup=confirm_kb, parse_mode="Markdown")
+            return
+
+        elif data == "action_clear_history_execute":
+            if not self.is_admin(user.id):
+                await query.answer("⛔ Administrator access required.", show_alert=True)
+                return
+            if hasattr(self, "trade_ledger") and self.trade_ledger:
+                self.trade_ledger.clear_all_trades()
+            db.clear_trade_history()
+            user_manager.log_admin_action(user.id, "clear_trade_history", "Cleared ledger and trade databases via Telegram button")
+            await query.answer("🧹 Trade history cleared successfully!", show_alert=True)
+            res = self.build_history_view(category="all", period="all", page=1)
+            kb = history_menu_keyboard(category="all", period="all", page=1, total_pages=res.total_pages, is_admin=True)
+            await query.edit_message_text(str(res), reply_markup=kb, parse_mode="Markdown")
+            return
 
         elif data.startswith("export_hist_"):
             parts = data.split("_")
@@ -2939,6 +3013,8 @@ class TelegramTradingBot:
         self.app.add_handler(CommandHandler("prop_reset", self.cmd_prop_reset))
         self.app.add_handler(CommandHandler("history", self.cmd_history))
         self.app.add_handler(CommandHandler("stats", self.cmd_history))
+        self.app.add_handler(CommandHandler("clearhistory", self.cmd_clear_history))
+        self.app.add_handler(CommandHandler("clear_history", self.cmd_clear_history))
         self.app.add_handler(CommandHandler("export", self.cmd_export))
         self.app.add_handler(CommandHandler("export_csv", self.cmd_export))
         self.app.add_handler(CommandHandler("close", self.cmd_close))
@@ -2977,17 +3053,7 @@ class TelegramTradingBot:
         await self.app.updater.start_polling(drop_pending_updates=True)
         self.is_running = True
         logger.info("🤖 Telegram Bot UI active & listening for user commands!")
-        
-        # Send startup notification to Admin
-        try:
-            startup_text = (
-                "🚀 *BreakingBad V3 Ecosystem Online!*\n\n"
-                + self.build_status_text()
-            )
-            await self.broadcast_alert(startup_text)
-            logger.info("📢 [Controller] Startup message dispatched to Admin.")
-        except Exception as e:
-            logger.warning(f"Failed to broadcast startup alert: {e}")
+        logger.info("🚀 [Controller] BreakingBad V3 Ecosystem Online.")
 
         asyncio.create_task(self.session_notifier.run_loop())
         asyncio.create_task(self.news_engine.run_loop())

@@ -117,11 +117,11 @@ class GSocietyCopier(BaseCopier):
 
     def set_lots(self, lots: float):
         self.lots = max(0.01, round(float(lots), 2))
-        logger.info(f"📊 [GSociety] Lot size set to: {self.lots}")
+        logger.info(f"📊 [Gold Breakout] Lot size set to: {self.lots}")
 
     def set_leverage(self, leverage: int):
         self.leverage = int(leverage)
-        logger.info(f"⚡ [GSociety] Leverage set to: {self.leverage}x")
+        logger.info(f"⚡ [Gold Breakout] Leverage set to: {self.leverage}x")
 
     def get_market_price(self) -> Dict[str, float]:
         try:
@@ -152,7 +152,7 @@ class GSocietyCopier(BaseCopier):
         exec_price = prices["buy"] if side == "BUY" else prices["sell"]
 
         if exec_price <= 0:
-            logger.error("❌ [GSociety] Could not fetch market price.")
+            logger.error("❌ [Gold Breakout] Could not fetch market price.")
             return
 
         # Check for conflicting opposite position on Gold
@@ -162,23 +162,23 @@ class GSocietyCopier(BaseCopier):
             opp_pos = next((p for p in positions if p.get("asset_id") == GOLD_ASSET_ID and p.get("type", "").lower() == opp_side), None)
             if opp_pos:
                 pos_id = opp_pos.get("position_id") or opp_pos.get("id")
-                logger.warning(f"⚠️ [GSociety] Skipped {side} — An active {opp_side.upper()} position (#{pos_id}) already exists on Gold.")
-                await self.notify(f"⚠️ [G Society] Skipped {side} — Opposing {opp_side.upper()} position #{pos_id} already active on Gold.")
+                logger.warning(f"⚠️ [Gold Breakout] Skipped {side} — An active {opp_side.upper()} position (#{pos_id}) already exists on Gold.")
+                await self.notify(f"⚠️ [Gold Breakout] Skipped {side} — Opposing {opp_side.upper()} position #{pos_id} already active on Gold.")
                 return
         except Exception as e:
-            logger.warning(f"[GSociety] Error checking open positions: {e}")
+            logger.warning(f"[Gold Breakout] Error checking open positions: {e}")
 
         # Slippage check against entry range if provided
         emin = sig.get("entry_min")
         emax = sig.get("entry_max")
         if emin and emax:
             if side == "BUY" and exec_price > (emax + self.max_slippage):
-                logger.warning(f"⚠️ [GSociety] Market price {exec_price:.2f} slipped too far above entry max {emax:.2f}")
-                await self.notify(f"⚠️ [GSociety] Skipped BUY — Price {exec_price:.2f} slipped > {self.max_slippage} above max entry {emax:.2f}")
+                logger.warning(f"⚠️ [Gold Breakout] Market price {exec_price:.2f} slipped too far above entry max {emax:.2f}")
+                await self.notify(f"⚠️ [Gold Breakout] Skipped BUY — Price {exec_price:.2f} slipped > {self.max_slippage} above max entry {emax:.2f}")
                 return
             elif side == "SELL" and exec_price < (emin - self.max_slippage):
-                logger.warning(f"⚠️ [GSociety] Market price {exec_price:.2f} slipped too far below entry min {emin:.2f}")
-                await self.notify(f"⚠️ [GSociety] Skipped SELL — Price {exec_price:.2f} slipped > {self.max_slippage} below min entry {emin:.2f}")
+                logger.warning(f"⚠️ [Gold Breakout] Market price {exec_price:.2f} slipped too far below entry min {emin:.2f}")
+                await self.notify(f"⚠️ [Gold Breakout] Skipped SELL — Price {exec_price:.2f} slipped > {self.max_slippage} below min entry {emin:.2f}")
                 return
 
         sl = sig["sl"]
@@ -234,7 +234,7 @@ class GSocietyCopier(BaseCopier):
             allowed, reason, rec_lots = self.prop_guardian.can_execute_trade("XAUUSD", len(open_pos))
             if not allowed:
                 logger.warning(f"🛡️ [PropFirm Guard] GSociety trade rejected: {reason}")
-                await self.notify(f"🛡️ **[PROP FIRM GUARD] GSociety Trade Skipped**\n\nReason: {reason}")
+                await self.notify(f"🛡️ **[PROP FIRM GUARD] Gold Trade Skipped**\n\nReason: {reason}")
                 return
 
         for o in orders_to_place:
@@ -253,7 +253,7 @@ class GSocietyCopier(BaseCopier):
 
             if "order_id" in res:
                 order_id = res["order_id"]
-                logger.info(f"✅ [GSociety] {o['tag']} placed! ID: #{order_id}")
+                logger.info(f"✅ [Gold Breakout] {o['tag']} placed! ID: #{order_id}")
                 self.open_positions[order_id] = {
                     "order_id": order_id,
                     "position_id": None,
@@ -269,16 +269,16 @@ class GSocietyCopier(BaseCopier):
                     "trailing_stage": 0,
                     "opened_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 }
-                await self.notify(f"✅ **[G SOCIETY EXECUTED] #{order_id} {side} {o['lots']}L @ {exec_price:.2f}**")
+                await self.notify(f"✅ **[GOLD BREAKOUT EXECUTED] #{order_id} {side} {o['lots']}L @ {exec_price:.2f}**")
                 asyncio.create_task(self._monitor_position(order_id))
             else:
-                logger.error(f"❌ [GSociety] {o['tag']} failed: {res}")
-                await self.notify(f"❌ **[G SOCIETY FAILED] {o['tag']}**: {res.get('error', res)}")
+                logger.error(f"❌ [Gold Breakout] {o['tag']} failed: {res}")
+                await self.notify(f"❌ **[GOLD BREAKOUT FAILED] {o['tag']}**: {res.get('error', res)}")
 
     async def trigger_manual_breakeven(self, reason: str = "Channel Broadcast"):
         """Shifts all active G Society positions to Breakeven."""
         if not self.open_positions:
-            logger.debug("[GSociety] No active G Society positions open to apply Breakeven. Ignoring.")
+            logger.debug("[Gold Breakout] No active G Society positions open to apply Breakeven. Ignoring.")
             return
 
         prices = self.get_market_price()
@@ -298,7 +298,7 @@ class GSocietyCopier(BaseCopier):
             # Require at least +8.0 pips ($0.80 on Gold) profit distance before moving SL to BE
             profit_dist = (mid - entry) if side == "BUY" else (entry - mid)
             if mid > 0 and profit_dist < 0.80:
-                logger.info(f"⏳ [GSociety] Position #{pos_id} profit distance (${profit_dist:.2f} / {profit_dist*10:.1f} pips) < $0.80 (8 pips). Arming pending BE.")
+                logger.info(f"⏳ [Gold Breakout] Position #{pos_id} profit distance (${profit_dist:.2f} / {profit_dist*10:.1f} pips) < $0.80 (8 pips). Arming pending BE.")
                 pos["pending_be"] = True
                 continue
 
@@ -309,7 +309,7 @@ class GSocietyCopier(BaseCopier):
             # Ensure distance to current price is at least 0.50 to avoid immediate broker stopout / stop-level rejection
             dist_to_market = abs(mid - be_level)
             if dist_to_market < 0.50:
-                logger.info(f"⏳ [GSociety] Distance to market price (${dist_to_market:.2f}) too close to new SL. Waiting for profit expansion.")
+                logger.info(f"⏳ [Gold Breakout] Distance to market price (${dist_to_market:.2f}) too close to new SL. Waiting for profit expansion.")
                 pos["pending_be"] = True
                 continue
 
@@ -321,12 +321,12 @@ class GSocietyCopier(BaseCopier):
                 pos["pending_be"] = False
                 pos["trailing_stage"] = max(pos.get("trailing_stage", 0), 2)
                 await self.notify(
-                    f"🛡️ **[G SOCIETY BREAKEVEN] #{pos_id} ({side})**\n\n"
+                    f"🛡️ **[BREAKEVEN ACTIVATED] #{pos_id} ({side})**\n\n"
                     f"• Trigger: {reason}\n"
                     f"• Trade is now Risk-Free! SL shifted to: `{be_level:.2f}`"
                 )
             else:
-                logger.warning(f"⚠️ [GSociety] Failed to set BE on #{pos_id}: {res.get('error')}. Retrying when price progresses.")
+                logger.warning(f"⚠️ [Gold Breakout] Failed to set BE on #{pos_id}: {res.get('error')}. Retrying when price progresses.")
                 pos["pending_be"] = True
 
     async def _monitor_position(self, order_id: int):
@@ -358,12 +358,12 @@ class GSocietyCopier(BaseCopier):
                             pos["position_id"] = p_id
                             resolved = True
             except Exception as e:
-                logger.warning(f"[GSociety] Position lookup error: {e}")
+                logger.warning(f"[Gold Breakout] Position lookup error: {e}")
             if not pos.get("position_id"):
                 await asyncio.sleep(4)
 
         if not resolved or not pos.get("position_id"):
-            logger.warning(f"⚠️ [GSociety] Order #{order_id} failed to map to an active position. Pruning from tracking.")
+            logger.warning(f"⚠️ [Gold Breakout] Order #{order_id} failed to map to an active position. Pruning from tracking.")
             self.open_positions.pop(order_id, None)
             return
 
@@ -383,13 +383,13 @@ class GSocietyCopier(BaseCopier):
                 if tp and tp > 0:
                     self.mcp.change_position_take_profit(position_id=pos_id, level=tp, endpoint="cfd")
             except Exception as e:
-                logger.warning(f"[GSociety] Notice setting post-fill SL/TP on #{pos_id}: {e}")
+                logger.warning(f"[Gold Breakout] Notice setting post-fill SL/TP on #{pos_id}: {e}")
 
-        logger.info(f"🛡️ [GSociety] Monitoring position #{pos_id or order_id} ({tag}) with milestone trailing & Breakeven.")
+        logger.info(f"🛡️ [Gold Breakout] Monitoring position #{pos_id or order_id} ({tag}) with milestone trailing & Breakeven.")
 
         # If a breakeven instruction was received before position_id resolved, execute immediately
         if pos.get("pending_be") and not pos.get("moved_to_be"):
-            logger.info(f"⚡ [GSociety] Executing pending Breakeven for newly resolved position #{pos_id}")
+            logger.info(f"⚡ [Gold Breakout] Executing pending Breakeven for newly resolved position #{pos_id}")
             await self.trigger_manual_breakeven("Pending Channel BE")
 
         while order_id in self.open_positions:
@@ -397,7 +397,7 @@ class GSocietyCopier(BaseCopier):
             try:
                 open_positions = self.mcp.list_positions(balance_id=self.balance_id)
                 if open_positions is None:
-                    logger.warning(f"⚠️ [GSociety] list_positions failed (rate-limited / error) - keeping position #{pos_id or order_id} active")
+                    logger.warning(f"⚠️ [Gold Breakout] list_positions failed (rate-limited / error) - keeping position #{pos_id or order_id} active")
                     continue
                 is_still_open = False
                 if pos_id:
@@ -405,11 +405,11 @@ class GSocietyCopier(BaseCopier):
                 else:
                     is_still_open = any(p.get("asset_id") == GOLD_ASSET_ID for p in open_positions)
             except Exception as e:
-                logger.warning(f"[GSociety] Error listing positions: {e}")
+                logger.warning(f"[Gold Breakout] Error listing positions: {e}")
                 continue
 
             if not is_still_open:
-                logger.info(f"📊 [GSociety] Position #{pos_id or order_id} ({tag}) closed! Resolving settlement...")
+                logger.info(f"📊 [Gold Breakout] Position #{pos_id or order_id} ({tag}) closed! Resolving settlement...")
                 is_tp1 = pos.get("is_tp1", False)
                 await self._log_trade_closure(order_id)
                 self.open_positions.pop(order_id, None)
@@ -444,7 +444,7 @@ class GSocietyCopier(BaseCopier):
                             pos["trailing_stage"] = 1
                             logger.info(f"🛡️ [GSociety +30 Pips] Risk cut 50% on #{pos_id}! SL: {half_risk_sl}")
                             await self.notify(
-                                f"🛡️ **[G SOCIETY DEFENSE +30 PIPS] #{pos_id} ({tag})**\n\n"
+                                f"🛡️ **[RISK DEFENSE +30 PIPS] #{pos_id} ({tag})**\n\n"
                                 f"• Risk reduced by 50% | New SL: `{half_risk_sl:.2f}`"
                             )
 
@@ -459,7 +459,7 @@ class GSocietyCopier(BaseCopier):
                             pos["trailing_stage"] = 2
                             logger.info(f"🛡️ [GSociety +50 Pips / 1R] Breakeven activated on #{pos_id}! SL: {be_level}")
                             await self.notify(
-                                f"🛡️ **[G SOCIETY BREAKEVEN +50 PIPS] #{pos_id} ({tag})**\n\n"
+                                f"🛡️ **[BREAKEVEN +50 PIPS] #{pos_id} ({tag})**\n\n"
                                 f"• Trade is now Risk-Free! SL shifted to: `{be_level:.2f}`"
                             )
 
@@ -472,7 +472,7 @@ class GSocietyCopier(BaseCopier):
                             pos["trailing_stage"] = 3
                             logger.info(f"💰 [GSociety +100 Pips] Secured +50 Pips on #{pos_id}! SL: {lock_50}")
                             await self.notify(
-                                f"🔒 **[G SOCIETY PROFIT LOCK +100 PIPS] #{pos_id} ({tag})**\n\n"
+                                f"🔒 **[PROFIT LOCK +100 PIPS] #{pos_id} ({tag})**\n\n"
                                 f"• Secured +50 Pips profit! New SL: `{lock_50:.2f}`"
                             )
 
@@ -485,7 +485,7 @@ class GSocietyCopier(BaseCopier):
                             pos["trailing_stage"] = 4
                             logger.info(f"💰 [GSociety +150 Pips] Secured +100 Pips on #{pos_id}! SL: {lock_100}")
                             await self.notify(
-                                f"🔒 **[G SOCIETY PROFIT LOCK +150 PIPS] #{pos_id} ({tag})**\n\n"
+                                f"🔒 **[PROFIT LOCK +150 PIPS] #{pos_id} ({tag})**\n\n"
                                 f"• Secured +100 Pips profit! New SL: `{lock_100:.2f}`"
                             )
 
@@ -533,7 +533,7 @@ class GSocietyCopier(BaseCopier):
                     reason = reason_override or matched.get("close_reason", reason)
                     break
             except Exception as e:
-                logger.warning(f"[GSociety] Trade history lookup error (attempt {attempt+1}): {e}")
+                logger.warning(f"[Gold Breakout] Trade history lookup error (attempt {attempt+1}): {e}")
             if attempt < 2:
                 await asyncio.sleep(0.8)
 
@@ -543,11 +543,11 @@ class GSocietyCopier(BaseCopier):
 
         pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
         if pnl > 0:
-            header_line = f"🏆 [G SOCIETY WON] {tag} {pnl_str}"
+            header_line = f"🏆 [GOLD BREAKOUT WON] {tag} {pnl_str}"
         elif pnl == 0:
-            header_line = f"🛡️ [G SOCIETY BREAKEVEN] {tag} $0.00"
+            header_line = f"🛡️ [BREAKEVEN ACTIVATED] {tag} $0.00"
         else:
-            header_line = f"❌ [G SOCIETY CLOSED] {tag} {pnl_str}"
+            header_line = f"❌ [GOLD BREAKOUT CLOSED] {tag} {pnl_str}"
 
         # 1. Dispatch Telegram Settlement Notification IMMEDIATELY
         await self.notify(
@@ -581,9 +581,9 @@ class GSocietyCopier(BaseCopier):
             }
             asyncio.create_task(asyncio.to_thread(gsheet_logger.log_forex_margin_trade, trade_payload))
         except Exception as e:
-            logger.warning(f"[GSociety] GSheet background dispatch error: {e}")
+            logger.warning(f"[Gold Breakout] GSheet background dispatch error: {e}")
 
-    async def handle_message(self, text: str, message_id: int, event: Any = None, msg_date: Any = None):
+    async def handle_message(self, text: str, message_id: int, event: Any = None, msg_date: Any = None, is_startup_scan: bool = False):
         if not self.is_enabled:
             return
         if message_id in self.processed_msg_ids:
@@ -597,25 +597,25 @@ class GSocietyCopier(BaseCopier):
                 msg_utc = msg_date if msg_date.tzinfo else msg_date.replace(tzinfo=timezone.utc)
                 age_sec = (now_utc - msg_utc).total_seconds()
                 if age_sec > 300:
-                    logger.info(f"⏰ [GSociety] Skipped historical signal #{message_id} ({int(age_sec)}s old during lookback)")
+                    logger.info(f"⏰ [Gold Breakout] Skipped historical signal #{message_id} ({int(age_sec)}s old during lookback)")
                     return
             except Exception as e:
-                logger.warning(f"[GSociety] Error checking message date: {e}")
+                logger.warning(f"[Gold Breakout] Error checking message date: {e}")
 
         # 2. Check for Breakeven instructions
         inst = GSocietyParser.parse_instruction(text)
         if inst and inst["type"] == "BREAKEVEN":
-            logger.info("📢 [GSociety] Received Secure Profit / Breakeven command from channel!")
+            logger.info("📢 [Gold Breakout] Received Secure Profit / Breakeven command from channel!")
             await self.trigger_manual_breakeven(reason="Channel Broadcast")
             return
 
         # 3. Check for trade signal
         sig = GSocietyParser.parse_signal(text)
         if sig and sig.get("type") == "SIGNAL":
-            logger.info(f"🎯 [GSociety] New signal parsed: {sig['side']} | SL: {sig['sl']} | TP1: {sig['tp1']} | TP2: {sig['tp2']}")
+            logger.info(f"🎯 [Gold Breakout] New signal parsed: {sig['side']} | SL: {sig['sl']} | TP1: {sig['tp1']} | TP2: {sig['tp2']}")
             await self.execute_signal(sig)
         else:
-            logger.debug(f"ℹ️ [GSociety] Message #{message_id} did not match trade signal syntax.")
+            logger.debug(f"ℹ️ [Gold Breakout] Message #{message_id} did not match trade signal syntax.")
 
     def get_status(self) -> Dict[str, Any]:
         return {

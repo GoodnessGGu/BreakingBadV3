@@ -158,7 +158,7 @@ class ChannelManager:
                 for m in recent_msgs:
                     txt = getattr(m, 'message', None) or getattr(m, 'text', '')
                     if txt:
-                        await copier.handle_message(txt, m.id, None, m.date)
+                        await copier.handle_message(txt, m.id, None, m.date, is_startup_scan=True)
             except Exception as e:
                 logger.warning(f"Startup lookback warning for {copier.name} ({cid}): {e}")
 

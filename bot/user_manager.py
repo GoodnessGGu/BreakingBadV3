@@ -252,8 +252,40 @@ class UserManager:
             return self.db.set_user_preferences(int(telegram_id), notifications_enabled=bool(value))
         return self.db.set_user_preferences(int(telegram_id), {key: value})
 
+    def log_admin_action(self, admin_id: int, action: str, details: Optional[str] = None, target_user_id: Optional[int] = None) -> bool:
+        """Audit record of administrator actions."""
+        return self.db.log_admin_action(admin_id=admin_id, action=action, details=details, target_user_id=target_user_id)
+
     def get_audit_logs(self, limit: int = 20) -> List[Dict[str, Any]]:
         return self.db.get_recent_audit_logs(limit)
+
+    def are_user_alerts_enabled(self) -> bool:
+        """Check if global user broadcasts are enabled by the admin."""
+        val = self.db.get_system_setting("user_alerts_enabled", "true")
+        return str(val).lower() in ("true", "1", "yes", "on")
+
+    def set_user_alerts_enabled(self, enabled: bool, admin_id: Optional[int] = None) -> bool:
+        """Toggle global user broadcasts on or off."""
+        success = self.db.set_system_setting("user_alerts_enabled", "true" if enabled else "false")
+        if success and admin_id:
+            action_desc = "Enabled user trade broadcast alerts" if enabled else "Disabled user trade broadcast alerts"
+            self.log_admin_action(admin_id=admin_id, action="toggle_user_alerts", details=action_desc)
+        return success
+
+    def get_broadcast_subscribers(self, admin_id: int) -> List[int]:
+        """Returns list of telegram_ids for all approved users who should receive broadcasts."""
+        if not self.are_user_alerts_enabled():
+            return []
+        users = self.db.list_users(status="approved")
+        recipients = []
+        for u in users:
+            tid = u.get("telegram_id")
+            if not tid or int(tid) == int(admin_id):
+                continue
+            prefs = self.db.get_user_preferences(tid)
+            if prefs.get("notifications_enabled", 1):
+                recipients.append(int(tid))
+        return recipients
 
     def get_users_overview_text(self) -> str:
         """Builds a formatted summary of user statistics and recent registrations."""

@@ -16,7 +16,7 @@ import httpx
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List, Set, Tuple, Union, Callable
 
-from telegram import Update
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     Application, ApplicationBuilder, CommandHandler,
     CallbackQueryHandler, MessageHandler, ContextTypes, filters
@@ -230,36 +230,52 @@ class TelegramTradingBot:
         return self.blitz_stake
 
     async def broadcast_alert(self, text: str):
-        """Send high-priority notification to the admin on Telegram with direct HTTP fallback."""
+        """Send high-priority notification to the admin on Telegram with direct HTTP fallback, and fan out to approved users if enabled."""
+        admin_delivered = False
         if self.app and getattr(self.app, "bot", None):
             try:
                 await self.app.bot.send_message(
                     chat_id=self.admin_id,
                     text=text
                 )
+                admin_delivered = True
                 first_line = text.splitlines()[0] if text else ""
                 logger.info(f"📢 [Broadcast Alert] Dispatched to Admin ({self.admin_id}): {first_line}")
-                return
             except Exception as e:
                 logger.warning(f"Error sending broadcast via app.bot: {e}")
 
-        # Resilient fallback via direct Telegram HTTP API
+        # Resilient fallback via direct Telegram HTTP API for Admin
+        if not admin_delivered:
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    res = await client.post(
+                        f"https://api.telegram.org/bot{self.token}/sendMessage",
+                        json={"chat_id": self.admin_id, "text": text}
+                    )
+                    logger.info(f"📢 [Broadcast Alert Fallback] HTTP {res.status_code}")
+            except Exception as e:
+                logger.error(f"Failed to send direct Telegram broadcast alert to admin: {e}")
+
+        # Fan out to approved investor subscribers if user alerts are enabled
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                res = await client.post(
-                    f"https://api.telegram.org/bot{self.token}/sendMessage",
-                    json={"chat_id": self.admin_id, "text": text}
-                )
-                logger.info(f"📢 [Broadcast Alert Fallback] HTTP {res.status_code}")
+            subscribers = user_manager.get_broadcast_subscribers(self.admin_id)
+            if subscribers and self.app and getattr(self.app, "bot", None):
+                for uid in subscribers:
+                    try:
+                        await self.app.bot.send_message(chat_id=uid, text=text)
+                        await asyncio.sleep(0.04)
+                    except Exception as err:
+                        logger.debug(f"Could not deliver broadcast alert to subscriber {uid}: {err}")
         except Exception as e:
-            logger.error(f"Failed to send direct Telegram broadcast alert: {e}")
+            logger.error(f"Error dispatching broadcast alert to subscribers: {e}")
 
     async def broadcast_photo(self, photo_bytes: bytes, caption: str = ""):
-        """Send high-priority chart/image notification to the admin on Telegram."""
+        """Send high-priority chart/image notification to the admin on Telegram, and fan out to approved users if enabled."""
         if not photo_bytes:
             await self.broadcast_alert(caption)
             return
 
+        admin_delivered = False
         if self.app and getattr(self.app, "bot", None):
             try:
                 await self.app.bot.send_photo(
@@ -267,23 +283,37 @@ class TelegramTradingBot:
                     photo=photo_bytes,
                     caption=caption
                 )
-                return
+                admin_delivered = True
             except Exception as e:
                 logger.warning(f"Error sending broadcast photo via app.bot: {e}")
 
-        # Resilient fallback via direct Telegram HTTP API multipart upload
+        if not admin_delivered:
+            # Resilient fallback via direct Telegram HTTP API multipart upload for Admin
+            try:
+                async with httpx.AsyncClient(timeout=20.0) as client:
+                    files = {"photo": ("chart.png", photo_bytes, "image/png")}
+                    data = {"chat_id": str(self.admin_id), "caption": caption}
+                    await client.post(
+                        f"https://api.telegram.org/bot{self.token}/sendPhoto",
+                        data=data,
+                        files=files
+                    )
+            except Exception as e:
+                logger.error(f"Failed to send direct Telegram photo broadcast to admin: {e}")
+                await self.broadcast_alert(caption)
+
+        # Fan out photo to approved investor subscribers if user alerts are enabled
         try:
-            async with httpx.AsyncClient(timeout=20.0) as client:
-                files = {"photo": ("chart.png", photo_bytes, "image/png")}
-                data = {"chat_id": str(self.admin_id), "caption": caption}
-                await client.post(
-                    f"https://api.telegram.org/bot{self.token}/sendPhoto",
-                    data=data,
-                    files=files
-                )
+            subscribers = user_manager.get_broadcast_subscribers(self.admin_id)
+            if subscribers and self.app and getattr(self.app, "bot", None):
+                for uid in subscribers:
+                    try:
+                        await self.app.bot.send_photo(chat_id=uid, photo=photo_bytes, caption=caption)
+                        await asyncio.sleep(0.05)
+                    except Exception as err:
+                        logger.debug(f"Could not deliver broadcast photo to subscriber {uid}: {err}")
         except Exception as e:
-            logger.error(f"Failed to send direct Telegram photo broadcast: {e}")
-            await self.broadcast_alert(caption)
+            logger.error(f"Error dispatching broadcast photo to subscribers: {e}")
 
     def build_status_text(self) -> str:
         # Fetch balances
@@ -2050,28 +2080,80 @@ class TelegramTradingBot:
             reply_markup=close_all_confirm_keyboard()
         )
 
+    def _build_users_overview_message(self) -> Tuple[str, str, bool]:
+        """Builds formatted markdown and plain text overview of registered users & alert status."""
+        users = user_manager.list_all_users()
+        counts = user_manager.get_user_counts()
+        alerts_on = user_manager.are_user_alerts_enabled()
+        alert_status_str = "🟢 ENABLED (Broadcasts active)" if alerts_on else "🔴 DISABLED (Muted)"
+
+        md_lines = [
+            f"👥 *Registered Bot Users* ({counts.get('total', 0)} total, {counts.get('approved', 0)} approved)",
+            f"📢 *User Trade Alerts*: {alert_status_str}\n"
+        ]
+        plain_lines = [
+            f"👥 Registered Bot Users ({counts.get('total', 0)} total, {counts.get('approved', 0)} approved)",
+            f"📢 User Trade Alerts: {alert_status_str}\n"
+        ]
+
+        for u in users[:25]:
+            status_val = u.get("status") or u.get("access_status", "pending")
+            status_icon = "🟢" if status_val == "approved" else "🟡" if status_val == "pending" else "🔴"
+            role_icon = "👑" if u.get("role") == "admin" else "👤"
+
+            raw_uname = (u.get("username") or "").replace("_", "\\_")
+            safe_uname = f"@{raw_uname}" if raw_uname else "No username"
+            safe_fname = (u.get("first_name") or "").replace("_", "\\_").replace("*", "\\*")
+
+            md_lines.append(f"{status_icon} {role_icon} *{safe_fname}* ({safe_uname})")
+            md_lines.append(f"   ID: `{u['telegram_id']}` | Status: `{status_val}`")
+
+            plain_uname = f"@{u['username']}" if u.get("username") else "No username"
+            plain_fname = u.get("first_name") or "User"
+            plain_lines.append(f"{status_icon} {role_icon} {plain_fname} ({plain_uname})")
+            plain_lines.append(f"   ID: {u['telegram_id']} | Status: {status_val}")
+
+        controls_md = "\n💡 Admin commands:\n• `/user_alerts [on|off]` - Toggle investor broadcasts\n• `/suspend <id>`\n• `/activate <id>`\n• `/user <id>`\n• `/audit_logs`"
+        controls_plain = "\n💡 Admin commands:\n• /user_alerts [on|off] - Toggle investor broadcasts\n• /suspend <id>\n• /activate <id>\n• /user <id>\n• /audit_logs"
+
+        md_lines.append(controls_md)
+        plain_lines.append(controls_plain)
+
+        return "\n".join(md_lines), "\n".join(plain_lines), alerts_on
+
     async def cmd_users(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.is_admin(update.effective_user.id):
             await update.message.reply_text("⛔ Administrator access required.")
             return
-        users = user_manager.list_all_users()
-        counts = user_manager.get_user_counts()
-        msg = f"👥 *Registered Bot Users* ({counts.get('total', 0)} total, {counts.get('approved', 0)} approved)\n\n"
-        for u in users[:25]:
-            status_icon = "🟢" if u["access_status"] == "approved" else "🟡" if u["access_status"] == "pending" else "🔴"
-            role_icon = "👑" if u["role"] == "admin" else "👤"
-            raw_uname = (u.get("username") or "").replace("_", "\\_")
-            safe_uname = f"@{raw_uname}" if raw_uname else "No username"
-            safe_fname = (u.get("first_name") or "").replace("_", "\\_").replace("*", "\\*")
-            msg += f"{status_icon} {role_icon} *{safe_fname}* ({safe_uname})\n"
-            msg += f"   ID: `{u['telegram_id']}` | Status: `{u['access_status']}`\n"
-        msg += "\n💡 Admin commands:\n• `/suspend <id>`\n• `/activate <id>`\n• `/user <id>`\n• `/audit_logs`"
+        md_msg, plain_msg, alerts_on = self._build_users_overview_message()
         try:
-            await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=user_management_keyboard())
+            await update.message.reply_text(md_msg, parse_mode="Markdown", reply_markup=user_management_keyboard(alerts_enabled=alerts_on))
         except Exception as e:
             logger.warning(f"Markdown send failed in cmd_users: {e}. Retrying without markdown.")
-            plain_msg = msg.replace("*", "").replace("`", "").replace("\\_", "_")
-            await update.message.reply_text(plain_msg, reply_markup=user_management_keyboard())
+            await update.message.reply_text(plain_msg, reply_markup=user_management_keyboard(alerts_enabled=alerts_on))
+
+    async def cmd_toggle_user_alerts(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Allows super-admin to toggle or set user broadcast alerts on/off."""
+        if not self.is_admin(update.effective_user.id):
+            await update.message.reply_text("⛔ Administrator access required.")
+            return
+
+        current = user_manager.are_user_alerts_enabled()
+        new_state = not current
+
+        if context.args:
+            arg = context.args[0].lower().strip()
+            if arg in ("on", "enable", "true", "1"):
+                new_state = True
+            elif arg in ("off", "disable", "false", "0"):
+                new_state = False
+
+        user_manager.set_user_alerts_enabled(new_state, admin_id=update.effective_user.id)
+        status_txt = "🟢 ENABLED (Approved users will receive trade & signal updates)" if new_state else "🔴 DISABLED (User updates muted; Admin-only)"
+        await update.message.reply_text(
+            f"📢 *User Broadcast Alerts*: {status_txt}",
+            parse_mode="Markdown"
+        )
 
     async def cmd_suspend(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.is_admin(update.effective_user.id):
@@ -2876,6 +2958,57 @@ class TelegramTradingBot:
                 )
             self.start_active_view_refresh_task(query.message.chat_id, query.message.message_id)
 
+        elif data == "toggle_user_broadcasts":
+            if not self.is_admin(user.id):
+                await query.answer("⛔ Administrator access required.", show_alert=True)
+                return
+            current = user_manager.are_user_alerts_enabled()
+            new_state = not current
+            user_manager.set_user_alerts_enabled(new_state, admin_id=user.id)
+            alert_txt = "ON 🟢 (Broadcasts active)" if new_state else "OFF 🔴 (Broadcasts muted)"
+            await query.answer(f"User Alerts toggled {alert_txt}", show_alert=False)
+
+            md_msg, plain_msg, alerts_on = self._build_users_overview_message()
+            try:
+                await query.edit_message_text(md_msg, parse_mode="Markdown", reply_markup=user_management_keyboard(alerts_enabled=alerts_on))
+            except Exception:
+                await query.edit_message_text(plain_msg, reply_markup=user_management_keyboard(alerts_enabled=alerts_on))
+            return
+
+        elif data == "btn_users_refresh":
+            if not self.is_admin(user.id):
+                await query.answer("⛔ Administrator access required.", show_alert=True)
+                return
+            await query.answer("Refreshing user list...")
+            md_msg, plain_msg, alerts_on = self._build_users_overview_message()
+            try:
+                await query.edit_message_text(md_msg, parse_mode="Markdown", reply_markup=user_management_keyboard(alerts_enabled=alerts_on))
+            except Exception:
+                await query.edit_message_text(plain_msg, reply_markup=user_management_keyboard(alerts_enabled=alerts_on))
+            return
+
+        elif data == "btn_users_audit_logs":
+            if not self.is_admin(user.id):
+                await query.answer("⛔ Administrator access required.", show_alert=True)
+                return
+            logs = user_manager.get_audit_logs(limit=15)
+            if not logs:
+                log_txt = "📜 *Admin Audit Logs*\n\n_No audit logs recorded yet._"
+            else:
+                log_txt = f"📜 *Recent Admin Audit Logs* ({len(logs)} records)\n━━━━━━━━━━━━━━━━━━━━\n"
+                for l in logs:
+                    ts = l.get("timestamp", "")[:19].replace("T", " ")
+                    act = l.get("action", "")
+                    detail = l.get("details", "")
+                    log_txt += f"• `{ts}`: *{act}*\n  {detail}\n"
+            back_kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Users", callback_data="btn_users_refresh")]])
+            try:
+                await query.edit_message_text(log_txt, parse_mode="Markdown", reply_markup=back_kb)
+            except Exception:
+                plain_log = log_txt.replace("*", "").replace("`", "").replace("_", "")
+                await query.edit_message_text(plain_log, reply_markup=back_kb)
+            return
+
         elif data == "btn_sessions":
             text = self.session_notifier.get_session_dashboard()
             await query.edit_message_text(text=text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
@@ -3037,6 +3170,9 @@ class TelegramTradingBot:
         self.app.add_handler(CommandHandler("closeall", self.cmd_closeall))
         self.app.add_handler(CommandHandler("help", self.cmd_help))
         self.app.add_handler(CommandHandler("users", self.cmd_users))
+        self.app.add_handler(CommandHandler("user_alerts", self.cmd_toggle_user_alerts))
+        self.app.add_handler(CommandHandler("toggle_alerts", self.cmd_toggle_user_alerts))
+        self.app.add_handler(CommandHandler("useralerts", self.cmd_toggle_user_alerts))
         self.app.add_handler(CommandHandler("suspend", self.cmd_suspend))
         self.app.add_handler(CommandHandler("activate", self.cmd_activate))
         self.app.add_handler(CommandHandler("user", self.cmd_user))

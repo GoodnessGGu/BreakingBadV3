@@ -1,7 +1,7 @@
 # trade_database.py
 import sqlite3
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Optional, Tuple, Any
 import os
 import threading
@@ -103,6 +103,14 @@ class TradeDatabase:
                         action TEXT NOT NULL,
                         details TEXT,
                         timestamp TEXT NOT NULL
+                    )
+                """)
+
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS system_settings (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
                     )
                 """)
 
@@ -821,6 +829,40 @@ class TradeDatabase:
                 return True
         except Exception as e:
             logger.error(f"❌ Failed to clear pre-today trades: {e}")
+            return False
+
+    def get_system_setting(self, key: str, default: Any = None) -> Any:
+        """Fetch a persistent system configuration setting."""
+        try:
+            with self._lock:
+                conn = sqlite3.connect(self.db_path, timeout=30.0)
+                cursor = conn.cursor()
+                cursor.execute("SELECT value FROM system_settings WHERE key = ?", (key,))
+                row = cursor.fetchone()
+                conn.close()
+                if row:
+                    return row[0]
+                return default
+        except Exception as e:
+            logger.error(f"❌ Failed to fetch system setting {key}: {e}")
+            return default
+
+    def set_system_setting(self, key: str, value: Any) -> bool:
+        """Save or update a persistent system configuration setting."""
+        try:
+            now_iso = datetime.now(timezone.utc).isoformat()
+            with self._lock:
+                conn = sqlite3.connect(self.db_path, timeout=30.0)
+                cursor = conn.cursor()
+                cursor.execute(
+                    "INSERT OR REPLACE INTO system_settings (key, value, updated_at) VALUES (?, ?, ?)",
+                    (key, str(value), now_iso)
+                )
+                conn.commit()
+                conn.close()
+                return True
+        except Exception as e:
+            logger.error(f"❌ Failed to set system setting {key}: {e}")
             return False
 
 

@@ -327,6 +327,61 @@ class TestMultiUserOnboardingAndSharedDemo(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(counts.get("total", 0), 10)
         self.assertGreaterEqual(counts.get("approved", 0), 10)
 
+    async def test_13_user_broadcast_alerts_and_admin_toggle(self):
+        """13. Verify admin can toggle user broadcast updates, and subscribers are filtered correctly."""
+        # Setup users: Investor A approved with notifications ON, Investor B approved with notifications OFF
+        self.um.check_access(self.investor_a_id, username="investor_a")
+        self.um.complete_user_onboarding(self.investor_a_id)
+        self.um.set_user_preference(self.investor_a_id, "notifications_enabled", 1)
+
+        self.um.check_access(self.investor_b_id, username="investor_b")
+        self.um.complete_user_onboarding(self.investor_b_id)
+        self.um.set_user_preference(self.investor_b_id, "notifications_enabled", 0)
+
+        # Pending user C and Suspended user D
+        pending_id = 333333333
+        self.um.check_access(pending_id, username="pending_c")
+        self.um.db.update_user_status(pending_id, "pending")
+
+        suspended_id = 444444444
+        self.um.check_access(suspended_id, username="suspended_d")
+        self.um.suspend_user(suspended_id)
+
+        # 1. By default, user alerts are enabled
+        self.assertTrue(self.um.are_user_alerts_enabled())
+
+        # 2. Subscribers should include Investor A, but NOT Investor B (notifications off), NOT pending C, NOT suspended D, and NOT admin
+        subs = self.um.get_broadcast_subscribers(self.admin_id)
+        self.assertIn(self.investor_a_id, subs)
+        self.assertNotIn(self.investor_b_id, subs)
+        self.assertNotIn(pending_id, subs)
+        self.assertNotIn(suspended_id, subs)
+        self.assertNotIn(self.admin_id, subs)
+
+        # 3. Admin toggles user alerts OFF
+        self.um.set_user_alerts_enabled(False, admin_id=self.admin_id)
+        self.assertFalse(self.um.are_user_alerts_enabled())
+        # All investor broadcasts muted
+        self.assertEqual(self.um.get_broadcast_subscribers(self.admin_id), [])
+
+        # Audit log should record the toggle
+        logs = self.um.get_audit_logs(limit=5)
+        toggle_logs = [l for l in logs if l.get("action") == "toggle_user_alerts"]
+        self.assertTrue(len(toggle_logs) > 0)
+        self.assertIn("Disabled", toggle_logs[0]["details"])
+
+        # 4. Admin toggles user alerts ON again
+        self.um.set_user_alerts_enabled(True, admin_id=self.admin_id)
+        self.assertTrue(self.um.are_user_alerts_enabled())
+        subs_after = self.um.get_broadcast_subscribers(self.admin_id)
+        self.assertEqual(subs_after, [self.investor_a_id])
+
+        # 5. Keyboards test
+        kb_on = user_management_keyboard(alerts_enabled=True)
+        self.assertIn("User Alerts: ON", str(kb_on))
+        kb_off = user_management_keyboard(alerts_enabled=False)
+        self.assertIn("User Alerts: OFF", str(kb_off))
+
 
 if __name__ == "__main__":
     unittest.main()

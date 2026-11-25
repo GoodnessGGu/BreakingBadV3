@@ -52,9 +52,14 @@ def onboarding_disclaimer_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
 
 
-def user_management_keyboard() -> InlineKeyboardMarkup:
+def user_management_keyboard(alerts_enabled: bool = True) -> InlineKeyboardMarkup:
     """Super-administrator user management menu keyboard."""
+    alert_icon = "🟢" if alerts_enabled else "🔴"
+    alert_txt = "ON" if alerts_enabled else "OFF"
     keyboard = [
+        [
+            InlineKeyboardButton(f"{alert_icon} User Alerts: {alert_txt}", callback_data="toggle_user_broadcasts")
+        ],
         [
             InlineKeyboardButton("👥 Refresh User List", callback_data="btn_users_refresh"),
             InlineKeyboardButton("📜 Admin Audit Logs", callback_data="btn_users_audit_logs")

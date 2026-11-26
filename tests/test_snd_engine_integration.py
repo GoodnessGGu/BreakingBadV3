@@ -70,6 +70,11 @@ class TestSNDEngineIntegration(unittest.TestCase):
         self.assertEqual(SND_INSTRUMENT_PROFILES["AUDUSD"]["asset_id"], 99)
         self.assertEqual(SND_INSTRUMENT_PROFILES["USDCAD"]["asset_id"], 100)
 
+    def test_default_disabled(self):
+        default_engine = SNDStrategyEngine(mcp_client=self.mcp)
+        self.assertFalse(default_engine.is_enabled)
+        self.assertFalse(default_engine.get_status()["enabled"])
+
     def test_status_and_toggles(self):
         st = self.engine.get_status()
         self.assertTrue(st["enabled"])

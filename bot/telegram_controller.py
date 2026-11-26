@@ -117,7 +117,8 @@ class TelegramTradingBot:
             symbols=["NZDUSD", "USDJPY", "AUDUSD", "USDCAD"],
             account_type="training",
             lots=lots,
-            leverage=leverage
+            leverage=leverage,
+            enabled=False
         )
         self.snd_engine.set_notification_callback(self.broadcast_alert)
 

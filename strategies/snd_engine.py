@@ -123,7 +123,7 @@ class SNDStrategyEngine:
         account_type: str = "training",
         lots: float = 1.0,
         leverage: int = 100,
-        enabled: bool = True
+        enabled: bool = False
     ):
         self.mcp = mcp_client
         self.account_type = account_type.lower()
@@ -259,7 +259,8 @@ class SNDStrategyEngine:
     async def run_loop(self):
         """Continuous async monitoring loop for active S&D instruments."""
         self.is_running = True
-        logger.info(f"🚀 [SNDEngine] Activated for: {list(self.enabled_symbols)} (Account: {self.account_type})")
+        state_label = "Activated" if self.is_enabled else "Standby (DISABLED)"
+        logger.info(f"🚀 [SNDEngine] {state_label} for: {list(self.enabled_symbols)} (Account: {self.account_type})")
 
         while self.is_running:
             try:

@@ -95,6 +95,7 @@ async def main():
     parser.add_argument("--leverage", type=int, default=int(os.getenv("DEFAULT_LEVERAGE", "100")))
     parser.add_argument("--blitz-stake", type=float, default=float(os.getenv("BLITZ_STAKE", "2.0")))
     parser.add_argument("--enable-polycarp", action="store_true", default=os.getenv("ENABLE_POLYCARP", "false").lower() == "true")
+    parser.add_argument("--enable-snd", action="store_true", default=os.getenv("ENABLE_SND", "false").lower() == "true")
     parser.add_argument("--enable-trendline", action="store_true", default=os.getenv("ENABLE_TRENDLINE", "true").lower() == "true")
     parser.add_argument("--trendline-symbol", default=os.getenv("TRENDLINE_SYMBOL", "XAUUSD"))
     parser.add_argument("--ict-symbol", default=os.getenv("ICT_SYMBOL", "XAUUSD"))
@@ -211,7 +212,8 @@ async def main():
         symbols=["NZDUSD", "USDJPY", "AUDUSD", "USDCAD"],
         account_type=args.account,
         lots=args.lots,
-        leverage=args.leverage
+        leverage=args.leverage,
+        enabled=args.enable_snd
     )
     snd_engine.set_balance(fx_bid, args.account)
 

@@ -17,9 +17,9 @@ import logging
 import asyncio
 import inspect
 from datetime import datetime, timezone
-from typing import Dict, Any, Optional, List, Set, Callable
+from typing import Dict, Any, Optional, List, Set, Callable, Tuple
 import pandas as pd
-from clients.forex_mcp_client import IQForexMCPClient
+from clients.forex_mcp_client import IQForexMCPClient, resolve_dual_ticket_positions
 from gsheet_logger import gsheet_logger
 from utils.chart_generator import (
     generate_ict_setup_chart,
@@ -771,11 +771,30 @@ class ICTStrategyEngine:
             }]
             trade["tickets"] = tickets
 
-        # 1. Resolve missing position_ids from open broker positions
+        # 1. Resolve missing position_ids from open broker positions accurately by take_profit_price
         open_positions = self.mcp.list_positions(balance_id=self.balance_id)
         if open_positions is None:
             logger.warning(f"⚠️ [ICTEngine] list_positions failed for {symbol} - keeping trade active (will retry next tick)")
             return
+
+        if len(tickets) == 2 and any(not t.get("position_id") and t.get("is_open") for t in tickets):
+            tp1_tk = next((t for t in tickets if t.get("is_tp1")), tickets[0])
+            run_tk = next((t for t in tickets if not t.get("is_tp1")), tickets[1])
+            p1_id, p2_id = resolve_dual_ticket_positions(
+                open_positions,
+                asset_id=asset_id,
+                tp1=tp1_tk.get("tp"),
+                tp2=run_tk.get("tp"),
+                order1_id=tp1_tk.get("order_id"),
+                order2_id=run_tk.get("order_id"),
+                fallback_leg1=tp1_tk.get("position_id"),
+                fallback_leg2=run_tk.get("position_id"),
+            )
+            if p1_id and not tp1_tk.get("position_id"):
+                tp1_tk["position_id"] = int(p1_id) if str(p1_id).isdigit() else p1_id
+            if p2_id and not run_tk.get("position_id"):
+                run_tk["position_id"] = int(p2_id) if str(p2_id).isdigit() else p2_id
+
         assigned_pids = {t["position_id"] for t in tickets if t.get("position_id")}
 
         for t in tickets:
@@ -785,8 +804,9 @@ class ICTStrategyEngine:
                         p_id = p.get("position_id") or p.get("id")
                         if p_id in assigned_pids:
                             continue
-                        p_tp = float(p.get("take_profit", 0) or p.get("tp", 0) or 0)
-                        if p_tp > 0 and abs(p_tp - t["tp"]) < 0.2:
+                        p_tp = float(p.get("take_profit_price") or p.get("take_profit") or p.get("tp") or 0)
+                        tp_tol = max(0.2, abs(float(t.get("tp") or 0)) * 0.0005)
+                        if p_tp > 0 and abs(p_tp - t["tp"]) <= tp_tol:
                             t["position_id"] = p_id
                             assigned_pids.add(p_id)
                             break
@@ -794,28 +814,51 @@ class ICTStrategyEngine:
                             t["position_id"] = p_id
                             assigned_pids.add(p_id)
 
-                # Record newly discovered position ID into persistent TradeLedger
-                if t.get("position_id") and hasattr(self, "trade_ledger") and self.trade_ledger and not t.get("ledger_recorded"):
-                    try:
-                        self.trade_ledger.record_open(
-                            position_id=str(t["position_id"]),
-                            strategy="ICT",
-                            symbol=symbol,
-                            side=t["side"],
-                            lots=float(t.get("lots", self.lots)),
-                            entry_price=float(t["entry_price"]),
-                            sl=float(t.get("sl", 0.0)),
-                            tp=float(t.get("tp", 0.0)),
-                            balance_type=self.account_type,
-                            group_id=trade.get("group_id")
-                        )
-                        t["ledger_recorded"] = True
-                    except Exception as tle:
-                        logger.debug(f"[ICTEngine] TradeLedger open record error: {tle}")
+            # Record newly discovered position ID into persistent TradeLedger
+            if t.get("position_id") and hasattr(self, "trade_ledger") and self.trade_ledger and not t.get("ledger_recorded"):
+                try:
+                    self.trade_ledger.record_open(
+                        position_id=str(t["position_id"]),
+                        strategy="ICT",
+                        symbol=symbol,
+                        side=t["side"],
+                        lots=float(t.get("lots", self.lots)),
+                        entry_price=float(t["entry_price"]),
+                        sl=float(t.get("sl", 0.0)),
+                        tp=float(t.get("tp", 0.0)),
+                        balance_type=self.account_type,
+                        group_id=trade.get("group_id")
+                    )
+                    t["ledger_recorded"] = True
+                except Exception as tle:
+                    logger.debug(f"[ICTEngine] TradeLedger open record error: {tle}")
 
         # Sync top-level position_id to runner for backwards compatibility
         runner_tk = next((t for t in tickets if not t["is_tp1"]), tickets[0])
         trade["position_id"] = runner_tk.get("position_id")
+
+        # 1b. Naked-position failsafe: attach missing Stop Loss or close if SL already breached
+        ep_for_sym = "cfd" if symbol in ("XAUUSD", "XAGUSD") else ("crypto" if symbol == "BTCUSD" else "forex")
+        mid_now = cur_prices.get("mid", 0.0)
+        for t in tickets:
+            if not t.get("is_open") or not t.get("position_id"):
+                continue
+            broker_pos = next((p for p in open_positions if str(p.get("position_id") or p.get("id")) == str(t["position_id"])), None)
+            if broker_pos:
+                broker_sl = float(broker_pos.get("stop_lose_price") or broker_pos.get("stop_loss") or broker_pos.get("sl") or 0.0)
+                target_sl = float(t.get("sl") or 0.0)
+                if broker_sl <= 0.0 and target_sl > 0.0:
+                    side_u = str(t.get("side") or trade.get("side", "BUY")).upper()
+                    sl_breached = (mid_now > 0) and (
+                        (side_u == "BUY" and mid_now <= target_sl) or
+                        (side_u == "SELL" and mid_now >= target_sl)
+                    )
+                    if sl_breached:
+                        logger.error(f"🚨 [ICT Naked Failsafe] {symbol} #{t['position_id']} has NO broker SL and price {mid_now} breached SL {target_sl}! Emergency closing...")
+                        self.mcp.close_position(int(t["position_id"]))
+                    else:
+                        logger.warning(f"🛡️ [ICT Naked Failsafe] {symbol} #{t['position_id']} missing broker SL! Attaching SL @ {target_sl}...")
+                        self.mcp.change_position_stop_loss(position_id=int(t["position_id"]), level=target_sl, endpoint=ep_for_sym)
 
         # 2. Check open / closed status of each ticket
         for t in tickets:
@@ -825,18 +868,24 @@ class ICTStrategyEngine:
             if not pos_id:
                 continue
 
-            is_still_open = any((p.get("position_id") or p.get("id")) == pos_id for p in open_positions)
+            is_still_open = any(str(p.get("position_id") or p.get("id")) == str(pos_id) for p in open_positions)
             if not is_still_open:
                 t["is_open"] = False
                 logger.info(f"📊 [ICTEngine] {symbol} {t['tag']} #{pos_id} closed! Syncing Google Sheets...")
-                await self._log_ticket_closure(symbol, t)
+                closed_pnl, closed_reason = await self._log_ticket_closure(symbol, t)
+                t["closed_pnl"] = closed_pnl
+                t["close_reason"] = closed_reason
 
-                # IF TP1 CLOSED: Arm all active runner tickets with persistent pending_be
-                if t.get("is_tp1"):
+                # ONLY arm Runner for Breakeven if Leg 1 (TP1) actually closed in profit / take_profit
+                is_tp1_profit = (
+                    t.get("is_tp1")
+                    and ((closed_pnl is not None and closed_pnl > 0) or str(closed_reason).lower() == "take_profit")
+                )
+                if is_tp1_profit:
                     for r_tk in tickets:
                         if not r_tk.get("is_tp1") and r_tk.get("is_open"):
                             r_tk["pending_be"] = True
-                            logger.info(f"🛡️ [ICT Partial Protection] TP1 closed. Armed Runner #{r_tk.get('position_id')} for Breakeven.")
+                            logger.info(f"🛡️ [ICT Partial Protection] TP1 banked (+${closed_pnl or 0:.2f}). Armed Runner #{r_tk.get('position_id')} for Breakeven.")
 
         # 2b. Continuous Breakeven Retry for armed Runner tickets
         for r_tk in tickets:
@@ -884,7 +933,14 @@ class ICTStrategyEngine:
         # If all tickets closed, cleanup trade
         if all(not t.get("is_open") for t in tickets):
             logger.info(f"🏁 [ICTEngine] {symbol} all legs closed. Trade completed.")
-            tp1_hit = any(t.get("is_tp1") and not t.get("is_open") and t.get("moved_to_be") for t in tickets) or trade.get("moved_to_be", False)
+            tp1_hit = any(
+                t.get("is_tp1") and not t.get("is_open") and (
+                    t.get("moved_to_be")
+                    or ((t.get("closed_pnl") or 0.0) > 0)
+                    or str(t.get("close_reason") or "").lower() == "take_profit"
+                )
+                for t in tickets
+            ) or trade.get("moved_to_be", False)
             if not tp1_hit:
                 self.last_loss_time[symbol] = time.time()
                 self.consecutive_losses[symbol] = self.consecutive_losses.get(symbol, 0) + 1
@@ -1075,16 +1131,16 @@ class ICTStrategyEngine:
                         f"• SL ratcheted to: `{trail_sl:.{digits}f}` (Trailing {trail_dist * pip_multiplier:.1f} pips behind market)"
                     )
 
-    async def _log_ticket_closure(self, symbol: str, ticket: Dict[str, Any], reason_override: Optional[str] = None):
+    async def _log_ticket_closure(self, symbol: str, ticket: Dict[str, Any], reason_override: Optional[str] = None) -> Tuple[Optional[float], str]:
         pos_id = ticket.get("position_id") or ticket.get("order_id")
         if not pos_id:
-            return
+            return None, reason_override or "unknown"
         profile = INSTRUMENT_PROFILES[symbol]
         digits = profile["digits"]
+        reason = reason_override or ("TP1 Partial Hit" if ticket.get("is_tp1") else "closed")
+        pnl = None
         try:
-            pnl = None
             exit_px = 0.0
-            reason = reason_override or ("TP1 Partial Hit" if ticket.get("is_tp1") else "closed")
 
             for attempt in range(3):
                 try:
@@ -1109,7 +1165,7 @@ class ICTStrategyEngine:
 
             if pnl is None:
                 logger.warning(f"⚠️ [ICTEngine] Could not confirm PnL from history for {symbol} #{pos_id} - pending settlement")
-                return
+                return None, reason
 
             # Settle into PropFirmGuardian exactly once per closed ticket
             if hasattr(self, "prop_guardian") and self.prop_guardian:
@@ -1213,8 +1269,10 @@ class ICTStrategyEngine:
                 asyncio.create_task(asyncio.to_thread(gsheet_logger.log_forex_margin_trade, trade_payload))
             except Exception as ge:
                 logger.warning(f"[ICTEngine] GSheet background dispatch error: {ge}")
+            return pnl, reason
         except Exception as e:
             logger.error(f"[ICTEngine] Error logging trade closure for {symbol}: {e}")
+            return pnl, reason
 
     async def _log_trade_closure(self, symbol: str, pos_id: int, reason_override: Optional[str] = None):
         trade = self.active_trades.get(symbol)

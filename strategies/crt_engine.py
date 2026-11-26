@@ -18,7 +18,7 @@ from typing import Optional, Dict, Any, List, Tuple, Set, Callable
 import pandas as pd
 import numpy as np
 
-from clients.forex_mcp_client import IQForexMCPClient
+from clients.forex_mcp_client import IQForexMCPClient, resolve_dual_ticket_positions
 from utils.chart_generator import (
     generate_trade_execution_chart,
     generate_breakeven_chart,
@@ -492,20 +492,25 @@ class CRTStrategyEngine:
         pos1_id = res1.get("position_id") or res1.get("order_id") if isinstance(res1, dict) else None
         pos2_id = res2.get("position_id") or res2.get("order_id") if isinstance(res2, dict) else None
 
-        # Allow broker 1.0s to register actual position IDs
+        # Allow broker 1.0s to register actual position IDs and match by take_profit_price
         await asyncio.sleep(1.0)
         try:
             open_pos = self.mcp.list_positions(balance_id=self.balance_id)
             if open_pos:
-                asset_open = [p for p in open_pos if p.get("asset_id") == asset_id]
-                if len(asset_open) >= 2:
-                    p1 = asset_open[0].get("position_id") or asset_open[0].get("id")
-                    p2 = asset_open[1].get("position_id") or asset_open[1].get("id")
-                    if p1: pos1_id = p1
-                    if p2: pos2_id = p2
-                elif len(asset_open) == 1:
-                    p2 = asset_open[0].get("position_id") or asset_open[0].get("id")
-                    if p2: pos2_id = p2
+                p1, p2 = resolve_dual_ticket_positions(
+                    open_pos,
+                    asset_id=asset_id,
+                    tp1=tp1,
+                    tp2=tp2,
+                    order1_id=pos1_id,
+                    order2_id=pos2_id,
+                    fallback_leg1=pos1_id,
+                    fallback_leg2=pos2_id,
+                )
+                if p1:
+                    pos1_id = p1
+                if p2:
+                    pos2_id = p2
         except Exception as res_err:
             logger.debug(f"[CRTEngine] Post-entry position resolution error: {res_err}")
 
@@ -621,24 +626,30 @@ class CRTStrategyEngine:
         leg1_id = str(trade.get("leg1_pos_id"))
         leg2_id = str(trade.get("leg2_pos_id"))
 
-        # Re-resolve if IDs still match broker open positions by asset_id
+        # Re-resolve if IDs still match broker open positions by asset_id and take_profit_price
         asset_open = [p for p in open_positions if p.get("asset_id") == profile.get("asset_id")]
         if (leg1_id not in open_ids and leg2_id not in open_ids) and asset_open:
-            if len(asset_open) >= 2:
-                p1 = str(asset_open[0].get("position_id") or asset_open[0].get("id"))
-                p2 = str(asset_open[1].get("position_id") or asset_open[1].get("id"))
+            p1, p2 = resolve_dual_ticket_positions(
+                open_positions,
+                asset_id=profile.get("asset_id"),
+                tp1=tp1,
+                tp2=tp2,
+                fallback_leg1=None,
+                fallback_leg2=None,
+            )
+            if p1 and p2:
                 trade["leg1_pos_id"] = p1
                 trade["leg2_pos_id"] = p2
                 leg1_id, leg2_id = p1, p2
                 open_ids.add(p1)
                 open_ids.add(p2)
-            elif len(asset_open) == 1:
-                p2 = str(asset_open[0].get("position_id") or asset_open[0].get("id"))
+            elif p2 or p1:
+                rem_id = p2 or p1
                 trade["leg1_pos_id"] = None
-                trade["leg2_pos_id"] = p2
+                trade["leg2_pos_id"] = rem_id
                 leg1_id = "None"
-                leg2_id = p2
-                open_ids.add(p2)
+                leg2_id = rem_id
+                open_ids.add(rem_id)
 
         leg1_still_open = leg1_id in open_ids and leg1_id != "None"
         leg2_still_open = leg2_id in open_ids and leg2_id != "None"
@@ -657,11 +668,7 @@ class CRTStrategyEngine:
         if not trade.get("tp1_closed"):
             if leg1_id and not leg1_still_open and leg1_id != "None":
                 trade["tp1_closed"] = True
-                trade["leg2_pending_be"] = True
-                logger.info(f"🏆 [CRTEngine] {symbol} Leg 1 (#{leg1_id}) closed! Arming Leg 2 for Breakeven...")
-
-                # Log Leg 1 to Google Sheets
-                await self._log_ticket_closure(
+                closed_pnl, closed_reason = await self._log_ticket_closure(
                     symbol=symbol,
                     tag="Leg 1 (50% TP1)",
                     pos_id=leg1_id,
@@ -671,6 +678,13 @@ class CRTStrategyEngine:
                     tp_px=tp1,
                     default_reason="take_profit"
                 )
+                is_tp1_profit = (closed_pnl is not None and closed_pnl > 0) or str(closed_reason).lower() == "take_profit"
+                if is_tp1_profit:
+                    trade["leg2_pending_be"] = True
+                    trade["tp1_banked"] = True
+                    logger.info(f"🏆 [CRTEngine] {symbol} Leg 1 (#{leg1_id}) banked (+${closed_pnl or 0:.2f})! Arming Leg 2 for Breakeven...")
+                else:
+                    logger.info(f"📉 [CRTEngine] {symbol} Leg 1 (#{leg1_id}) closed via {closed_reason} (${closed_pnl or 0:.2f}). Skipping Breakeven arming.")
 
         # 1b. Continuous Breakeven Retry for Leg 2 (Runner)
         if trade.get("leg2_pending_be") and not trade.get("runner_at_be") and leg2_still_open:
@@ -746,16 +760,17 @@ class CRTStrategyEngine:
         self, symbol: str, tag: str, pos_id: Any, lots: float,
         entry_px: float, sl_px: float, tp_px: float, default_reason: str = "closed",
         reason_override: Optional[str] = None
-    ):
+    ) -> Tuple[Optional[float], str]:
         if not pos_id or str(pos_id) == "None":
-            return
+            return None, reason_override or default_reason
         pid_str = str(pos_id)
         if pid_str in self.logged_trade_ids:
-            return
+            return None, reason_override or default_reason
         self.logged_trade_ids.add(pid_str)
 
         profile = CRT_INSTRUMENT_PROFILES.get(symbol, {})
         digits = profile.get("digits", 5)
+        target_rr = profile.get("target_rr", 2.2)
         trade = self.active_trades.get(symbol) or {}
         side = trade.get("side", "BUY")
 
@@ -787,7 +802,7 @@ class CRTStrategyEngine:
 
         if pnl is None:
             logger.warning(f"⚠️ [CRTEngine] Could not confirm PnL from history for {symbol} #{pid_str} - pending settlement")
-            return
+            return None, reason
 
         # Settle into PropFirmGuardian exactly once per closed position
         if hasattr(self, "prop_guardian") and self.prop_guardian:
@@ -841,7 +856,7 @@ class CRTStrategyEngine:
                     "pnl": pnl,
                     "result": result_str,
                     "pips": round(abs(exit_px - entry_px) * (10 ** (digits - 1)), 1),
-                    "risk_reward": f"{tag} (1:{self.rr_target:.1f} Plan)",
+                    "risk_reward": f"{tag} (1:{target_rr:.1f} Plan)",
                     "exit_reason": reason,
                     "position_id": pid_str,
                     "balance_equity": eq
@@ -850,6 +865,7 @@ class CRTStrategyEngine:
                 logger.info(f"📊 [CRTEngine] Dispatched Google Sheets log for {symbol} #{pid_str} PnL=${pnl:.2f}")
             except Exception as ge:
                 logger.warning(f"[CRTEngine] GSheet dispatch error: {ge}")
+        return pnl, reason
 
     async def _log_trade_closure(self, symbol: str, trade_dict: Any, reason_override: Optional[str] = None):
         trade = self.active_trades.get(symbol) or trade_dict or {}

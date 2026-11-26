@@ -100,6 +100,107 @@ class TokenBucketLimiter:
             return self.PRIORITY_LOW
         return self.PRIORITY_NORMAL
 
+def resolve_dual_ticket_positions(
+    open_positions: Optional[List[Dict[str, Any]]],
+    asset_id: int,
+    tp1: Optional[float] = None,
+    tp2: Optional[float] = None,
+    order1_id: Optional[Any] = None,
+    order2_id: Optional[Any] = None,
+    fallback_leg1: Optional[Any] = None,
+    fallback_leg2: Optional[Any] = None,
+) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Match open broker positions for an asset to Leg 1 (TP1) and Leg 2 (Runner/TP2).
+
+    Priority:
+    1. Exact order_id match when present on broker position objects.
+    2. Closest take_profit_price / take_profit / tp to tp1 vs tp2.
+    3. Chronological order by open_time / position_id ascending (older = Leg 1, newer = Leg 2).
+    """
+    asset_open = [p for p in (open_positions or []) if p.get("asset_id") == asset_id]
+    if not asset_open:
+        return (
+            str(fallback_leg1) if fallback_leg1 is not None and str(fallback_leg1) != "None" else None,
+            str(fallback_leg2) if fallback_leg2 is not None and str(fallback_leg2) != "None" else None,
+        )
+
+    def _pid(p: Dict[str, Any]) -> Optional[str]:
+        val = p.get("position_id") or p.get("id")
+        return str(val) if val is not None else None
+
+    def _tp(p: Dict[str, Any]) -> float:
+        try:
+            return float(p.get("take_profit_price") or p.get("take_profit") or p.get("tp") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    leg1_pid: Optional[str] = None
+    leg2_pid: Optional[str] = None
+    used: set = set()
+
+    o1_str = str(order1_id) if order1_id is not None and str(order1_id) != "None" else None
+    o2_str = str(order2_id) if order2_id is not None and str(order2_id) != "None" else None
+    for p in asset_open:
+        pid = _pid(p)
+        p_oid = str(p.get("order_id")) if p.get("order_id") is not None else None
+        if pid and p_oid:
+            if o1_str and p_oid == o1_str and not leg1_pid:
+                leg1_pid = pid
+                used.add(pid)
+            elif o2_str and p_oid == o2_str and not leg2_pid:
+                leg2_pid = pid
+                used.add(pid)
+
+    remaining = [p for p in asset_open if _pid(p) and _pid(p) not in used]
+    if remaining and tp1 is not None and tp2 is not None and tp1 > 0 and tp2 > 0 and abs(tp1 - tp2) > 0:
+        with_tp = [(p, _tp(p)) for p in remaining if _tp(p) > 0]
+        if len(with_tp) == len(remaining):
+            if len(with_tp) >= 2 and not leg1_pid and not leg2_pid:
+                p_a, tp_a = with_tp[0]
+                p_b, tp_b = with_tp[1]
+                err_ab = abs(tp_a - tp1) + abs(tp_b - tp2)
+                err_ba = abs(tp_b - tp1) + abs(tp_a - tp2)
+                if err_ab <= err_ba:
+                    leg1_pid, leg2_pid = _pid(p_a), _pid(p_b)
+                else:
+                    leg1_pid, leg2_pid = _pid(p_b), _pid(p_a)
+                used.update(x for x in (leg1_pid, leg2_pid) if x)
+            elif len(with_tp) == 1:
+                p_only, tp_only = with_tp[0]
+                pid_only = _pid(p_only)
+                if abs(tp_only - tp1) <= abs(tp_only - tp2) and not leg1_pid:
+                    leg1_pid = pid_only
+                elif not leg2_pid:
+                    leg2_pid = pid_only
+                if pid_only:
+                    used.add(pid_only)
+
+    remaining = [p for p in asset_open if _pid(p) and _pid(p) not in used]
+    if remaining:
+        def _sort_key(p: Dict[str, Any]):
+            try:
+                num_id = int(p.get("position_id") or p.get("id") or 0)
+            except (TypeError, ValueError):
+                num_id = 0
+            return (str(p.get("open_time") or ""), num_id)
+
+        remaining.sort(key=_sort_key)
+        if len(remaining) >= 2 and not leg1_pid and not leg2_pid:
+            leg1_pid = _pid(remaining[0])
+            leg2_pid = _pid(remaining[1])
+        elif len(remaining) == 1:
+            only_pid = _pid(remaining[0])
+            if not leg2_pid and (leg1_pid or fallback_leg1 is None):
+                leg2_pid = only_pid
+            elif not leg1_pid:
+                leg1_pid = only_pid
+
+    fb1 = str(fallback_leg1) if fallback_leg1 is not None and str(fallback_leg1) != "None" else None
+    fb2 = str(fallback_leg2) if fallback_leg2 is not None and str(fallback_leg2) != "None" else None
+    return (leg1_pid or fb1, leg2_pid or fb2)
+
+
 FOREX_ENDPOINTS = {
     "cfd": "https://marginal-cfd.mcp.iqoption.com",
     "forex": "https://marginal-forex.mcp.iqoption.com",
@@ -500,6 +601,11 @@ class IQForexMCPClient:
 
         return self.call_tool("calculate_order_size", args, endpoint=ep)
 
+    def invalidate_position_cache(self):
+        """Clear cached open positions so subsequent lookups fetch fresh broker state."""
+        with self._cache_lock:
+            self._position_cache = None
+
     def place_market_order(self, side: str, balance_id: int, instrument_id: str, asset_id: int,
                            lots: float, leverage: int = 50, stop_loss: Optional[float] = None,
                            take_profit: Optional[float] = None, is_margin_isolated: bool = True,
@@ -559,7 +665,46 @@ class IQForexMCPClient:
                 logger.warning(f"⚠️ [MCP {ep.upper()}] Market order fill failed due to SL/TP constraints ({err_str}). Retrying immediately without initial SL/TP for guaranteed market fill...")
                 clean_args = {k: v for k, v in args.items() if k not in ("stop_loss", "take_profit")}
                 retry_res = self.call_tool("place_market_order", clean_args, endpoint=ep)
+                if isinstance(retry_res, dict) and not retry_res.get("error") and not retry_res.get("isError"):
+                    self.invalidate_position_cache()
+                    oid_or_pid = retry_res.get("position_id") or retry_res.get("order_id")
+                    if oid_or_pid and (stop_loss or take_profit):
+                        time.sleep(0.6)
+                        resolved_pid = self._resolve_actual_position_id(oid_or_pid)
+                        if resolved_pid == oid_or_pid:
+                            try:
+                                open_ps = self.list_positions(balance_id=active_bal_id, endpoint=ep) or []
+                                matching = [p for p in open_ps if p.get("asset_id") == asset_id]
+                                if matching:
+                                    matching.sort(
+                                        key=lambda p: (str(p.get("open_time") or ""), int(p.get("position_id") or p.get("id") or 0)),
+                                        reverse=True,
+                                    )
+                                    resolved_pid = matching[0].get("position_id") or matching[0].get("id") or resolved_pid
+                            except Exception:
+                                pass
+
+                        sl_attached = False
+                        if stop_loss is not None and stop_loss > 0 and resolved_pid:
+                            sl_res = self.change_position_stop_loss(position_id=int(resolved_pid), level=stop_loss, endpoint=ep)
+                            sl_attached = bool(sl_res and not sl_res.get("error") and not sl_res.get("isError"))
+                            if sl_attached:
+                                logger.info(f"🛡️ [MCP {ep.upper()}] Post-fill SL attached to #{resolved_pid} @ {stop_loss}")
+                            else:
+                                logger.error(f"🚨 [MCP {ep.upper()}] Post-fill SL FAILED on #{resolved_pid} @ {stop_loss}: {sl_res}")
+
+                        if take_profit is not None and take_profit > 0 and resolved_pid:
+                            tp_res = self.change_position_take_profit(position_id=int(resolved_pid), level=take_profit, endpoint=ep)
+                            if tp_res and not tp_res.get("error") and not tp_res.get("isError"):
+                                logger.info(f"🎯 [MCP {ep.upper()}] Post-fill TP attached to #{resolved_pid} @ {take_profit}")
+
+                        retry_res["post_fill_sl_attached"] = sl_attached
+                        retry_res["resolved_position_id"] = resolved_pid
+                        self.invalidate_position_cache()
                 return retry_res
+
+        if isinstance(res, dict) and not res.get("error") and not res.get("isError"):
+            self.invalidate_position_cache()
         return res
 
     def _resolve_actual_position_id(self, candidate_id: int) -> int:
@@ -792,6 +937,7 @@ class IQForexMCPClient:
             try:
                 res = self.call_tool("close_position", {"position_id": int(actual_pid)}, endpoint=ep)
                 if res and not res.get("error") and not res.get("isError"):
+                    self.invalidate_position_cache()
                     return res
                 # Check if error indicates already closed / not found
                 err_str = str(res.get("error", "")).lower() + " " + str(res.get("message", "")).lower()

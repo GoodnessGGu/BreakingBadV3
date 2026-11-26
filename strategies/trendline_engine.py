@@ -20,7 +20,7 @@ from typing import Optional, Dict, Any, List, Tuple, Set, Callable
 import pandas as pd
 import numpy as np
 
-from clients.forex_mcp_client import IQForexMCPClient
+from clients.forex_mcp_client import IQForexMCPClient, MCPRateLimitError, resolve_dual_ticket_positions
 from utils.chart_generator import (
     generate_trade_execution_chart,
     generate_breakeven_chart
@@ -224,6 +224,11 @@ class TrendlineStrategyEngine:
                     for symbol in list(self.enabled_symbols):
                         if symbol in TRENDLINE_PROFILES:
                             await self._evaluate_symbol_cycle(symbol)
+            except MCPRateLimitError as rle:
+                wait_s = max(3.0, (getattr(rle, "retry_after_ms", None) or 3000) / 1000.0)
+                logger.warning(f"⚠️ [TrendlineEngine] Broker rate limit encountered ({rle}). Backing off for {wait_s:.1f}s...")
+                await asyncio.sleep(wait_s)
+                continue
             except Exception as e:
                 logger.error(f"[TrendlineEngine] Error in execution cycle: {e}", exc_info=True)
 
@@ -425,13 +430,32 @@ class TrendlineStrategyEngine:
         pos1_id = res1.get("position_id") or res1.get("order_id") if isinstance(res1, dict) else None
         pos2_id = res2.get("position_id") or res2.get("order_id") if isinstance(res2, dict) else None
 
-        # Resolve order IDs to broker position IDs
-        if pos1_id and hasattr(self.mcp, "_resolve_actual_position_id"):
-            resolved1 = self.mcp._resolve_actual_position_id(pos1_id)
-            if resolved1: pos1_id = resolved1
-        if pos2_id and hasattr(self.mcp, "_resolve_actual_position_id"):
-            resolved2 = self.mcp._resolve_actual_position_id(pos2_id)
-            if resolved2: pos2_id = resolved2
+        # Resolve actual broker position IDs accurately by take_profit_price
+        await asyncio.sleep(1.0)
+        try:
+            open_pos = self.mcp.list_positions(balance_id=self.balance_id)
+            if open_pos:
+                p1, p2 = resolve_dual_ticket_positions(
+                    open_pos,
+                    asset_id=asset_id,
+                    tp1=tp1,
+                    tp2=tp2,
+                    order1_id=pos1_id,
+                    order2_id=pos2_id,
+                    fallback_leg1=pos1_id,
+                    fallback_leg2=pos2_id,
+                )
+                if p1:
+                    pos1_id = p1
+                if p2:
+                    pos2_id = p2
+        except Exception:
+            if pos1_id and hasattr(self.mcp, "_resolve_actual_position_id"):
+                resolved1 = self.mcp._resolve_actual_position_id(pos1_id)
+                if resolved1: pos1_id = resolved1
+            if pos2_id and hasattr(self.mcp, "_resolve_actual_position_id"):
+                resolved2 = self.mcp._resolve_actual_position_id(pos2_id)
+                if resolved2: pos2_id = resolved2
 
         if pos1_id: self.placed_position_ids.add(str(pos1_id))
         if pos2_id: self.placed_position_ids.add(str(pos2_id))
@@ -539,25 +563,31 @@ class TrendlineStrategyEngine:
         leg1_id = str(trade.get("leg1_pos_id"))
         leg2_id = str(trade.get("leg2_pos_id"))
 
-        # Re-resolve if IDs still match broker open positions by asset_id
+        # Re-resolve if IDs still match broker open positions by asset_id and take_profit_price
         if leg1_id not in open_ids and leg2_id not in open_ids:
             asset_open = [p for p in open_positions if p.get("asset_id") == profile.get("asset_id")]
             if asset_open:
-                if len(asset_open) >= 2:
-                    p1 = str(asset_open[0].get("position_id") or asset_open[0].get("id"))
-                    p2 = str(asset_open[1].get("position_id") or asset_open[1].get("id"))
+                p1, p2 = resolve_dual_ticket_positions(
+                    open_positions,
+                    asset_id=profile.get("asset_id"),
+                    tp1=tp1,
+                    tp2=tp2,
+                    fallback_leg1=None,
+                    fallback_leg2=None,
+                )
+                if p1 and p2:
                     trade["leg1_pos_id"] = p1
                     trade["leg2_pos_id"] = p2
                     leg1_id, leg2_id = p1, p2
                     open_ids.add(p1)
                     open_ids.add(p2)
-                elif len(asset_open) == 1:
-                    p2 = str(asset_open[0].get("position_id") or asset_open[0].get("id"))
+                elif p2 or p1:
+                    rem_id = p2 or p1
                     trade["leg1_pos_id"] = None
-                    trade["leg2_pos_id"] = p2
+                    trade["leg2_pos_id"] = rem_id
                     leg1_id = "None"
-                    leg2_id = p2
-                    open_ids.add(p2)
+                    leg2_id = rem_id
+                    open_ids.add(rem_id)
 
         leg1_still_open = leg1_id in open_ids and leg1_id != "None"
         leg2_still_open = leg2_id in open_ids and leg2_id != "None"
@@ -566,11 +596,7 @@ class TrendlineStrategyEngine:
         if not trade.get("tp1_closed"):
             if leg1_id and not leg1_still_open and leg1_id != "None":
                 trade["tp1_closed"] = True
-                trade["leg2_pending_be"] = True
-                logger.info(f"🏆 [TrendlineEngine] {symbol} Leg 1 (#{leg1_id}) closed! Arming Leg 2 for Breakeven...")
-
-                # Log Leg 1 closure to Google Sheets
-                await self._log_ticket_closure(
+                closed_pnl, closed_reason = await self._log_ticket_closure(
                     symbol=symbol,
                     tag="Leg 1 (50% TP1)",
                     pos_id=leg1_id,
@@ -580,6 +606,13 @@ class TrendlineStrategyEngine:
                     tp_px=tp1,
                     default_reason="take_profit"
                 )
+                is_tp1_profit = (closed_pnl is not None and closed_pnl > 0) or str(closed_reason).lower() == "take_profit"
+                if is_tp1_profit:
+                    trade["leg2_pending_be"] = True
+                    trade["tp1_banked"] = True
+                    logger.info(f"🏆 [TrendlineEngine] {symbol} Leg 1 (#{leg1_id}) banked (+${closed_pnl or 0:.2f})! Arming Leg 2 for Breakeven...")
+                else:
+                    logger.info(f"📉 [TrendlineEngine] {symbol} Leg 1 (#{leg1_id}) closed via {closed_reason} (${closed_pnl or 0:.2f}). Skipping Breakeven arming.")
 
         # 1b. Continuous Breakeven Retry for Leg 2 (Runner)
         if trade.get("leg2_pending_be") and not trade.get("runner_at_be") and leg2_still_open:
@@ -646,8 +679,8 @@ class TrendlineStrategyEngine:
                     default_reason="stop_loss"
                 )
 
-            # Evaluate outcome: if TP1 never banked, register loss & trigger cooldown
-            if not trade.get("tp1_closed"):
+            # Evaluate outcome: if TP1 never banked profit, register loss & trigger cooldown
+            if not trade.get("tp1_banked", False):
                 self.last_loss_time[symbol] = time.time()
                 self.consecutive_losses[symbol] = self.consecutive_losses.get(symbol, 0) + 1
                 logger.warning(
@@ -665,12 +698,12 @@ class TrendlineStrategyEngine:
         self, symbol: str, tag: str, pos_id: Any, lots: float,
         entry_px: float, sl_px: float, tp_px: float, default_reason: str = "closed",
         reason_override: Optional[str] = None
-    ):
+    ) -> Tuple[Optional[float], str]:
         if not pos_id or str(pos_id) == "None":
-            return
+            return None, reason_override or default_reason
         pid_str = str(pos_id)
         if pid_str in self.logged_trade_ids:
-            return
+            return None, reason_override or default_reason
         self.logged_trade_ids.add(pid_str)
 
         profile = TRENDLINE_PROFILES.get(symbol, {})
@@ -715,7 +748,7 @@ class TrendlineStrategyEngine:
                 "default_reason": default_reason, "reason_override": reason_override,
                 "next_retry": time.time() + 10.0
             })
-            return
+            return None, reason
 
         # Settle into PropFirmGuardian exactly once per closed position
         if hasattr(self, "prop_guardian") and self.prop_guardian:
@@ -780,6 +813,7 @@ class TrendlineStrategyEngine:
                 logger.info(f"📊 [TrendlineEngine] Dispatched Google Sheets log for {sym_label} #{pid_str} PnL=${pnl:.2f}")
             except Exception as ge:
                 logger.warning(f"[TrendlineEngine] GSheet dispatch error: {ge}")
+        return pnl, reason
 
     async def _log_trade_closure(self, symbol: str, pos_id: Any, reason_override: Optional[str] = None):
         trade = self.active_trades.get(symbol)

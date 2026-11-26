@@ -9,6 +9,7 @@ import os
 import json
 import logging
 import time
+import threading
 import requests
 from typing import Dict, Any, Optional, List, Tuple
 from dotenv import load_dotenv
@@ -26,6 +27,11 @@ class IQBlitzMCPClient:
         self.tools: Dict[str, Any] = {}
         self.asset_cache: Dict[str, Any] = {}
         self.last_asset_fetch = 0
+        self._cache_lock = threading.Lock()
+        self._balance_cache: Optional[Tuple[float, List[Dict[str, Any]], str]] = None
+        self._balance_cache_ttl: float = 8.0
+        self._history_cache: Optional[Tuple[float, List[Dict[str, Any]], int]] = None
+        self._history_cache_ttl: float = 15.0
 
         if self.token:
             self._update_auth_header()
@@ -61,7 +67,7 @@ class IQBlitzMCPClient:
         }
 
         try:
-            resp = self.session.post(self.base_url, json=payload, timeout=20)
+            resp = self.session.post(self.base_url, json=payload, timeout=10)
             sess_hdr = resp.headers.get("Mcp-Session-Id") or resp.headers.get("mcp-session-id")
             if sess_hdr and sess_hdr != self.session_id:
                 self.session_id = sess_hdr
@@ -137,7 +143,7 @@ class IQBlitzMCPClient:
             self.session.post(self.base_url, json={
                 "jsonrpc": "2.0",
                 "method": "notifications/initialized"
-            }, timeout=10)
+            }, timeout=5)
         except Exception as e:
             logger.warning(f"Error sending notifications/initialized: {e}")
 
@@ -184,10 +190,27 @@ class IQBlitzMCPClient:
     # High-Level Blitz Options API
     # ==========================================
 
+    def invalidate_caches(self):
+        """Clear cached balances and history after trade mutations."""
+        with self._cache_lock:
+            self._balance_cache = None
+            self._history_cache = None
+
     def list_balances(self, types: str = "ALL") -> List[Dict[str, Any]]:
-        res = self.call_tool("list_balances", {"types": types.upper()})
+        types_key = types.upper()
+        now = time.time()
+        with self._cache_lock:
+            if self._balance_cache is not None:
+                ts, cached_bals, cached_types = self._balance_cache
+                if cached_types == types_key and (now - ts) < self._balance_cache_ttl:
+                    return cached_bals
+
+        res = self.call_tool("list_balances", {"types": types_key})
         if isinstance(res, dict) and "balances" in res:
-            return res["balances"]
+            bals = res["balances"]
+            with self._cache_lock:
+                self._balance_cache = (now, bals, types_key)
+            return bals
         return []
 
     def get_training_balance(self) -> Optional[Dict[str, Any]]:
@@ -195,9 +218,10 @@ class IQBlitzMCPClient:
         for b in balances:
             if b.get("type") == "training":
                 return b
-        for b in self.list_balances("ALL"):
-            if b.get("type") == "training":
-                return b
+        if not balances:
+            for b in self.list_balances("ALL"):
+                if b.get("type") == "training":
+                    return b
         return None
 
     def get_real_balance(self) -> Optional[Dict[str, Any]]:
@@ -291,6 +315,7 @@ class IQBlitzMCPClient:
         }
         logger.info(f"⚡ [Blitz MCP] Placing {direction.upper()} trade: Asset={asset_id}, Amount=${amount}, Payout={profit_percent}%, Exp={expiration_size}s")
         res = self.call_tool("place_trade", args)
+        self.invalidate_caches()
 
         # Retry with fresh payout if stale profit_percent rejected
         if "error" in res and "profit_percent" in str(res["error"]).lower():
@@ -300,7 +325,9 @@ class IQBlitzMCPClient:
                 if a.get("asset_id") == int(asset_id):
                     args["profit_percent"] = int(a.get("profit_percent", profit_percent))
                     logger.info(f"⚡ [Blitz MCP] Retrying with refreshed payout: {args['profit_percent']}%")
-                    return self.call_tool("place_trade", args)
+                    retry_res = self.call_tool("place_trade", args)
+                    self.invalidate_caches()
+                    return retry_res
 
         return res
 
@@ -312,13 +339,27 @@ class IQBlitzMCPClient:
             return res
         return []
 
-    def get_trade_history(self, limit: int = 50) -> List[Dict[str, Any]]:
+    def get_trade_history(self, limit: int = 50, use_cache: bool = True) -> List[Dict[str, Any]]:
+        now = time.time()
+        if use_cache:
+            with self._cache_lock:
+                if self._history_cache is not None:
+                    ts, cached_hist, cached_lim = self._history_cache
+                    if cached_lim >= limit and (now - ts) < self._history_cache_ttl:
+                        return cached_hist[:limit]
+
         res = self.call_tool("get_trade_history", {"limit": limit})
+        hist: List[Dict[str, Any]] = []
         if isinstance(res, dict) and "history" in res:
-            return res["history"]
+            hist = res["history"]
         elif isinstance(res, list):
-            return res
-        return []
+            hist = res
+        if hist or (isinstance(res, dict) and not res.get("error")):
+            with self._cache_lock:
+                self._history_cache = (now, hist, limit)
+        return hist
 
     def sell_position(self, position_id: int) -> Dict[str, Any]:
-        return self.call_tool("sell_position", {"position_id": int(position_id)})
+        res = self.call_tool("sell_position", {"position_id": int(position_id)})
+        self.invalidate_caches()
+        return res

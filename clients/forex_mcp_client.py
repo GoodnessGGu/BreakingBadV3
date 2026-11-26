@@ -230,7 +230,9 @@ class IQForexMCPClient:
         self._position_cache: Optional[Tuple[float, Any, int, int, Any]] = None  # (ts, result, skip, limit, bal_id)
         self._position_cache_ttl: float = 3.0
         self._balance_cache: Optional[Tuple[float, Any, str]] = None  # (ts, result, types)
-        self._balance_cache_ttl: float = 3.0
+        self._balance_cache_ttl: float = 6.0
+        self._asset_cache_fetched_at: float = 0.0
+        self._asset_cache_ttl: float = 3600.0
         self._cache_lock = threading.Lock()
         
         if self.token:
@@ -518,18 +520,34 @@ class IQForexMCPClient:
         return balances[0] if balances else None
 
     def list_assets(self, endpoint: Optional[str] = None) -> List[Dict[str, Any]]:
-        """List all available tradeable assets across endpoints."""
+        """List all available tradeable assets across endpoints (cached for 1h)."""
+        now = time.time()
+        if not endpoint and self.asset_cache and (now - self._asset_cache_fetched_at) < self._asset_cache_ttl:
+            seen_ids = set()
+            cached = []
+            for a in self.asset_cache.values():
+                aid = a.get("asset_id")
+                if aid is not None and aid not in seen_ids:
+                    seen_ids.add(aid)
+                    cached.append(a)
+            return cached
+
         target_eps = [endpoint] if endpoint else ["cfd", "forex", "crypto"]
         all_assets = []
         for ep in target_eps:
-            res = self.call_tool("list_assets", {}, endpoint=ep)
-            if isinstance(res, dict) and "assets" in res:
-                for a in res["assets"]:
-                    clean_name = a.get("name", "").replace("/", "").upper()
-                    self.asset_cache[clean_name] = a
-                    self.asset_cache[a.get("name", "").upper()] = a
-                    self.asset_cache[str(a.get("asset_id"))] = a
-                    all_assets.append(a)
+            try:
+                res = self.call_tool("list_assets", {}, endpoint=ep)
+                if isinstance(res, dict) and "assets" in res:
+                    for a in res["assets"]:
+                        clean_name = a.get("name", "").replace("/", "").upper()
+                        self.asset_cache[clean_name] = a
+                        self.asset_cache[a.get("name", "").upper()] = a
+                        self.asset_cache[str(a.get("asset_id"))] = a
+                        all_assets.append(a)
+            except Exception as e:
+                logger.debug(f"[MCP] Error listing assets on {ep}: {e}")
+        if all_assets and not endpoint:
+            self._asset_cache_fetched_at = now
         return all_assets
 
     def get_asset(self, asset_name_or_id: Any) -> Optional[Dict[str, Any]]:
@@ -602,9 +620,10 @@ class IQForexMCPClient:
         return self.call_tool("calculate_order_size", args, endpoint=ep)
 
     def invalidate_position_cache(self):
-        """Clear cached open positions so subsequent lookups fetch fresh broker state."""
+        """Clear cached open positions and balances so subsequent lookups fetch fresh broker state."""
         with self._cache_lock:
             self._position_cache = None
+            self._balance_cache = None
 
     def place_market_order(self, side: str, balance_id: int, instrument_id: str, asset_id: int,
                            lots: float, leverage: int = 50, stop_loss: Optional[float] = None,

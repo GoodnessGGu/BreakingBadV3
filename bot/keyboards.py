@@ -185,7 +185,7 @@ def history_menu_keyboard(category: str = "all", period: str = "all", page: int 
     # Actions row
     action_row = [
         InlineKeyboardButton("📥 Export CSV", callback_data=f"export_hist_{cat}_{per}"),
-        InlineKeyboardButton("🔄 Refresh", callback_data=f"hist_{cat}_{per}_{pg}")
+        InlineKeyboardButton("🔄 Refresh", callback_data=f"histref_{cat}_{per}_{pg}")
     ]
     if is_admin:
         action_row.append(InlineKeyboardButton("🗑️ Clear History", callback_data="clear_history_prompt"))

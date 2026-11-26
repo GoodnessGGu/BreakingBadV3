@@ -471,7 +471,7 @@ class TradeLedger:
             "max_drawdown": round(max_drawdown, 2)
         }
 
-    def reconcile_with_broker(self, mcp_client: Any, balance_id: Optional[int] = None) -> Dict[str, Any]:
+    def reconcile_with_broker(self, mcp_client: Any, balance_id: Optional[int] = None, max_pages: int = 2) -> Dict[str, Any]:
         """
         Reconcile ledger against broker trade history across all endpoints with pagination.
         Fills rows with NULL pnl, and inserts missing trades as 'Manual/Unattributed'.
@@ -495,7 +495,6 @@ class TradeLedger:
         all_broker_history: List[Dict[str, Any]] = []
         skip = 0
         limit = 50
-        max_pages = 5
         partial_sync = False
 
         for _ in range(max_pages):

@@ -9,7 +9,9 @@ Interactive command center for:
 """
 
 import os
+import re
 import sys
+import time
 import logging
 import asyncio
 import httpx
@@ -28,6 +30,12 @@ from strategies.ict_engine import ICTStrategyEngine, INSTRUMENT_PROFILES
 from clients.forex_mcp_client import IQForexMCPClient
 from clients.blitz_mcp_client import IQBlitzMCPClient
 from bot.trade_ledger import TradeLedger
+from bot.history_formatter import (
+    DEFAULT_SYMBOL_MAP,
+    build_symbol_map_from_assets,
+    format_history_html,
+    format_blitz_history_html,
+)
 from trade_database import db
 from bot.keyboards import (
     main_menu_keyboard, channels_menu_keyboard,
@@ -180,6 +188,15 @@ class TelegramTradingBot:
             for copier in self.channel_mgr.copiers.values():
                 setattr(copier, "trade_ledger", self.trade_ledger)
 
+        # Performance & response-latency caches
+        self._balance_id_cache: Optional[Tuple[str, int, float]] = None
+        self._last_reconcile_ts: float = 0.0
+        self._reconcile_cooldown: float = 15.0
+        self._blitz_history_cache: Optional[Tuple[float, List[Dict[str, Any]]]] = None
+        self._blitz_history_ttl: float = 20.0
+        self._symbol_map_cache: Optional[Tuple[float, Dict[str, str]]] = None
+        self._symbol_map_ttl: float = 3600.0
+
     def is_admin(self, user_id: int) -> bool:
         return int(user_id) == self.admin_id
 
@@ -315,12 +332,32 @@ class TelegramTradingBot:
         except Exception as e:
             logger.error(f"Error dispatching broadcast photo to subscribers: {e}")
 
+    async def _fetch_dual_balances_async(self) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        """Fetch Forex/CFD and Blitz balances concurrently off the event loop."""
+        fx_fn = self.forex_mcp.get_training_balance if self.account_type == "training" else self.forex_mcp.get_real_balance
+        blitz_fn = self.blitz_mcp.get_training_balance if self.account_type == "training" else self.blitz_mcp.get_real_balance
+        res = await asyncio.gather(
+            asyncio.to_thread(fx_fn),
+            asyncio.to_thread(blitz_fn),
+            return_exceptions=True
+        )
+        fx_bal = res[0] if not isinstance(res[0], Exception) else None
+        blitz_bal = res[1] if not isinstance(res[1], Exception) else None
+        return fx_bal, blitz_bal
+
+    async def build_status_text_async(self) -> str:
+        """Non-blocking status builder that fetches Forex and Blitz balances concurrently."""
+        fx_bal, blitz_bal = await self._fetch_dual_balances_async()
+        return self._format_status_text(fx_bal, blitz_bal)
+
     def build_status_text(self) -> str:
         # Fetch balances
         fx_bal = self.forex_mcp.get_training_balance() if self.account_type == "training" else self.forex_mcp.get_real_balance()
-        fx_eq = fx_bal.get("equity", 0.0) if fx_bal else 0.0
-
         blitz_bal = self.blitz_mcp.get_training_balance() if self.account_type == "training" else self.blitz_mcp.get_real_balance()
+        return self._format_status_text(fx_bal, blitz_bal)
+
+    def _format_status_text(self, fx_bal: Optional[Dict[str, Any]], blitz_bal: Optional[Dict[str, Any]]) -> str:
+        fx_eq = fx_bal.get("equity", 0.0) if fx_bal else 0.0
         blitz_amt = blitz_bal.get("amount", 0.0) if blitz_bal else 0.0
 
         # ICT Engine
@@ -559,7 +596,7 @@ class TelegramTradingBot:
             await update.message.reply_text("⛔ Unauthorized. Please send /start to begin onboarding.")
             return
 
-        text = self.build_status_text()
+        text = await self.build_status_text_async()
         kb = main_menu_keyboard(is_admin=True) if self.is_admin(user.id) else investor_main_menu_keyboard()
         await update.message.reply_text(text=text, reply_markup=kb, parse_mode="Markdown")
 
@@ -572,11 +609,9 @@ class TelegramTradingBot:
             await update.message.reply_text("⛔ Unauthorized. Please send /start to begin onboarding.")
             return
 
-        fx_bal = self.forex_mcp.get_training_balance()
+        fx_bal, blitz_bal = await self._fetch_dual_balances_async()
         fx_eq = fx_bal.get("equity", 0.0) if fx_bal else 0.0
-        fx_avail = fx_bal.get("available", fx_bal.get("balance", 0.0)) if fx_bal else 0.0
-
-        blitz_bal = self.blitz_mcp.get_training_balance()
+        fx_avail = fx_bal.get("free_margin", fx_bal.get("available", fx_bal.get("balance", 0.0))) if fx_bal else 0.0
         blitz_amt = blitz_bal.get("amount", 0.0) if blitz_bal else 0.0
 
         msg = (
@@ -1017,11 +1052,18 @@ class TelegramTradingBot:
                 self.start_active_view_refresh_task(update.effective_chat.id, sent_msg.message_id)
 
     def get_active_balance_id(self) -> Optional[int]:
+        now = time.time()
+        if self._balance_id_cache is not None:
+            c_type, c_bid, c_ts = self._balance_id_cache
+            if c_type == self.account_type and (now - c_ts) < 60.0:
+                return c_bid
+
         try:
             bal = self.forex_mcp.get_real_balance() if self.account_type == "regular" else self.forex_mcp.get_training_balance()
             if bal:
                 bid = bal.get("balance_id") or bal.get("id")
                 if bid:
+                    self._balance_id_cache = (self.account_type, int(bid), now)
                     return int(bid)
         except Exception as e:
             logger.debug(f"[ActiveBalance] Error checking active balance: {e}")
@@ -1029,75 +1071,123 @@ class TelegramTradingBot:
             return self.ict_engine.balance_id
         return None
 
-    def build_history_view(
+    def get_cached_symbol_map(self) -> Dict[str, str]:
+        """Return cached {asset_id: symbol} map built from broker metadata & engine profiles."""
+        now = time.time()
+        if self._symbol_map_cache is not None:
+            ts, cached_map = self._symbol_map_cache
+            if (now - ts) < self._symbol_map_ttl and cached_map:
+                return cached_map
+
+        sym_map: Dict[str, str] = dict(DEFAULT_SYMBOL_MAP)
+        for prof_dict in (INSTRUMENT_PROFILES, SND_INSTRUMENT_PROFILES, TRENDLINE_PROFILES):
+            for sym, prof in prof_dict.items():
+                aid = prof.get("asset_id")
+                if aid is not None:
+                    sym_map[str(aid)] = sym
+
+        try:
+            assets: List[Dict[str, Any]] = []
+            if getattr(self.forex_mcp, "asset_cache", None):
+                seen = set()
+                for item in self.forex_mcp.asset_cache.values():
+                    aid = item.get("asset_id")
+                    if aid is not None and aid not in seen:
+                        seen.add(aid)
+                        assets.append(item)
+            elif hasattr(self.forex_mcp, "list_assets"):
+                assets = self.forex_mcp.list_assets() or []
+            sym_map.update(build_symbol_map_from_assets(assets))
+        except Exception as e:
+            logger.debug(f"[SymbolMap] Broker asset map refresh skipped: {e}")
+
+        self._symbol_map_cache = (now, sym_map)
+        return sym_map
+
+    def _sync_ledger_and_blitz(self, category: str, force_sync: bool = False) -> Tuple[str, List[Dict[str, Any]], Dict[str, str]]:
+        """Perform throttled broker reconciliation, Blitz fetch, and symbol map lookup."""
+        now = time.time()
+        sync_note = ""
+        cat_lower = (category or "all").lower()
+
+        if force_sync or (now - self._last_reconcile_ts) >= self._reconcile_cooldown:
+            try:
+                bid = self.get_active_balance_id()
+                if bid and hasattr(self, "trade_ledger") and self.trade_ledger:
+                    recon = self.trade_ledger.reconcile_with_broker(self.forex_mcp, balance_id=bid, max_pages=2)
+                    self._last_reconcile_ts = time.time()
+                    if recon.get("partial_sync"):
+                        sync_note = "Broker sync partial — showing cached ledger."
+            except Exception as e:
+                logger.warning(f"[History] Broker reconcile error: {e}")
+                sync_note = "Broker sync unavailable — showing ledger."
+
+        raw_blitz: List[Dict[str, Any]] = []
+        if cat_lower in ("all", "blitz"):
+            limit = 50 if cat_lower == "blitz" else 20
+            if not force_sync and self._blitz_history_cache is not None:
+                b_ts, b_data = self._blitz_history_cache
+                if (now - b_ts) < self._blitz_history_ttl:
+                    raw_blitz = b_data[:limit]
+            if not raw_blitz and (force_sync or self._blitz_history_cache is None or (now - self._blitz_history_cache[0]) >= self._blitz_history_ttl):
+                try:
+                    fetched = self.blitz_mcp.get_trade_history(limit=50, use_cache=not force_sync) or []
+                    self._blitz_history_cache = (time.time(), fetched)
+                    raw_blitz = fetched[:limit]
+                except Exception as e:
+                    logger.warning(f"[History] Error fetching Blitz history: {e}")
+
+        symbol_map = self.get_cached_symbol_map()
+        return sync_note, raw_blitz, symbol_map
+
+    def _render_history_from_data(
         self,
-        category: str = "all",
-        period: str = "all",
-        page: int = 1,
-        page_size: int = 8
+        category: str,
+        period: str,
+        page: int,
+        page_size: int,
+        sync_note: str,
+        raw_blitz: List[Dict[str, Any]],
+        symbol_map: Dict[str, str],
     ) -> HistoryViewResult:
-        """
-        Fetches and compiles prettified trade history using Persistent Trade Ledger:
-          - Reconciles with broker history across endpoints
-          - Shows attribution strictly from ledger 'strategy' column
-          - Aggregates multi-leg trades (Trendline 2 legs, Gold 2 tickets) as ONE trade
-          - Distinguishes confirmed breakeven vs pending settlement
-          - Keeps Blitz options separate from CFD global totals
-        """
+        """Render formatted HTML history view from local ledger + pre-fetched metadata."""
         cat_lower = (category or "all").lower()
         per_lower = (period or "all").lower()
         cur_page = max(1, page)
-
-        # 1. Reconcile with Broker MCP (Failure-aware)
-        sync_note = ""
-        try:
-            bid = self.get_active_balance_id()
-            if bid and hasattr(self, "trade_ledger") and self.trade_ledger:
-                recon = self.trade_ledger.reconcile_with_broker(self.forex_mcp, balance_id=bid)
-                if recon.get("partial_sync"):
-                    sync_note = "⚠️ _Broker sync incomplete (rate limited / offline). Showing persistent ledger records._\n\n"
-        except Exception as e:
-            logger.warning(f"[History] Broker reconcile error: {e}")
-            sync_note = "⚠️ _Broker sync unavailable. Showing persistent ledger records._\n\n"
 
         # 2. Blitz-only view
         if cat_lower == "blitz":
             blitz_trades = []
             cleared_at = self.trade_ledger.get_cleared_at() if hasattr(self, "trade_ledger") and self.trade_ledger else None
-            try:
-                raw_blitz = self.blitz_mcp.get_trade_history(limit=50) or []
-                for t in raw_blitz:
-                    pos_id = t.get("position_id") or t.get("id", "N/A")
-                    asset = t.get("asset_name") or t.get("active") or f"Asset {t.get('asset_id', '')}"
-                    asset = str(asset).replace("_", " ")
-                    res_str = str(t.get("result", "")).lower()
-                    profit = float(t.get("profit", 0.0))
-                    stake = float(t.get("amount") or t.get("invest") or 0.0)
-                    direction = str(t.get("direction") or t.get("type", "CALL")).upper()
-                    is_win = (res_str == "win" or profit > 0)
-                    is_equal = (res_str == "equal" or (profit == 0 and res_str not in ["loss", "loose"]))
+            for t in raw_blitz:
+                pos_id = t.get("position_id") or t.get("id", "N/A")
+                asset = t.get("asset_name") or t.get("active") or f"ID{t.get('asset_id', '')}"
+                res_str = str(t.get("result", "")).lower()
+                profit = float(t.get("profit", 0.0))
+                stake = float(t.get("amount") or t.get("invest") or 0.0)
+                direction = str(t.get("direction") or t.get("type", "CALL")).upper()
+                is_win = (res_str == "win" or profit > 0)
+                is_equal = (res_str == "equal" or (profit == 0 and res_str not in ["loss", "loose"]))
 
-                    ts_raw = t.get("close_time") or t.get("open_time") or t.get("created_at")
-                    if isinstance(ts_raw, (int, float)):
-                        ts_str = datetime.fromtimestamp(ts_raw, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-                        ts_check = datetime.fromtimestamp(ts_raw, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-                    elif ts_raw:
-                        ts_str = str(ts_raw)
-                        ts_check = str(ts_raw)
-                    else:
-                        ts_str = "--"
-                        ts_check = "--"
+                ts_raw = t.get("close_time") or t.get("open_time") or t.get("created_at")
+                if isinstance(ts_raw, (int, float)):
+                    ts_str = datetime.fromtimestamp(ts_raw, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+                    ts_check = datetime.fromtimestamp(ts_raw, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                elif ts_raw:
+                    ts_str = str(ts_raw)
+                    ts_check = str(ts_raw)
+                else:
+                    ts_str = "--"
+                    ts_check = "--"
 
-                    if cleared_at and ts_check != "--" and ts_check < cleared_at:
-                        continue
+                if cleared_at and ts_check != "--" and ts_check < cleared_at:
+                    continue
 
-                    blitz_trades.append({
-                        "id": pos_id, "asset": asset, "direction": direction,
-                        "stake": stake, "pnl": profit, "is_win": is_win,
-                        "is_equal": is_equal, "time": ts_str
-                    })
-            except Exception as e:
-                logger.warning(f"[History] Error fetching Blitz history: {e}")
+                blitz_trades.append({
+                    "id": pos_id, "asset": asset, "direction": direction,
+                    "stake": stake, "pnl": profit, "is_win": is_win,
+                    "is_equal": is_equal, "time": ts_str
+                })
 
             tot_blitz = len(blitz_trades)
             tot_pages = max(1, (tot_blitz + page_size - 1) // page_size)
@@ -1110,24 +1200,19 @@ class TelegramTradingBot:
             losses = tot_blitz - wins - ties
             net_pnl = sum(t["pnl"] for t in blitz_trades)
             wr = (wins / max(1, wins + losses)) * 100.0 if (wins + losses) > 0 else 0.0
-            pnl_sign = "+" if net_pnl >= 0 else ""
-            pnl_icon = "🟢" if net_pnl >= 0 else "🔴"
 
-            text = (
-                f"⚡ *Blitz Options Execution Ledger*\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"👤 *Account Mode*: `{self.account_type.upper()}` | 📄 *Page*: `{cur_page}/{tot_pages}`\n"
-                f"{pnl_icon} *Realized PnL*: `{pnl_sign}${net_pnl:.2f}`\n"
-                f"🎯 *Win Rate*: `{wr:.1f}%` ({wins}W - {losses}L - {ties}T) | *Count*: `{tot_blitz}`\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            text = format_blitz_history_html(
+                account_type=self.account_type,
+                page=cur_page,
+                total_pages=tot_pages,
+                blitz_trades=page_trades,
+                total_count=tot_blitz,
+                wins=wins,
+                losses=losses,
+                ties=ties,
+                net_pnl=net_pnl,
+                win_rate=wr,
             )
-            if page_trades:
-                for t in page_trades:
-                    icon = "🏆" if t["is_win"] else ("🛡️" if t["is_equal"] else "❌")
-                    t_sign = "+" if t["pnl"] >= 0 else ""
-                    text += f"{icon} `[{t['time']}]` *{t['asset']}* {t['direction']} ➔ `{t_sign}${t['pnl']:.2f}`\n"
-            else:
-                text += "• _No Blitz option trades recorded in session._\n"
             return HistoryViewResult(text, tot_pages)
 
         # 3. CFD / Autonomous / Ledger History
@@ -1154,96 +1239,78 @@ class TelegramTradingBot:
             strategy=strat_arg, period=per_lower, limit=page_size, offset=offset
         )
 
-        pnl_val = stats["net_pnl"]
-        pnl_sign = "+" if pnl_val >= 0 else ""
-        pnl_icon = "🟢" if pnl_val >= 0 else "🔴"
-        filter_label = category.upper() if category != "all" else "ALL STRATEGIES"
-        period_label = per_lower.upper() if per_lower != "all" else "ALL TIME"
+        blitz_summary = None
+        if cat_lower == "all" and raw_blitz:
+            b_wins = sum(1 for b in raw_blitz if (str(b.get("result", "")).lower() == "win" or float(b.get("profit", 0.0)) > 0))
+            b_pnl = sum(float(b.get("profit", 0.0)) for b in raw_blitz)
+            blitz_summary = {
+                "count": len(raw_blitz),
+                "wins": b_wins,
+                "losses": len(raw_blitz) - b_wins,
+                "pnl": b_pnl,
+            }
 
-        header = (
-            f"📜 *Trading Execution & Persistent Ledger*\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"👤 *Account*: `{self.account_type.upper()}` | 🏷️ *Strategy*: `{filter_label}`\n"
-            f"⏱️ *Period*: `{period_label}` | 📄 *Page*: `{cur_page}/{tot_pages}`\n"
-            f"{pnl_icon} *Net Realized PnL*: `{pnl_sign}${pnl_val:.2f}`\n"
-            f"🎯 *Win Rate*: `{stats['win_rate']:.1f}%` ({stats['wins']}W - {stats['losses']}L - {stats['breakevens']}BE)\n"
-            f"📈 *Profit Factor*: `{stats['profit_factor']:.2f}` | *Max DD*: `-${stats['max_drawdown']:.2f}`\n"
-            f"📊 *Closed Trades*: `{stats['total_trades']}` (Gross: +${stats['gross_profit']:.2f} / -${stats['gross_loss']:.2f})\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"{sync_note}"
+        total_text = format_history_html(
+            account_type=self.account_type,
+            category=category,
+            period=per_lower,
+            page=cur_page,
+            total_pages=tot_pages,
+            stats=stats,
+            trades=grouped_trades,
+            symbol_map=symbol_map,
+            blitz_summary=blitz_summary,
+            sync_note=sync_note,
+        )
+        return HistoryViewResult(total_text, tot_pages)
+
+    async def build_history_view_async(
+        self,
+        category: str = "all",
+        period: str = "all",
+        page: int = 1,
+        page_size: int = 12,
+        force_sync: bool = False,
+    ) -> HistoryViewResult:
+        """Non-blocking history builder that runs broker sync & Blitz fetch off the event loop."""
+        sync_note, raw_blitz, symbol_map = await asyncio.to_thread(
+            self._sync_ledger_and_blitz, category, force_sync
+        )
+        return self._render_history_from_data(
+            category=category,
+            period=period,
+            page=page,
+            page_size=page_size,
+            sync_note=sync_note,
+            raw_blitz=raw_blitz,
+            symbol_map=symbol_map,
         )
 
-        body = ""
-        if grouped_trades:
-            for t in grouped_trades:
-                legs = t.get("legs", [])
-                has_unconfirmed = t.get("has_unconfirmed_pnl", False)
-                pnl = t.get("pnl", 0.0)
-                symbol = t.get("symbol", "UNKNOWN")
-                side = t.get("side", "BUY")
-                lots = t.get("total_lots", 1.0)
-                raw_strat = t.get("strategy", "Unknown")
-                strat_l = str(raw_strat).lower()
-                if "callisto" in strat_l:
-                    strategy = "Gold Zone"
-                elif "gold" in strat_l:
-                    strategy = "Gold Scalp"
-                elif "gsociety" in strat_l or "society" in strat_l:
-                    strategy = "Gold Breakout"
-                elif "king" in strat_l:
-                    strategy = "Gold Swing"
-                elif "polycarp" in strat_l:
-                    strategy = "Blitz Option"
-                elif strat_l in ("cfd", "copier", "copiers"):
-                    strategy = "Gold Setup"
-                else:
-                    strategy = raw_strat
-
-                exit_reason = t.get("exit_reason", "closed")
-                close_time = t.get("close_time_utc", "--")
-
-                if has_unconfirmed:
-                    icon = "⏳"
-                    pnl_str = "Pending Settlement"
-                elif pnl == 0.0:
-                    icon = "🛡️"
-                    pnl_str = "$0.00 [BREAKEVEN]"
-                elif pnl > 0.0:
-                    icon = "🏆"
-                    pnl_str = f"+${pnl:.2f}"
-                else:
-                    icon = "❌"
-                    pnl_str = f"-${abs(pnl):.2f}"
-
-                if len(legs) > 1:
-                    body += f"{icon} `[{close_time}]` *{symbol}* {side} `{lots:.2f}L` ➔ `{pnl_str}` ({exit_reason}) [*{strategy}* - {len(legs)} legs]\n"
-                    for leg in legs:
-                        lpnl = leg.get("pnl")
-                        lpnl_str = f"+${lpnl:.2f}" if lpnl is not None and lpnl >= 0 else (f"-${abs(lpnl):.2f}" if lpnl is not None else "Pending")
-                        body += f"    └─ Leg #{leg.get('position_id')}: `{leg.get('lots')}L` @ `{leg.get('entry_price')}` ➔ `{leg.get('exit_price')}` (`{lpnl_str}`)\n"
-                else:
-                    body += f"{icon} `[{close_time}]` *{symbol}* {side} `{lots:.2f}L` ➔ `{pnl_str}` ({exit_reason}) [*{strategy}*]\n"
-        else:
-            body += "• _No closed trades recorded matching this filter._\n"
-
-        # Show concise Blitz summary when category is "all"
-        if cat_lower == "all":
-            try:
-                raw_blitz = self.blitz_mcp.get_trade_history(limit=20) or []
-                if raw_blitz:
-                    b_wins = sum(1 for b in raw_blitz if (str(b.get("result", "")).lower() == "win" or float(b.get("profit", 0.0)) > 0))
-                    b_pnl = sum(float(b.get("profit", 0.0)) for b in raw_blitz)
-                    b_sign = "+" if b_pnl >= 0 else ""
-                    body += f"\n⚡ *Blitz Options Total*: `{b_sign}${b_pnl:.2f}` ({b_wins}W - {len(raw_blitz)-b_wins}L, {len(raw_blitz)} options)\n"
-            except Exception:
-                pass
-
-        total_text = header + "\n" + body
-        # Ensure under 4000 characters for Telegram limit
-        if len(total_text) > 4000:
-            total_text = total_text[:3950] + "\n\n_...(truncated for Telegram length)_"
-
-        return HistoryViewResult(total_text, tot_pages)
+    def build_history_view(
+        self,
+        category: str = "all",
+        period: str = "all",
+        page: int = 1,
+        page_size: int = 12,
+        force_sync: bool = False,
+    ) -> HistoryViewResult:
+        """
+        Fetches and compiles compact HTML trade history using Persistent Trade Ledger:
+          - Reconciles with broker history across endpoints (with short-TTL throttle)
+          - Resolves numeric asset IDs via cached broker symbol map
+          - Groups trades by strategy with <pre> fixed-width columns (<=38 chars wide)
+          - Places Blitz Options summary directly under header stats
+        """
+        sync_note, raw_blitz, symbol_map = self._sync_ledger_and_blitz(category, force_sync=force_sync)
+        return self._render_history_from_data(
+            category=category,
+            period=period,
+            page=page,
+            page_size=page_size,
+            sync_note=sync_note,
+            raw_blitz=raw_blitz,
+            symbol_map=symbol_map,
+        )
 
     async def cmd_history(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
@@ -1265,7 +1332,7 @@ class TelegramTradingBot:
             if len(context.args) > 2 and context.args[2].isdigit():
                 pg = int(context.args[2])
 
-        res = self.build_history_view(cat, period=per, page=pg)
+        res = await self.build_history_view_async(cat, period=per, page=pg)
         msg = str(res)
         tot_pages = getattr(res, "total_pages", 1)
         is_adm = self.is_admin(user.id) if user else False
@@ -1273,13 +1340,14 @@ class TelegramTradingBot:
         try:
             await update.message.reply_text(
                 msg,
-                parse_mode="Markdown",
+                parse_mode="HTML",
                 reply_markup=kb
             )
         except Exception as e:
-            logger.warning(f"Markdown error sending history: {e}. Retrying without markdown.")
+            logger.warning(f"HTML error sending history: {e}. Retrying plain text.")
+            plain_msg = re.sub(r"<[^>]+>", "", msg)
             await update.message.reply_text(
-                msg,
+                plain_msg,
                 reply_markup=kb
             )
 
@@ -2314,7 +2382,7 @@ class TelegramTradingBot:
             return
 
         elif data == "btn_investor_menu":
-            text = self.build_status_text()
+            text = await self.build_status_text_async()
             await query.edit_message_text(text=text, reply_markup=investor_main_menu_keyboard(), parse_mode="Markdown")
             return
 
@@ -2329,7 +2397,7 @@ class TelegramTradingBot:
             return
 
         investor_allowed_prefixes = (
-            "btn_status", "btn_main_menu", "btn_investor_menu", "hist_", "history_cat_",
+            "btn_status", "btn_main_menu", "btn_investor_menu", "hist_", "histref_", "history_cat_", "btn_history_menu",
             "btn_active_trades", "btn_news_menu", "btn_sessions", "btn_mission_menu",
             "btn_snd_menu", "btn_trendline_menu", "btn_crt_menu", "btn_ict_menu",
             "btn_prop_menu", "btn_disclaimer", "btn_view_config", "btn_accept_disclaimer"
@@ -2349,12 +2417,12 @@ class TelegramTradingBot:
 
         # Main Navigation
         if data == "btn_main_menu":
-            text = self.build_status_text()
+            text = await self.build_status_text_async()
             kb = main_menu_keyboard(is_admin=True) if self.is_admin(user.id) else investor_main_menu_keyboard()
             await query.edit_message_text(text=text, reply_markup=kb, parse_mode="Markdown")
 
         elif data == "btn_status":
-            text = self.build_status_text()
+            text = await self.build_status_text_async()
             kb = main_menu_keyboard(is_admin=True) if self.is_admin(user.id) else investor_main_menu_keyboard()
             await query.edit_message_text(text=text, reply_markup=kb, parse_mode="Markdown")
 
@@ -2378,8 +2446,11 @@ class TelegramTradingBot:
             )
 
         # History Menu & Filtering (Addendum A)
-        elif data.startswith("hist_") or data.startswith("history_cat_"):
-            if data.startswith("history_cat_"):
+        elif data.startswith("hist_") or data.startswith("histref_") or data.startswith("history_cat_") or data == "btn_history_menu":
+            force_sync = data.startswith("histref_")
+            if data == "btn_history_menu":
+                cat, per, pg = "all", "today", 1
+            elif data.startswith("history_cat_"):
                 cat = data.replace("history_cat_", "")
                 per = "all"
                 pg = 1
@@ -2389,7 +2460,7 @@ class TelegramTradingBot:
                 per = parts[2] if len(parts) > 2 else "all"
                 pg = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 1
 
-            res = self.build_history_view(cat, period=per, page=pg)
+            res = await self.build_history_view_async(cat, period=per, page=pg, force_sync=force_sync)
             txt = str(res)
             tot_pages = getattr(res, "total_pages", 1)
             is_adm = self.is_admin(user.id)
@@ -2398,12 +2469,15 @@ class TelegramTradingBot:
                 await query.edit_message_text(
                     txt,
                     reply_markup=kb,
-                    parse_mode="Markdown"
+                    parse_mode="HTML"
                 )
             except Exception as e:
-                logger.warning(f"Markdown error in history button callback: {e}. Retrying without markdown.")
+                if "Message is not modified" in str(e):
+                    return
+                logger.warning(f"HTML error in history button callback: {e}. Retrying plain text.")
+                plain_txt = re.sub(r"<[^>]+>", "", txt)
                 await query.edit_message_text(
-                    txt,
+                    plain_txt,
                     reply_markup=kb
                 )
 
@@ -2436,9 +2510,9 @@ class TelegramTradingBot:
             db.clear_trades_before_today()
             user_manager.log_admin_action(user.id, "clear_trade_history", "Cleared pre-today trades, retaining only today via Telegram button")
             await query.answer("🧹 Cleared pre-today trades! Retaining only today's trades.", show_alert=True)
-            res = self.build_history_view(category="all", period="today", page=1)
+            res = await self.build_history_view_async(category="all", period="today", page=1, force_sync=False)
             kb = history_menu_keyboard(category="all", period="today", page=1, total_pages=res.total_pages, is_admin=True)
-            await query.edit_message_text(str(res), reply_markup=kb, parse_mode="Markdown")
+            await query.edit_message_text(str(res), reply_markup=kb, parse_mode="HTML")
             return
 
         elif data.startswith("export_hist_"):

@@ -7,11 +7,46 @@ import os
 import json
 import re
 import html
+import argparse
 from datetime import datetime
 
-TRANSCRIPT_PATH = r"C:\Users\GushEx\.gemini\antigravity-cli\brain\bb7d6c48-dde8-453e-8628-0fdb3514d0ff\.system_generated\logs\transcript_full.jsonl"
-OUT_MD = r"C:\Users\GushEx\Documents\IQOPTIONS BOT\BreakingBadV3\CHAT_HISTORY_EXPORT.md"
-OUT_HTML = r"C:\Users\GushEx\Documents\IQOPTIONS BOT\BreakingBadV3\CHAT_HISTORY_EXPORT.html"
+DEFAULT_TRANSCRIPT = "/root/.gemini/antigravity-cli/brain/adf0bd6b-4a7c-49e6-aadd-c263becd35bb/.system_generated/logs/transcript_full.jsonl"
+DEFAULT_OUT_MD = os.path.join(os.path.dirname(os.path.abspath(__file__)), "CHAT_HISTORY_EXPORT_PART2.md")
+DEFAULT_OUT_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "CHAT_HISTORY_EXPORT_PART2.html")
+
+ENV_SECRET_KEYS = (
+    "TELEGRAM_TOKEN", "TELEGRAM_BOT_TOKEN", "TELEGRAM_STRING_SESSION",
+    "TELEGRAM_API_ID", "TELEGRAM_API_HASH", "API_ID", "API_HASH",
+    "GEMINI_API_KEY", "OPENAI_API_KEY", "GOOGLE_SHEET_ID",
+    "GOOGLE_SERVICE_ACCOUNT_JSON", "IQ_AI_TOKEN", "IQ_PASSWORD",
+    "RAILWAY_TOKEN", "STRING_SESSION", "PHONE_NUMBER",
+)
+
+
+def redact_secrets(text: str) -> str:
+    """Scrub API keys, tokens, session strings, and .env secrets before repo export."""
+    if not text:
+        return text
+    out = text
+    # Redact KEY=VALUE lines for sensitive environment variables
+    key_alt = "|".join(ENV_SECRET_KEYS)
+    out = re.sub(
+        rf"(?im)^(\s*(?:export\s+)?(?:{key_alt})\s*[:=]\s*)(.+)$",
+        r"\1[REDACTED]",
+        out,
+    )
+    # Redact inline bot tokens, Google keys, Bearer tokens, and long Telethon sessions
+    out = re.sub(r"\b\d{8,12}:[A-Za-z0-9_-]{30,}\b", "[REDACTED_BOT_TOKEN]", out)
+    out = re.sub(r"\bAIza[A-Za-z0-9_-]{30,}\b", "[REDACTED_API_KEY]", out)
+    out = re.sub(r"(Bearer\s+)[A-Za-z0-9_.-]{20,}", r"\1[REDACTED_TOKEN]", out)
+    out = re.sub(r"\bghp_[A-Za-z0-9]{20,}\b", "[REDACTED_TOKEN]", out)
+    out = re.sub(r"\bsk-[A-Za-z0-9_-]{20,}\b", "[REDACTED_TOKEN]", out)
+    out = re.sub(r"\b1vYkKqMX[A-Za-z0-9_-]{20,}\b", "[REDACTED_SHEET_ID]", out)
+    out = re.sub(r"\b3ULv3En8[A-Za-z0-9_-]{20,}\b", "[REDACTED_TOKEN]", out)
+    out = re.sub(r"\b1BVts[A-Za-z0-9+/=_-]{60,}\b", "[REDACTED_SESSION]", out)
+    out = re.sub(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----", "[REDACTED_PRIVATE_KEY]", out)
+    return out
+
 
 def parse_transcript(file_path):
     turns = []
@@ -34,9 +69,12 @@ def parse_transcript(file_path):
                     m = re.search(r"<USER_REQUEST>\s*(.*?)\s*</USER_REQUEST>", content, re.DOTALL)
                     user_text = m.group(1).strip() if m else content.strip()
                 else:
-                    user_text = content.strip()
-                
-                # Clean up prompt wrappers if present
+                    user_text = re.sub(r"<ADDITIONAL_METADATA>.*?</ADDITIONAL_METADATA>", "", content, flags=re.DOTALL).strip()
+
+                user_text = redact_secrets(user_text)
+                if not user_text:
+                    continue
+
                 turns.append({
                     "role": "user",
                     "time": created_at,
@@ -45,14 +83,15 @@ def parse_transcript(file_path):
 
             elif t_type == "PLANNER_RESPONSE" and source == "MODEL":
                 if content and content.strip():
+                    cleaned = redact_secrets(content.strip())
                     if turns and turns[-1]["role"] == "assistant":
-                        if content.strip() != turns[-1]["text"]:
-                            turns[-1]["text"] += "\n\n" + content.strip()
+                        if cleaned != turns[-1]["text"]:
+                            turns[-1]["text"] += "\n\n" + cleaned
                     else:
                         turns.append({
                             "role": "assistant",
                             "time": created_at,
-                            "text": content.strip()
+                            "text": cleaned
                         })
     return turns
 
@@ -253,7 +292,7 @@ def generate_html(turns, out_path):
     </div>
 
     <script>
-        const chatData = {json.dumps(turns, ensure_ascii=False)};
+        const chatData = {json.dumps(turns, ensure_ascii=False).replace("</", "<\\/")};
         const container = document.getElementById('chat-stream');
 
         chatData.forEach((turn, idx) => {{
@@ -291,6 +330,12 @@ def generate_html(turns, out_path):
     print(f"[OK] HTML export saved to: {out_path}")
 
 if __name__ == "__main__":
-    turns = parse_transcript(TRANSCRIPT_PATH)
-    generate_markdown(turns, OUT_MD)
-    generate_html(turns, OUT_HTML)
+    parser = argparse.ArgumentParser(description="Export redacted Antigravity conversation history.")
+    parser.add_argument("--transcript", default=DEFAULT_TRANSCRIPT)
+    parser.add_argument("--out-md", default=DEFAULT_OUT_MD)
+    parser.add_argument("--out-html", default=DEFAULT_OUT_HTML)
+    args = parser.parse_args()
+
+    turns = parse_transcript(args.transcript)
+    generate_markdown(turns, args.out_md)
+    generate_html(turns, args.out_html)

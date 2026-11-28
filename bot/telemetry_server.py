@@ -5,11 +5,12 @@ Exposes:
   - GET / and GET /health : Lightweight HTTP health check (JSON)
   - GET /ws/live?token=... : Authenticated read-only WebSocket telemetry stream
 
-Security:
+Security & Sync:
   - Strictly read-only observer: no trade execution, closing, or settings mutation routes.
   - Requires DASHBOARD_API_TOKEN (or WS_API_TOKEN) matched via constant-time comparison.
   - Redacts bot tokens and bearer secrets from all streamed log lines.
-  - Only polls broker MCP caches when at least one authenticated client is connected.
+  - Reconciles/reads live broker balance, open positions, and closed trade history
+    (IQ Option Marginal CFD/Forex/Crypto + Blitz + shared TradeLedger) when clients connect.
 """
 
 import os
@@ -26,21 +27,9 @@ from typing import Any, Dict, List, Optional, Set
 from aiohttp import web, WSMsgType
 
 from bot.trade_ledger import TradeLedger
+from bot.history_formatter import DEFAULT_SYMBOL_MAP, resolve_symbol_name
 
 logger = logging.getLogger("TelemetryServer")
-
-ASSET_ID_TO_SYMBOL = {
-    1: "EURUSD",
-    5: "GBPUSD",
-    6: "USDJPY",
-    8: "NZDUSD",
-    74: "XAUUSD",
-    99: "AUDUSD",
-    100: "USDCAD",
-    816: "BTCUSD",
-    1471: "NAS100",
-    1487: "XAGUSD",
-}
 
 
 def _redact_secrets(text: str) -> str:
@@ -86,14 +75,13 @@ class TelemetryLogHandler(logging.Handler):
         super().__init__(level=logging.INFO)
         self.buffer: deque = deque(maxlen=maxlen)
         self._seq = 0
-        self._pending: deque = deque(maxlen=40)
 
     def emit(self, record: logging.LogRecord):
         try:
             msg = _redact_secrets(record.getMessage())
             meta = _infer_log_engine_and_tag(record.name, msg)
             self._seq += 1
-            entry = {
+            entry: Dict[str, Any] = {
                 "id": f"srv-log-{self._seq}",
                 "time": datetime.fromtimestamp(record.created, tz=timezone.utc).strftime("%H:%M:%S"),
                 "tag": meta["tag"],
@@ -103,25 +91,77 @@ class TelemetryLogHandler(logging.Handler):
             if meta["engine"]:
                 entry["engine"] = meta["engine"]
             self.buffer.appendleft(entry)
-            self._pending.append(entry)
         except Exception:
             pass
 
-    def pop_pending(self) -> List[Dict[str, Any]]:
-        items = list(self._pending)
-        self._pending.clear()
-        return items
 
-
-def _pip_size_for(symbol: str) -> float:
-    s = symbol.upper()
-    if "XAU" in s or "XAG" in s:
-        return 0.1
+def _calculate_pips(symbol: str, open_px: float, cur_px: float, side: str) -> float:
+    """Matches TelegramTradingBot.calculate_pips exactly."""
+    if open_px <= 0 or cur_px <= 0:
+        return 0.0
+    diff = (cur_px - open_px) if side.upper() in ("BUY", "LONG") else (open_px - cur_px)
+    s = str(symbol).upper().replace("/", "").replace("-", "")
+    if "XAU" in s or "GOLD" in s or s == "74":
+        return round(diff * 10.0, 1)
+    if "XAG" in s or "SILVER" in s or s in ("1487", "54"):
+        return round(diff * 100.0, 1)
     if "JPY" in s:
-        return 0.01
-    if "BTC" in s or "NAS" in s:
-        return 1.0
-    return 0.0001
+        return round(diff * 100.0, 1)
+    if any(k in s for k in ("BTC", "ETH", "SOL", "XRP", "NAS100", "US100", "US500", "OIL", "WTI", "BRENT")):
+        return round(diff, 1)
+    return round(diff * 10000.0, 1)
+
+
+def _normalize_engine_code(raw_strategy: str) -> str:
+    s = (raw_strategy or "").upper()
+    if "ICT" in s or "TREND" in s or "STRADDLE" in s:
+        return "ICT"
+    if "SND" in s or "S&D" in s:
+        return "S&D"
+    if "CRT" in s:
+        return "CRT"
+    if any(k in s for k in ("CALLISTO", "GOLD", "GSOCIETY", "KING", "POLY", "VIP", "COPIER", "BLITZ")):
+        return "VIP"
+    return "CFD"
+
+
+def _parse_iso_or_epoch(val: Any) -> Optional[datetime]:
+    if val is None or val == "":
+        return None
+    if isinstance(val, (int, float)):
+        ts = val / 1000.0 if val > 1e11 else float(val)
+        try:
+            return datetime.fromtimestamp(ts, tz=timezone.utc)
+        except Exception:
+            return None
+    s = str(val).strip()
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        pass
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            return datetime.strptime(s, fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            pass
+    return None
+
+
+def _format_duration(open_dt: Optional[datetime], close_dt: Optional[datetime]) -> str:
+    if not open_dt or not close_dt:
+        return "Closed"
+    secs = max(0, int((close_dt - open_dt).total_seconds()))
+    if secs < 60:
+        return f"{secs}s"
+    mins = secs // 60
+    if mins < 60:
+        return f"{mins}m"
+    hours = mins // 60
+    rem_mins = mins % 60
+    return f"{hours}h {rem_mins}m" if rem_mins else f"{hours}h"
 
 
 class TelemetryServer:
@@ -149,10 +189,15 @@ class TelemetryServer:
 
         self.clients: Set[web.WebSocketResponse] = set()
         self.log_handler = TelemetryLogHandler(maxlen=60)
-        self.ledger = TradeLedger()
+        self.ledger = getattr(tg_bot, "trade_ledger", None) or TradeLedger()
         self._runner: Optional[web.AppRunner] = None
         self._running = False
         self._handler_attached = False
+
+        # Short-TTL cache for broker trade history so we don't spam MCP every 3s
+        self._history_cache_ts: float = 0.0
+        self._history_cache_ttl: float = 20.0
+        self._history_cache_trades: List[Dict[str, Any]] = []
 
     def _get_expected_token(self) -> str:
         return (
@@ -177,27 +222,32 @@ class TelemetryServer:
             return False
         return hmac.compare_digest(candidate, expected)
 
-    def _resolve_symbol(self, raw_pos: Dict[str, Any]) -> str:
-        aid = raw_pos.get("asset_id")
-        if aid is not None:
+    def _get_symbol_map(self) -> Dict[str, str]:
+        if self.tg_bot and hasattr(self.tg_bot, "get_cached_symbol_map"):
             try:
-                aid_int = int(aid)
-                if aid_int in ASSET_ID_TO_SYMBOL:
-                    return ASSET_ID_TO_SYMBOL[aid_int]
-            except (ValueError, TypeError):
-                pass
-        if self.tg_bot and hasattr(self.tg_bot, "resolve_asset_name"):
-            try:
-                resolved = self.tg_bot.resolve_asset_name(aid)
-                if resolved:
-                    return str(resolved).replace("/", "").upper()
+                return self.tg_bot.get_cached_symbol_map()
             except Exception:
                 pass
-        name = raw_pos.get("symbol") or raw_pos.get("instrument_id") or aid or "UNKNOWN"
-        return str(name).replace("/", "").upper()
+        return dict(DEFAULT_SYMBOL_MAP)
 
-    def _resolve_engine_for_position(self, pos_id: Any) -> str:
+    def _resolve_symbol(self, raw_pos: Dict[str, Any], symbol_map: Dict[str, str]) -> str:
+        raw_sym = raw_pos.get("symbol") or raw_pos.get("asset_name") or raw_pos.get("active")
+        if raw_sym:
+            return resolve_symbol_name(raw_sym, symbol_map)
+        aid = raw_pos.get("asset_id")
+        if aid is not None:
+            resolved = resolve_symbol_name(str(aid), symbol_map)
+            if resolved and not resolved.startswith("ID"):
+                return resolved
+        inst = raw_pos.get("instrument_id")
+        if inst:
+            return resolve_symbol_name(str(inst), symbol_map)
+        return "UNKNOWN"
+
+    def _resolve_engine_for_position(self, pos_id: Any, pair: str, ledger_open_map: Dict[str, str]) -> str:
         pid_str = str(pos_id)
+
+        # 1. Check live in-memory engine active_trades
         for code, eng in (
             ("ICT", self.ict_engine),
             ("CRT", self.crt_engine),
@@ -214,24 +264,41 @@ class TelemetryServer:
                         if str(leg.get("position_id")) == pid_str or str(leg.get("order_id")) == pid_str:
                             return code
 
+        # 2. Check channel copiers
         if self.channel_mgr and hasattr(self.channel_mgr, "copiers"):
             for _, copier in (self.channel_mgr.copiers or {}).items():
                 open_pos = getattr(copier, "open_positions", {}) or {}
                 for oid, opos in open_pos.items():
                     if str(oid) == pid_str or str(opos.get("position_id")) == pid_str:
                         return "VIP"
-        return "BOT"
 
-    def _build_strategies_payload(self) -> List[Dict[str, Any]]:
+        # 3. Check persisted TradeLedger open trades (survives container restarts if volume/DB kept)
+        if pid_str in ledger_open_map:
+            return _normalize_engine_code(ledger_open_map[pid_str])
+
+        # 4. Infer from configured strategy symbol assignments
+        for code, eng in (
+            ("ICT", self.ict_engine),
+            ("CRT", self.crt_engine),
+            ("S&D", self.snd_engine),
+            ("ICT", self.trendline_engine),
+        ):
+            syms = getattr(eng, "enabled_symbols", None) or set()
+            if pair in syms:
+                return code
+
+        return "CFD"
+
+    def _build_strategies_payload(self, mapped_positions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         ict_active = bool(self.ict_engine and getattr(self.ict_engine, "is_enabled", False))
         snd_active = bool(self.snd_engine and getattr(self.snd_engine, "is_enabled", False))
         crt_active = bool(self.crt_engine and getattr(self.crt_engine, "is_enabled", False))
         vip_active = bool(self.channel_mgr and getattr(self.channel_mgr, "is_running", False))
 
-        def _count_open(eng: Any) -> int:
-            if not eng or not hasattr(eng, "active_trades"):
-                return 0
-            return sum(1 for v in (eng.active_trades or {}).values() if v)
+        open_by_eng: Dict[str, int] = {}
+        for p in mapped_positions:
+            code = p.get("engine", "")
+            open_by_eng[code] = open_by_eng.get(code, 0) + 1
 
         ict_syms = ", ".join(sorted(getattr(self.ict_engine, "enabled_symbols", []) or []))
         snd_syms = ", ".join(sorted(getattr(self.snd_engine, "enabled_symbols", []) or []))
@@ -243,7 +310,7 @@ class TelemetryServer:
                 "id": "ict",
                 "code": "ICT",
                 "name": "ICT Engine",
-                "status": "ACTIVE" if _count_open(self.ict_engine) > 0 else ("SCANNING" if ict_active else "IDLE"),
+                "status": "ACTIVE" if open_by_eng.get("ICT", 0) > 0 else ("SCANNING" if ict_active else "IDLE"),
                 "subModel": f"Smart Money FVG ({ict_syms or 'XAUUSD'})",
                 "confidence": 86 if ict_active else 0,
             },
@@ -251,7 +318,7 @@ class TelemetryServer:
                 "id": "snd",
                 "code": "S&D",
                 "name": "S&D Engine",
-                "status": "ACTIVE" if _count_open(self.snd_engine) > 0 else ("SCANNING" if snd_active else "IDLE"),
+                "status": "ACTIVE" if open_by_eng.get("S&D", 0) > 0 else ("SCANNING" if snd_active else "IDLE"),
                 "subModel": f"Supply/Demand Imbalances ({snd_syms or 'FX'})",
                 "confidence": 81 if snd_active else 0,
             },
@@ -259,7 +326,7 @@ class TelemetryServer:
                 "id": "crt",
                 "code": "CRT",
                 "name": "CRT Engine",
-                "status": "ACTIVE" if _count_open(self.crt_engine) > 0 else ("SCANNING" if crt_active else "IDLE"),
+                "status": "ACTIVE" if open_by_eng.get("CRT", 0) > 0 else ("SCANNING" if crt_active else "IDLE"),
                 "subModel": f"Candle Range Theory ({crt_syms or 'EURUSD'})",
                 "confidence": 74 if crt_active else 0,
             },
@@ -273,8 +340,163 @@ class TelemetryServer:
             },
         ]
 
+    def _fetch_broker_closed_trades(self, balance_id: Optional[int], symbol_map: Dict[str, str]) -> List[Dict[str, Any]]:
+        now = time.time()
+        if self._history_cache_trades and (now - self._history_cache_ts) < self._history_cache_ttl:
+            return self._history_cache_trades
+
+        # Build strategy lookup from TradeLedger (if available)
+        ledger_by_pid: Dict[str, Dict[str, Any]] = {}
+        try:
+            for row in self.ledger.get_closed_trades(limit=100, offset=0):
+                pid = str(row.get("position_id") or "")
+                if pid:
+                    ledger_by_pid[pid] = row
+        except Exception as e:
+            logger.debug(f"[Telemetry] Ledger read warning: {e}")
+
+        merged: List[Dict[str, Any]] = []
+        seen_ids: Set[str] = set()
+
+        # 1. Direct IQ Option Marginal CFD/Forex/Crypto history (authoritative broker records)
+        if balance_id and self.forex_mcp:
+            try:
+                broker_hist = self.forex_mcp.get_trade_history(balance_id=balance_id, skip=0, limit=50) or []
+                for b in broker_hist:
+                    pid = str(b.get("position_id") or b.get("id") or b.get("order_id") or "")
+                    if not pid or pid in seen_ids:
+                        continue
+                    seen_ids.add(pid)
+
+                    ledger_row = ledger_by_pid.get(pid, {})
+                    pair = (
+                        resolve_symbol_name(ledger_row["symbol"], symbol_map)
+                        if ledger_row.get("symbol")
+                        else self._resolve_symbol(b, symbol_map)
+                    )
+                    side = str(b.get("side") or b.get("direction") or ledger_row.get("side") or "BUY").upper()
+                    if side == "LONG":
+                        side = "BUY"
+                    elif side == "SHORT":
+                        side = "SELL"
+
+                    entry_px = float(b.get("open_price") or b.get("entry_price") or ledger_row.get("entry_price") or 0.0)
+                    exit_px = float(b.get("close_price") or b.get("exit_price") or ledger_row.get("exit_price") or entry_px)
+
+                    pnl = 0.0
+                    for k in ("pnl", "profit", "pnl_net", "isolated_pnl_net", "close_profit"):
+                        if b.get(k) is not None:
+                            try:
+                                pnl = float(b.get(k))
+                                break
+                            except (ValueError, TypeError):
+                                pass
+                    if pnl == 0.0 and ledger_row.get("pnl") is not None:
+                        pnl = float(ledger_row["pnl"])
+
+                    pips = _calculate_pips(pair, entry_px, exit_px, side) if entry_px > 0 and exit_px > 0 else 0.0
+                    result = "WIN" if pnl > 0.01 else ("LOSS" if pnl < -0.01 else "BREAKEVEN")
+                    raw_strat = ledger_row.get("strategy") or ""
+                    eng = _normalize_engine_code(raw_strat) if raw_strat else self._resolve_engine_for_position(pid, pair, {})
+
+                    open_dt = _parse_iso_or_epoch(b.get("open_time") or ledger_row.get("open_time_utc"))
+                    close_dt = _parse_iso_or_epoch(b.get("close_time") or b.get("time") or ledger_row.get("close_time_utc"))
+
+                    merged.append({
+                        "id": pid,
+                        "pair": pair,
+                        "engine": eng,
+                        "type": side if side in ("BUY", "SELL") else "BUY",
+                        "result": result,
+                        "pnl": round(pnl, 2),
+                        "pips": pips,
+                        "rMultiple": round(pnl / 50.0, 2),
+                        "exitReason": str(b.get("close_reason") or ledger_row.get("exit_reason") or "Closed"),
+                        "closedAt": close_dt.strftime("%m-%d %H:%M:%S") if close_dt else "--:--:--",
+                        "closedDate": close_dt.strftime("%Y-%m-%d") if close_dt else "",
+                        "_sortTs": close_dt.timestamp() if close_dt else 0.0,
+                        "duration": _format_duration(open_dt, close_dt),
+                    })
+            except Exception as e:
+                logger.debug(f"[Telemetry] Broker trade history fetch warning: {e}")
+
+        # 2. Include Blitz Options history if Blitz MCP is connected
+        blitz_mcp = getattr(self.tg_bot, "blitz_mcp", None) if self.tg_bot else None
+        if blitz_mcp:
+            try:
+                blitz_hist = blitz_mcp.get_trade_history(limit=25, use_cache=True) or []
+                for bt in blitz_hist:
+                    pid = f"blitz-{bt.get('position_id') or bt.get('id') or len(merged)}"
+                    if pid in seen_ids:
+                        continue
+                    seen_ids.add(pid)
+                    pair = resolve_symbol_name(
+                        bt.get("asset_name") or bt.get("active") or bt.get("asset_id") or "BLITZ",
+                        symbol_map,
+                    )
+                    profit = float(bt.get("profit") or 0.0)
+                    res_str = str(bt.get("result") or "").lower()
+                    result = "WIN" if (res_str == "win" or profit > 0.01) else ("LOSS" if (res_str in ("loss", "loose") or profit < -0.01) else "BREAKEVEN")
+                    close_dt = _parse_iso_or_epoch(bt.get("close_time") or bt.get("open_time") or bt.get("created_at"))
+                    direction = str(bt.get("direction") or bt.get("type") or "BUY").upper()
+                    side = "SELL" if direction in ("PUT", "SELL", "SHORT") else "BUY"
+
+                    merged.append({
+                        "id": pid,
+                        "pair": pair,
+                        "engine": "VIP",
+                        "type": side,
+                        "result": result,
+                        "pnl": round(profit, 2),
+                        "pips": 0.0,
+                        "rMultiple": round(profit / max(1.0, float(bt.get("amount") or bt.get("invest") or 2.0)), 2),
+                        "exitReason": "Blitz Expiry",
+                        "closedAt": close_dt.strftime("%m-%d %H:%M:%S") if close_dt else "--:--:--",
+                        "closedDate": close_dt.strftime("%Y-%m-%d") if close_dt else "",
+                        "_sortTs": close_dt.timestamp() if close_dt else 0.0,
+                        "duration": "1m",
+                    })
+            except Exception as e:
+                logger.debug(f"[Telemetry] Blitz history fetch warning: {e}")
+
+        # 3. Fallback to TradeLedger rows if broker history failed
+        if not merged and ledger_by_pid:
+            for pid, t in ledger_by_pid.items():
+                pnl = float(t.get("pnl") or 0.0)
+                entry_px = float(t.get("entry_price") or 0.0)
+                exit_px = float(t.get("exit_price") or entry_px)
+                pair = resolve_symbol_name(str(t.get("symbol") or "UNKNOWN"), symbol_map)
+                side = str(t.get("side") or "BUY").upper()
+                close_dt = _parse_iso_or_epoch(t.get("close_time_utc"))
+                open_dt = _parse_iso_or_epoch(t.get("open_time_utc"))
+                merged.append({
+                    "id": pid,
+                    "pair": pair,
+                    "engine": _normalize_engine_code(str(t.get("strategy") or "CFD")),
+                    "type": side if side in ("BUY", "SELL") else "BUY",
+                    "result": "WIN" if pnl > 0.01 else ("LOSS" if pnl < -0.01 else "BREAKEVEN"),
+                    "pnl": round(pnl, 2),
+                    "pips": _calculate_pips(pair, entry_px, exit_px, side) if entry_px > 0 else 0.0,
+                    "rMultiple": round(pnl / 50.0, 2),
+                    "exitReason": str(t.get("exit_reason") or "Closed"),
+                    "closedAt": close_dt.strftime("%m-%d %H:%M:%S") if close_dt else "--:--:--",
+                    "closedDate": close_dt.strftime("%Y-%m-%d") if close_dt else "",
+                    "_sortTs": close_dt.timestamp() if close_dt else 0.0,
+                    "duration": _format_duration(open_dt, close_dt),
+                })
+
+        merged.sort(key=lambda x: x.get("_sortTs", 0.0), reverse=True)
+        for item in merged:
+            item.pop("_sortTs", None)
+
+        self._history_cache_trades = merged[:40]
+        self._history_cache_ts = now
+        return self._history_cache_trades
+
     def _collect_snapshot_sync(self) -> Dict[str, Any]:
         acct = getattr(self.tg_bot, "account_type", self.account_type) if self.tg_bot else self.account_type
+        symbol_map = self._get_symbol_map()
+
         bal_info = None
         try:
             bal_info = (
@@ -289,6 +511,15 @@ class TelemetryServer:
         raw_amount = float(bal_info.get("amount", 0.0)) if isinstance(bal_info, dict) else 0.0
         raw_equity = float(bal_info.get("equity", raw_amount)) if isinstance(bal_info, dict) else 0.0
 
+        ledger_open_map: Dict[str, str] = {}
+        try:
+            for row in self.ledger.get_open_trades():
+                pid = str(row.get("position_id") or "")
+                if pid:
+                    ledger_open_map[pid] = str(row.get("strategy") or "")
+        except Exception:
+            pass
+
         raw_positions = []
         if bid:
             try:
@@ -299,7 +530,7 @@ class TelemetryServer:
         mapped_positions: List[Dict[str, Any]] = []
         for p in raw_positions:
             pid = p.get("position_id") or p.get("id")
-            pair = self._resolve_symbol(p)
+            pair = self._resolve_symbol(p, symbol_map)
             side = str(p.get("side") or p.get("type", "BUY")).upper()
             if side == "LONG":
                 side = "BUY"
@@ -322,29 +553,25 @@ class TelemetryServer:
                         pass
             pnl = round(pnl_val or 0.0, 2)
 
-            pip_sz = _pip_size_for(pair)
-            dir_sign = 1 if side == "BUY" else -1
-            pips = round(((current - entry) / pip_sz) * dir_sign, 1) if entry > 0 and current > 0 else 0.0
-
+            pips = _calculate_pips(pair, entry, current, side)
             if sl <= 0:
                 sl = entry
             if tp <= 0:
                 tp = entry
 
+            dir_sign = 1 if side == "BUY" else -1
             risk_dist = abs(entry - sl)
-            if risk_dist > 0 and current > 0:
-                r_mult = round(((current - entry) * dir_sign) / risk_dist, 2)
-            else:
-                r_mult = 0.0
+            r_mult = round(((current - entry) * dir_sign) / risk_dist, 2) if (risk_dist > 0 and current > 0) else 0.0
 
             be_locked = (side == "BUY" and sl >= entry) or (side == "SELL" and sl <= entry and sl > 0)
             stage_level = 2 if be_locked else 1
             stage_label = "Stage 2: Breakeven" if be_locked else "Stage 1: Open"
+            engine_code = self._resolve_engine_for_position(pid, pair, ledger_open_map)
 
             mapped_positions.append({
                 "id": str(pid),
                 "pair": pair,
-                "engine": self._resolve_engine_for_position(pid),
+                "engine": engine_code,
                 "type": side,
                 "lot": round(lots, 2),
                 "entry": entry,
@@ -358,49 +585,15 @@ class TelemetryServer:
                 "stage": stage_label,
                 "stageLevel": stage_level,
                 "openedAt": str(p.get("open_time") or "")[:19] or datetime.now(timezone.utc).strftime("%H:%M:%S"),
-                "thesis": f"Live IQ Option {acct.upper()} position #{pid}",
+                "thesis": f"Live IQ Option {acct.upper()} ({engine_code}) position #{pid}",
             })
 
-        # Closed trades & equity curve from TradeLedger
-        closed_rows = []
-        try:
-            closed_rows = self.ledger.get_closed_trades(limit=35, offset=0)
-        except Exception as e:
-            logger.debug(f"[Telemetry] Ledger fetch warning: {e}")
+        mapped_closed = self._fetch_broker_closed_trades(bid, symbol_map)
 
-        mapped_closed: List[Dict[str, Any]] = []
-        for t in closed_rows:
-            pnl = float(t.get("pnl") or 0.0)
-            entry_px = float(t.get("entry_price") or 0.0)
-            exit_px = float(t.get("exit_price") or entry_px)
-            sym = str(t.get("symbol") or "UNKNOWN").replace("/", "").upper()
-            side = str(t.get("side") or "BUY").upper()
-            pip_sz = _pip_size_for(sym)
-            dir_sign = 1 if side == "BUY" else -1
-            pips = round(((exit_px - entry_px) / pip_sz) * dir_sign, 1) if entry_px > 0 else 0.0
-            result = "WIN" if pnl > 0.01 else ("LOSS" if pnl < -0.01 else "BREAKEVEN")
-            strat_raw = str(t.get("strategy") or "BOT").upper()
-            eng = "ICT" if "ICT" in strat_raw else ("S&D" if "SND" in strat_raw else ("CRT" if "CRT" in strat_raw else "VIP"))
-
-            mapped_closed.append({
-                "id": str(t.get("position_id") or len(mapped_closed)),
-                "pair": sym,
-                "engine": eng,
-                "type": side if side in ("BUY", "SELL") else "BUY",
-                "result": result,
-                "pnl": round(pnl, 2),
-                "pips": pips,
-                "rMultiple": round(pnl / 50.0, 2),
-                "exitReason": str(t.get("exit_reason") or "Closed"),
-                "closedAt": str(t.get("close_time_utc") or "")[-8:] or "--:--:--",
-                "duration": "Live",
-            })
-
-        # Build equity curve backwards from current balance using closed trades
-        curve: List[Dict[str, Any]] = []
-        running_bal = raw_amount if raw_amount > 0 else 10000.0
+        # Build equity curve chronologically ending at live equity
         rev_pts: List[Dict[str, Any]] = []
-        for t in mapped_closed[:25]:
+        running_bal = raw_amount if raw_amount > 0 else 4000.0
+        for t in mapped_closed[:30]:
             rev_pts.append({
                 "time": t["closedAt"],
                 "equity": round(running_bal, 2),
@@ -409,29 +602,29 @@ class TelemetryServer:
             })
             running_bal -= t["pnl"]
         rev_pts.reverse()
+        if raw_equity > 0:
+            rev_pts.append({
+                "time": "Now",
+                "equity": round(raw_equity, 2),
+                "pnl": round(raw_equity - raw_amount, 2),
+                "drawdownPct": 0.0,
+            })
+
         peak = 0.0
         for pt in rev_pts:
             if pt["equity"] > peak:
                 peak = pt["equity"]
             pt["drawdownPct"] = round(((peak - pt["equity"]) / peak) * 100, 2) if peak > 0 else 0.0
-        if not rev_pts:
-            rev_pts.append({
-                "time": datetime.now(timezone.utc).strftime("%H:%M:%S"),
-                "equity": round(raw_equity or raw_amount, 2),
-                "pnl": 0.0,
-                "drawdownPct": 0.0,
-            })
-        curve = rev_pts
 
         return {
             "type": "snapshot",
             "accountType": acct,
             "balance": round(raw_amount, 2),
             "equity": round(raw_equity, 2),
-            "strategies": self._build_strategies_payload(),
+            "strategies": self._build_strategies_payload(mapped_positions),
             "positions": mapped_positions,
             "closedTrades": mapped_closed,
-            "equityCurve": curve,
+            "equityCurve": rev_pts,
             "logs": list(self.log_handler.buffer),
             "timestamp": int(time.time() * 1000),
         }
@@ -489,12 +682,9 @@ class TelemetryServer:
             try:
                 await asyncio.sleep(3.0)
                 if not self.clients:
-                    self.log_handler.pop_pending()
                     continue
 
                 snapshot = await asyncio.to_thread(self._collect_snapshot_sync)
-                # Pop pending incremental logs to avoid re-queuing
-                self.log_handler.pop_pending()
                 payload = json.dumps(snapshot)
 
                 dead: List[web.WebSocketResponse] = []

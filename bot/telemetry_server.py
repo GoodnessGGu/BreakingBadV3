@@ -47,7 +47,7 @@ def _infer_log_engine_and_tag(logger_name: str, message: str) -> Dict[str, Optio
     if "crt" in lname:
         return {"engine": "CRT", "tag": "CRT_ENGINE"}
     if "trendline" in lname:
-        return {"engine": "ICT", "tag": "TRENDLINE"}
+        return {"engine": "TREND", "tag": "TRENDLINE"}
     if "channel" in lname or "copier" in lname or "callisto" in lname or "gold" in lname:
         return {"engine": "VIP", "tag": "VIP_FEED"}
     if "propfirm" in lname or "guardian" in lname:
@@ -114,7 +114,9 @@ def _calculate_pips(symbol: str, open_px: float, cur_px: float, side: str) -> fl
 
 def _normalize_engine_code(raw_strategy: str) -> str:
     s = (raw_strategy or "").upper()
-    if "ICT" in s or "TREND" in s or "STRADDLE" in s:
+    if "TREND" in s or s == "TL":
+        return "TREND"
+    if "ICT" in s or "STRADDLE" in s:
         return "ICT"
     if "SND" in s or "S&D" in s:
         return "S&D"
@@ -252,7 +254,7 @@ class TelemetryServer:
             ("ICT", self.ict_engine),
             ("CRT", self.crt_engine),
             ("S&D", self.snd_engine),
-            ("ICT", self.trendline_engine),
+            ("TREND", self.trendline_engine),
         ):
             if eng and hasattr(eng, "active_trades"):
                 for _, t in (eng.active_trades or {}).items():
@@ -276,12 +278,14 @@ class TelemetryServer:
         if pid_str in ledger_open_map:
             return _normalize_engine_code(ledger_open_map[pid_str])
 
-        # 4. Infer from configured strategy symbol assignments
+        # 4. Infer from exclusive/configured strategy symbol assignments
+        if pair in ("NAS100", "US100"):
+            return "TREND"
         for code, eng in (
             ("ICT", self.ict_engine),
             ("CRT", self.crt_engine),
             ("S&D", self.snd_engine),
-            ("ICT", self.trendline_engine),
+            ("TREND", self.trendline_engine),
         ):
             syms = getattr(eng, "enabled_symbols", None) or set()
             if pair in syms:
@@ -291,6 +295,7 @@ class TelemetryServer:
 
     def _build_strategies_payload(self, mapped_positions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         ict_active = bool(self.ict_engine and getattr(self.ict_engine, "is_enabled", False))
+        trend_active = bool(self.trendline_engine and getattr(self.trendline_engine, "is_enabled", False))
         snd_active = bool(self.snd_engine and getattr(self.snd_engine, "is_enabled", False))
         crt_active = bool(self.crt_engine and getattr(self.crt_engine, "is_enabled", False))
         vip_active = bool(self.channel_mgr and getattr(self.channel_mgr, "is_running", False))
@@ -301,6 +306,7 @@ class TelemetryServer:
             open_by_eng[code] = open_by_eng.get(code, 0) + 1
 
         ict_syms = ", ".join(sorted(getattr(self.ict_engine, "enabled_symbols", []) or []))
+        trend_syms = ", ".join(sorted(getattr(self.trendline_engine, "enabled_symbols", []) or []))
         snd_syms = ", ".join(sorted(getattr(self.snd_engine, "enabled_symbols", []) or []))
         crt_syms = ", ".join(sorted(getattr(self.crt_engine, "enabled_symbols", []) or []))
         copier_count = len(getattr(self.channel_mgr, "copiers", {}) or {})
@@ -315,12 +321,12 @@ class TelemetryServer:
                 "confidence": 86 if ict_active else 0,
             },
             {
-                "id": "snd",
-                "code": "S&D",
-                "name": "S&D Engine",
-                "status": "ACTIVE" if open_by_eng.get("S&D", 0) > 0 else ("SCANNING" if snd_active else "IDLE"),
-                "subModel": f"Supply/Demand Imbalances ({snd_syms or 'FX'})",
-                "confidence": 81 if snd_active else 0,
+                "id": "trend",
+                "code": "TREND",
+                "name": "Trendline Engine",
+                "status": "ACTIVE" if open_by_eng.get("TREND", 0) > 0 else ("SCANNING" if trend_active else "IDLE"),
+                "subModel": f"15M Bounce Model ({trend_syms or 'NAS100, XAUUSD'})",
+                "confidence": 82 if trend_active else 0,
             },
             {
                 "id": "crt",
@@ -329,6 +335,14 @@ class TelemetryServer:
                 "status": "ACTIVE" if open_by_eng.get("CRT", 0) > 0 else ("SCANNING" if crt_active else "IDLE"),
                 "subModel": f"Candle Range Theory ({crt_syms or 'EURUSD'})",
                 "confidence": 74 if crt_active else 0,
+            },
+            {
+                "id": "snd",
+                "code": "S&D",
+                "name": "S&D Engine",
+                "status": "ACTIVE" if open_by_eng.get("S&D", 0) > 0 else ("SCANNING" if snd_active else "IDLE"),
+                "subModel": f"Supply/Demand Imbalances ({snd_syms or 'FX'})",
+                "confidence": 81 if snd_active else 0,
             },
             {
                 "id": "vip",
@@ -361,7 +375,7 @@ class TelemetryServer:
         # 1. Direct IQ Option Marginal CFD/Forex/Crypto history (authoritative broker records)
         if balance_id and self.forex_mcp:
             try:
-                broker_hist = self.forex_mcp.get_trade_history(balance_id=balance_id, skip=0, limit=50) or []
+                broker_hist = self.forex_mcp.get_trade_history(balance_id=balance_id, skip=0, limit=100) or []
                 for b in broker_hist:
                     pid = str(b.get("position_id") or b.get("id") or b.get("order_id") or "")
                     if not pid or pid in seen_ids:
@@ -374,7 +388,15 @@ class TelemetryServer:
                         if ledger_row.get("symbol")
                         else self._resolve_symbol(b, symbol_map)
                     )
-                    side = str(b.get("side") or b.get("direction") or ledger_row.get("side") or "BUY").upper()
+                    side_raw = (
+                        b.get("side")
+                        or b.get("direction")
+                        or b.get("type")
+                        or (b.get("raw_event") or {}).get("type")
+                        or ledger_row.get("side")
+                        or "BUY"
+                    )
+                    side = str(side_raw).upper()
                     if side == "LONG":
                         side = "BUY"
                     elif side == "SHORT":
@@ -489,7 +511,7 @@ class TelemetryServer:
         for item in merged:
             item.pop("_sortTs", None)
 
-        self._history_cache_trades = merged[:40]
+        self._history_cache_trades = merged[:100]
         self._history_cache_ts = now
         return self._history_cache_trades
 

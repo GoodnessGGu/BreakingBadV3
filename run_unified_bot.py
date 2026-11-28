@@ -41,6 +41,7 @@ from strategies.crt_engine import CRTStrategyEngine
 from strategies.snd_engine import SNDStrategyEngine
 from strategies.trendline_engine import TrendlineStrategyEngine
 from bot.telegram_controller import TelegramTradingBot
+from bot.telemetry_server import TelemetryServer
 
 class SensitiveTokenFilter(logging.Filter):
     """Redacts Telegram bot tokens and bearer credentials from all log outputs."""
@@ -263,7 +264,19 @@ async def main():
         tg_bot.straddle_engine.set_notification_callback(tg_bot.broadcast_alert)
         tg_bot.straddle_engine.set_photo_notification_callback(tg_bot.broadcast_photo)
 
-    # 10. Start Concurrent Execution
+    # 10. Create Read-Only Telemetry Server (Railway PORT /ws/live + /health)
+    telemetry_server = TelemetryServer(
+        forex_mcp=forex_mcp,
+        channel_mgr=channel_mgr,
+        ict_engine=ict_engine,
+        crt_engine=crt_engine,
+        snd_engine=snd_engine,
+        trendline_engine=trendline_engine,
+        tg_bot=tg_bot,
+        account_type=args.account,
+    )
+
+    # 11. Start Concurrent Execution
     logger.info("=" * 65)
     logger.info("🟢 ALL MODULES INITIALIZED — STARTING MASTER EVENT LOOP")
     logger.info("=" * 65)
@@ -275,11 +288,13 @@ async def main():
             ict_engine.run_loop(),
             crt_engine.run_loop(),
             snd_engine.run_loop(),
-            trendline_engine.run_loop()
+            trendline_engine.run_loop(),
+            telemetry_server.start(),
         )
     except (asyncio.CancelledError, KeyboardInterrupt):
         logger.info("Shutting down master bot...")
     finally:
+        await telemetry_server.stop()
         await tg_bot.stop()
         await channel_mgr.stop()
         logger.info("All components stopped.")
